@@ -1,0 +1,62 @@
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# =====================
+# Virtual Environments
+# =====================
+venv/
+.env/
+.venv/
+env/
+ENV/
+
+# =====================
+# Logs
+# =====================
+*.log
+logs/
+translation.log
+
+# =====================
+# Config / Secrets
+# =====================
+config.yaml
+config.yml
+*.secrets.*
+*.key
+*.env
+
+# =====================
+# EPUB / Generated files
+# =====================
+*.epub
+output/
+translated/
+cache/
+
+# =====================
+# Editor / OS
+# =====================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =====================
+# TQDM / Runtime temp
+# =====================
+*.tmp
+*.bak
+*.retry
