@@ -11,7 +11,6 @@ from ..logging_utils import log_text
 DEFAULT_MODEL = "gpt-5-mini-2025-08-07"
 DEFAULT_BATCH_COMPLETION_WINDOW = "24h"
 DEFAULT_BATCH_POLL_INTERVAL_SECONDS = 10
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RETRIES = 1
 BATCH_ENDPOINT = "/v1/chat/completions"
 
@@ -23,7 +22,6 @@ class OpenAIEngine(TranslationEngine):
         # ✅ DIRECT OPENAI
         self.client = OpenAI(
             api_key=api_key,
-            timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
             max_retries=DEFAULT_MAX_RETRIES,
         )
 

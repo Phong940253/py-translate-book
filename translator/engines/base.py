@@ -27,8 +27,8 @@ Rules:
 - Preserve special characters.
 - Do NOT add markdown or code fences.
 """
-        prompt += "Dịch truyện thuần Việt, tất cả từ được dịch đều phải là tiếng Việt không tồn tại bất kỳ từ tiếng Trung nào.\n"
-        prompt += "Đối với tên riêng của nhân vật, địa danh, tổ chức, thuật ngữ đặc biệt, hãy dịch Hán Việt nếu có thể. Nếu không có Hán Việt, hãy giữ nguyên tên gốc.\n"
+        prompt += "Dịch truyện thuần Việt, tất cả từ được dịch đều phải là tiếng Việt KHÔNG ĐƯỢC tồn tại bất kỳ từ tiếng Trung nào.\n"
+        prompt += "Đối với tên riêng của nhân vật, địa danh, tổ chức, thuật ngữ đặc biệt, hãy dịch Hán Việt nếu có thể.\n"
         prompt += "VD: Wei Xiao nên dịch chứ không giữ nguyên tên gốc.\n"
         prompt += "Câu truyện hài hước kể về nhân vật nam chính xuyên không tới thế giới tu tiên và có hệ thống bất tử.\n"
         prompt += "Một số chapter bị thêm vào cuối câu tên trang web để tránh bản quyền, hãy loại bỏ phần tên trang web đó và chỉ dịch nội dung câu truyện.\n"
