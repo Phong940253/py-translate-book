@@ -91,7 +91,7 @@ def main():
     else:
         raise ValueError(f"Unsupported engine: {args.engine}")
 
-    translator = Translator(engine, split_tag="<br>")
+    translator = Translator(engine, split_tag="</p>")
 
     book = epub.read_epub(args.input)
     chapters = list(iter_chapters(book))

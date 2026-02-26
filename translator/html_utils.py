@@ -5,7 +5,7 @@ from typing import Literal
 SplitTag = Literal["<br>", "</p>"]
 
 DEFAULT_SPLIT_TAG: SplitTag = "<br>"
-MAX_CHUNK_SIZE = 4000
+MAX_CHUNK_SIZE = 2000
 
 
 def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
