@@ -40,20 +40,29 @@ def main():
 
     args = parser.parse_args()
     config = read_config(args.config)
+    common_custom_prompt = (
+        config.get("translation", {}).get("custom_prompt")
+        if isinstance(config, dict)
+        else None
+    )
 
     if args.engine == "openai":
+        engine_custom_prompt = config.get("openai", {}).get("custom_prompt")
         engine = OpenAIEngine(
             api_key=config["openai"]["api_key"],
             from_lang=args.from_lang,
             to_lang=args.to_lang,
             description=args.description,
+            custom_prompt=engine_custom_prompt or common_custom_prompt,
         )
     elif args.engine == "gemini":
+        engine_custom_prompt = config.get("gemini", {}).get("custom_prompt")
         engine = GeminiEngine(
             api_key=config["gemini"]["api_key"],
             from_lang=args.from_lang,
             to_lang=args.to_lang,
             description=args.description,
+            custom_prompt=engine_custom_prompt or common_custom_prompt,
         )
     else:
         raise ValueError(f"Unsupported engine: {args.engine}")

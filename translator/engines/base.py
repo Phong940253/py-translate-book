@@ -2,10 +2,17 @@ from abc import ABC, abstractmethod
 
 
 class TranslationEngine(ABC):
-    def __init__(self, from_lang: str, to_lang: str, description: str | None = None):
+    def __init__(
+        self,
+        from_lang: str,
+        to_lang: str,
+        description: str | None = None,
+        custom_prompt: str | None = None,
+    ):
         self.from_lang = from_lang
         self.to_lang = to_lang
         self.description = description
+        self.custom_prompt = custom_prompt
 
     @abstractmethod
     def translate(self, text: str) -> str:
@@ -18,20 +25,45 @@ class TranslationEngine(ABC):
         raise NotImplementedError("Batch translation is not supported by this engine")
 
     def system_prompt(self) -> str:
-        prompt = f"""
-Translate the following text from {self.from_lang} to {self.to_lang}.
+        if self.custom_prompt:
+            prompt = self.custom_prompt.strip()
+            prompt = prompt.replace("{from_lang}", self.from_lang)
+            prompt = prompt.replace("{to_lang}", self.to_lang)
+            if self.description and "{description}" in prompt:
+                prompt = prompt.replace("{description}", self.description)
+            return prompt
 
-Rules:
-- Translate ALL content fully.
-- Preserve all HTML tags exactly.
-- Preserve special characters.
-- Do NOT add markdown or code fences.
+        prompt = f"""
+You are an expert literary translator and post-editor.
+Translate from {self.from_lang} to {self.to_lang}.
+
+Output constraints (MUST follow):
+1) Keep ALL HTML tags/attributes/entities exactly unchanged.
+2) Translate all visible source text fully into natural Vietnamese.
+3) Final output must not contain Chinese characters.
+4) Do not add explanation, notes, markdown, or code fences.
+5) Keep paragraph/sentence order exactly as input.
+
+Cleaning rules:
+- Remove watermark/noise fragments such as: bqgooヽcc, bqg00, bqg., wap, .com-like tail noise.
+- If a short garbage token appears at line end, delete it instead of translating.
+
+Terminology and style:
+- Use consistent Hán-Việt for proper nouns, sects, realms, techniques, and item names.
+- Keep cultivation terms coherent across the same chunk.
+- Tone: webnovel xianxia, fluent and readable Vietnamese.
+
+Disambiguation for slang/idioms:
+- "大比兜" = "một bạt tai thật lực" (slap), NOT tournament/combat event.
+- If source is humorous/ironic, preserve humor naturally.
+
+Quality self-check before finalizing each chunk:
+- Ensure no untranslated Chinese remains.
+- Ensure no source sentence is dropped.
+- Ensure no obvious mistranslation of idioms/slang.
 """
-        prompt += "Dịch truyện thuần Việt, tất cả từ được dịch đều phải là tiếng Việt KHÔNG ĐƯỢC tồn tại bất kỳ từ tiếng Trung nào.\n"
-        prompt += "Đối với tên riêng của nhân vật, địa danh, tổ chức, thuật ngữ đặc biệt, hãy dịch Hán Việt nếu có thể.\n"
-        prompt += "VD: Wei Xiao nên dịch chứ không giữ nguyên tên gốc.\n"
-        prompt += "Câu truyện hài hước kể về nhân vật nam chính xuyên không tới thế giới tu tiên và có hệ thống bất tử.\n"
-        prompt += "Một số chapter bị thêm vào cuối câu tên trang web để tránh bản quyền, hãy loại bỏ phần tên trang web đó và chỉ dịch nội dung câu truyện.\n"
+        prompt += "Dịch thuần Việt, không pha tiếng Trung.\n"
+        prompt += "Nếu gặp tên riêng chưa rõ, ưu tiên âm Hán Việt nhất quán.\n"
 
 #         prompt += "A mysterious medieval setting in another world. "
 #         prompt += "Translate the story in the writing style of an 18+ light novel. "
