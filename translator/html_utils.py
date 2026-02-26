@@ -23,6 +23,27 @@ def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
     return content
 
 
+def detect_split_tag(soup: BeautifulSoup) -> SplitTag:
+    container = soup.find("div") or soup.find("body")
+    if not container:
+        return DEFAULT_SPLIT_TAG
+
+    content = "".join(str(x) for x in container.contents)
+    content_lower = content.lower()
+
+    p_close_count = content_lower.count("</p>")
+    br_count = (
+        content_lower.count("<br>")
+        + content_lower.count("<br/>")
+        + content_lower.count("<br />")
+    )
+
+    if p_close_count == 0 and br_count == 0:
+        return DEFAULT_SPLIT_TAG
+
+    return "</p>" if p_close_count >= br_count else "<br>"
+
+
 def split_html(
     content: str,
     split_tag: SplitTag = DEFAULT_SPLIT_TAG,

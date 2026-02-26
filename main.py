@@ -9,6 +9,7 @@ from tqdm import tqdm
 from translator.engines.openai_engine import OpenAIEngine
 from translator.engines.gemini_engine import GeminiEngine
 from translator.translator import Translator
+from translator.html_utils import detect_split_tag
 from translator.epub_utils import iter_chapters, load_soup, save_epub
 
 LOG_FILE = "translation.log"
@@ -91,8 +92,6 @@ def main():
     else:
         raise ValueError(f"Unsupported engine: {args.engine}")
 
-    translator = Translator(engine, split_tag="</p>")
-
     book = epub.read_epub(args.input)
     chapters = list(iter_chapters(book))
 
@@ -114,9 +113,16 @@ def main():
         f"Translating chapters {start}-{end} of {total_chapters} total chapters"
     )
 
+    preview_soup = load_soup(selected_chapters[0]) if selected_chapters else None
+    split_tag = detect_split_tag(preview_soup) if preview_soup is not None else "<br>"
+    logging.info(f"Auto-detected split_tag: {split_tag}")
+
+    translator = Translator(engine, split_tag=split_tag)
+
     try:
         if args.engine == "openai" and args.openai_batch:
-            soups = [load_soup(item) for item in selected_chapters]
+            soups = [preview_soup] if preview_soup is not None else []
+            soups.extend(load_soup(item) for item in selected_chapters[1:])
             translated_chapters = translator.translate_book_html_batch(soups)
 
             for item, translated in zip(selected_chapters, translated_chapters):
