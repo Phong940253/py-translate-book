@@ -8,7 +8,6 @@ from translator.engines.openai_engine import OpenAIEngine
 from translator.engines.gemini_engine import GeminiEngine
 from translator.translator import Translator
 from translator.epub_utils import iter_chapters, load_soup, save_epub
-import logging
 
 LOG_FILE = "translation.log"
 
@@ -28,7 +27,7 @@ def read_config(path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--engine", required=True)
+    parser.add_argument("--engine", required=True, choices=["openai", "gemini"])
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--config", required=True)
@@ -46,15 +45,17 @@ def main():
             to_lang=args.to_lang,
             description=args.description,
         )
-    else:
+    elif args.engine == "gemini":
         engine = GeminiEngine(
             api_key=config["gemini"]["api_key"],
             from_lang=args.from_lang,
             to_lang=args.to_lang,
             description=args.description,
         )
+    else:
+        raise ValueError(f"Unsupported engine: {args.engine}")
 
-    translator = Translator(engine)
+    translator = Translator(engine, split_tag="</p>")
 
     book = epub.read_epub(args.input)
     chapters = list(iter_chapters(book))
@@ -63,7 +64,9 @@ def main():
         soup = load_soup(item)
         translated = translator.translate_html(soup)
         item.content = translated.encode("utf-8")
-        save_epub(book, args.output)
+        save_epub(book, args.output)    
+
+    logging.info(f"Saved translated EPUB to {args.output}")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from .base import TranslationEngine
 from ..logging_utils import log_text
 
 DEFAULT_MAX_OUTPUT_TOKENS = 8000
+DEFAULT_TEMPERATURE = 0.1
 
 
 class GeminiEngine(TranslationEngine):
@@ -31,14 +32,15 @@ class GeminiEngine(TranslationEngine):
         response = self.model.generate_content(
             text,
             generation_config={
-                "temperature": 0.1,
+                "temperature": DEFAULT_TEMPERATURE,
                 "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
             },
             safety_settings=self.safety,
         )
 
-        if not response.text:
+        output = (response.text or "").strip()
+        if not output:
             raise RuntimeError("Empty Gemini response")
 
-        log_text("GEMINI_OUTPUT", response.text)
-        return response.text
+        log_text("GEMINI_OUTPUT", output)
+        return output

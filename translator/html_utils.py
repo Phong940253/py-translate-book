@@ -4,7 +4,7 @@ from typing import Literal
 
 SplitTag = Literal["<br>", "</p>"]
 
-DEFAULT_SPLIT_TAG: SplitTag = "</p>"
+DEFAULT_SPLIT_TAG: SplitTag = "<br>"
 MAX_CHUNK_SIZE = 4000
 
 

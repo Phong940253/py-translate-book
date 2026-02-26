@@ -2,7 +2,7 @@ from openai import OpenAI
 from .base import TranslationEngine
 from ..logging_utils import log_text
 
-DEFAULT_TEMPERATURE = 0.2
+DEFAULT_MODEL = "gpt-5-mini-2025-08-07"
 
 
 class OpenAIEngine(TranslationEngine):
@@ -18,16 +18,19 @@ class OpenAIEngine(TranslationEngine):
         log_text("OPENAI_USER_INPUT", text)
         
         messages = [
-            {"role": "system", "content": self.system_prompt()},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ]
 
         response = self.client.chat.completions.create(
-            model="gpt-5-mini-2025-08-07",  # hoặc gpt-4o / gpt-5-mini khi bạn có quyền
+            model=DEFAULT_MODEL,
             messages=messages,
         )
         
-        output = response.choices[0].message.content
+        output = (response.choices[0].message.content or "").strip()
+        if not output:
+            raise RuntimeError("Empty OpenAI response")
+
         log_text("OPENAI_OUTPUT", output)
 
         return output
