@@ -17,6 +17,7 @@ def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
     content = re.sub(r"\n+", "", content)
 
     if split_tag == "<br>":
+        content = content.replace("<br />", "<br>")
         content = content.replace("<br/>", "<br>")
 
     return content

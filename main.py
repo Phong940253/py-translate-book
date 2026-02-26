@@ -1,6 +1,8 @@
 import argparse
 import yaml
 import logging
+import platform
+import subprocess
 from ebooklib import epub
 from tqdm import tqdm
 
@@ -25,6 +27,27 @@ def read_config(path):
         return yaml.safe_load(f)
 
 
+def sleep_pc():
+    system = platform.system().lower()
+
+    if system == "windows":
+        subprocess.run(
+            ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+            check=False,
+        )
+        return
+
+    if system == "linux":
+        subprocess.run(["systemctl", "suspend"], check=False)
+        return
+
+    if system == "darwin":
+        subprocess.run(["pmset", "sleepnow"], check=False)
+        return
+
+    logging.warning(f"Sleep is not supported on this OS: {system}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", required=True, choices=["openai", "gemini"])
@@ -37,6 +60,7 @@ def main():
     parser.add_argument("--from-chapter", type=int, default=None)
     parser.add_argument("--to-chapter", type=int, default=None)
     parser.add_argument("--description", default=None)
+    parser.add_argument("--sleep-pc-after-done", action="store_true")
 
     args = parser.parse_args()
     config = read_config(args.config)
@@ -67,7 +91,7 @@ def main():
     else:
         raise ValueError(f"Unsupported engine: {args.engine}")
 
-    translator = Translator(engine, split_tag="</p>")
+    translator = Translator(engine, split_tag="<br>")
 
     book = epub.read_epub(args.input)
     chapters = list(iter_chapters(book))
@@ -105,6 +129,10 @@ def main():
 
         save_epub(book, args.output)
         logging.info(f"Saved translated EPUB to {args.output}")
+
+        if args.sleep_pc_after_done:
+            logging.info("Sleeping PC after translation as requested")
+            sleep_pc()
     except KeyboardInterrupt:
         logging.warning("Interrupted by user (Ctrl+C)")
         print("Interrupted by user (Ctrl+C)")
