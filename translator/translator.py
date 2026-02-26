@@ -45,6 +45,62 @@ class Translator:
 
         return assemble_html(translated, self.split_tag)
 
+    def translate_book_html_batch(self, soups: list) -> list[str]:
+        if not self.engine.supports_batch():
+            raise RuntimeError("Current engine does not support batch translation")
+
+        chapter_chunks: list[list[str]] = []
+        queued_chunks: list[str] = []
+        queued_set: set[str] = set()
+
+        for soup in soups:
+            content = extract_html_content(soup, self.split_tag)
+            chunks = split_html(content, self.split_tag)
+            chapter_chunks.append(chunks)
+
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+                if chunk in self._translation_cache or chunk in queued_set:
+                    continue
+
+                queued_set.add(chunk)
+                queued_chunks.append(chunk)
+
+        if queued_chunks:
+            logging.info(f"Submitting {len(queued_chunks)} unique chunks to batch API")
+            batch_results = self.engine.translate_batch(queued_chunks)
+
+            if len(batch_results) != len(queued_chunks):
+                raise RuntimeError("Batch result size does not match request size")
+
+            for source, translated in zip(queued_chunks, batch_results):
+                expected_tags = self._extract_html_tags(source)
+                if not self._is_valid_translation(source, translated, expected_tags):
+                    logging.warning("Batch output failed validation, retrying synchronously")
+                    translated = self._translate_chunk(source)
+
+                self._translation_cache[source] = translated
+
+        translated_chapters: list[str] = []
+        for chunks in chapter_chunks:
+            translated: list[str] = []
+            for chunk in chunks:
+                if not chunk.strip():
+                    translated.append(chunk)
+                    continue
+
+                cached_result = self._translation_cache.get(chunk)
+                if cached_result is None:
+                    cached_result = self._translate_chunk(chunk)
+                    self._translation_cache[chunk] = cached_result
+
+                translated.append(cached_result)
+
+            translated_chapters.append(assemble_html(translated, self.split_tag))
+
+        return translated_chapters
+
     def _translate_chunk(self, text: str) -> str:
         log_text("INPUT_CHUNK", text)
         expected_tags = self._extract_html_tags(text)
