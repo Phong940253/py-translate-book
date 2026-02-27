@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from translator.engines.openai_engine import OpenAIEngine
 from translator.engines.gemini_engine import GeminiEngine
+from translator.engines.webai_engine import WebAIEngine
 from translator.translator import Translator
 from translator.html_utils import detect_split_tag
 from translator.epub_utils import iter_chapters, load_soup, save_epub
@@ -51,7 +52,7 @@ def sleep_pc():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--engine", required=True, choices=["openai", "gemini"])
+    parser.add_argument("--engine", required=True, choices=["openai", "gemini", "webai"])
     parser.add_argument("--openai-batch", action="store_true")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
@@ -84,6 +85,24 @@ def main():
         engine_custom_prompt = config.get("gemini", {}).get("custom_prompt")
         engine = GeminiEngine(
             api_key=config["gemini"]["api_key"],
+            from_lang=args.from_lang,
+            to_lang=args.to_lang,
+            description=args.description,
+            custom_prompt=engine_custom_prompt or common_custom_prompt,
+        )
+    elif args.engine == "webai":
+        webai_config = config.get("webai", {})
+        engine_custom_prompt = webai_config.get("custom_prompt")
+        engine = WebAIEngine(
+            base_url=webai_config.get("base_url", "http://localhost:6969"),
+            endpoint=webai_config.get("endpoint", "/v1/chat/completions"),
+            model=webai_config.get("model", "gemini-2.5-flash"),
+            api_key=webai_config.get("api_key"),
+            timeout_seconds=webai_config.get("timeout_seconds", 120),
+            chat_mode=webai_config.get("chat_mode", False),
+            chat_start_endpoint=webai_config.get("chat_start_endpoint", "/gemini"),
+            chat_continue_endpoint=webai_config.get("chat_continue_endpoint", "/gemini-chat"),
+            chat_reset_every_chunks=webai_config.get("chat_reset_every_chunks", 30),
             from_lang=args.from_lang,
             to_lang=args.to_lang,
             description=args.description,
