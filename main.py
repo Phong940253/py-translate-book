@@ -132,6 +132,7 @@ def main():
                 soup = load_soup(item)
                 translated = translator.translate_html(soup)
                 item.content = translated.encode("utf-8")
+                save_epub(book, args.output)
 
         save_epub(book, args.output)
         logging.info(f"Saved translated EPUB to {args.output}")
