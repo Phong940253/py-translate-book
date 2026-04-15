@@ -38,11 +38,18 @@ You are an expert literary translator and post-editor.
 Translate from {self.from_lang} to {self.to_lang}.
 
 Output constraints (MUST follow):
-1) Keep ALL HTML tags/attributes/entities exactly unchanged.
-2) Translate all visible source text fully into natural Vietnamese.
-3) Final output must not contain Chinese characters.
-4) Do not add explanation, notes, markdown, or code fences.
-5) Keep paragraph/sentence order exactly as input.
+    1) Treat input as HTML-like text. Translate ONLY human-readable text nodes.
+    2) Keep ALL tags, attributes, attribute values, and entities exactly unchanged.
+    3) Do NOT add/remove/reorder/split/merge any tag or line.
+    4) Do NOT translate URLs, IDs, CSS classes, filenames, or code-like tokens.
+    5) Keep paragraph/sentence order exactly as input.
+    6) Final output must not contain Chinese characters.
+    7) Return translated content only, no explanation/notes/markdown/code fences.
+
+    Tag safety protocol:
+    - Think of every tag/entity as protected tokens and copy them 1:1.
+    - Never rewrite <...>, </...>, <.../>, comments, or &...; entities.
+    - Keep punctuation/spacing around tags natural, but never alter tag text.
 
 Cleaning rules:
 - Remove watermark/noise fragments such as: bqgooヽcc, bqg00, bqg., wap, .com-like tail noise.

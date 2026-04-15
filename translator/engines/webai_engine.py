@@ -1,4 +1,6 @@
 import json
+import logging
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,7 +11,7 @@ from ..logging_utils import log_text
 
 DEFAULT_ENDPOINT = "/v1/chat/completions"
 DEFAULT_MODEL = "gemini-2.5-flash"
-DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_CHAT_START_ENDPOINT = "/gemini"
 DEFAULT_CHAT_CONTINUE_ENDPOINT = "/gemini-chat"
@@ -84,8 +86,9 @@ class WebAIEngine(TranslationEngine):
 
     def _call_endpoint(self, system_prompt: str, text: str) -> dict:
         if self.chat_mode:
-            endpoint = self._choose_chat_endpoint()
-            return self._post_gemini_routes(endpoint, system_prompt, text)
+            # In chat mode, keep using the OpenAI-compatible endpoint to avoid
+            # switching to legacy Gemini-specific routes.
+            return self._post_openai_compatible(system_prompt, text)
 
         endpoint = self.endpoint
         if endpoint.startswith("/v1beta/models/"):
@@ -129,14 +132,11 @@ class WebAIEngine(TranslationEngine):
         return self._post_json(endpoint, payload)
 
     def _post_gemini_routes(self, endpoint: str, system_prompt: str, text: str) -> dict:
+        composed_message = f"{system_prompt}\n\nInput:\n{text}".strip()
         payload = {
             "model": self.model,
-            "system_prompt": system_prompt,
-            "text": text,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
-            ],
+            "message": composed_message,
+            "files": None,
         }
         response = self._post_json(endpoint, payload)
 
@@ -161,16 +161,37 @@ class WebAIEngine(TranslationEngine):
         try:
             with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
+        except (TimeoutError, socket.timeout) as error:
+            self._reset_chat_session_state("timeout")
+            raise RuntimeError(
+                f"WebAI request timed out after {self.timeout_seconds}s"
+            ) from error
         except urllib.error.HTTPError as error:
             error_body = error.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"WebAI request failed: HTTP {error.code} - {error_body}") from error
         except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                self._reset_chat_session_state("timeout")
+                raise RuntimeError(
+                    f"WebAI request timed out after {self.timeout_seconds}s"
+                ) from error
             raise RuntimeError(f"WebAI request failed: {error.reason}") from error
 
         try:
             return json.loads(raw)
         except json.JSONDecodeError as error:
             raise RuntimeError(f"WebAI returned non-JSON response: {raw[:500]}") from error
+
+    def _reset_chat_session_state(self, reason: str) -> None:
+        if not self.chat_mode:
+            return
+
+        self._chunks_in_current_chat_session = 0
+        self._cookie_jar = CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self._cookie_jar)
+        )
+        logging.info(f"WebAI chat session reset due to {reason}")
 
     @staticmethod
     def _extract_output(payload: dict) -> str:
