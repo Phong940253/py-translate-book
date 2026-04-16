@@ -5,6 +5,7 @@ import platform
 import subprocess
 import os
 import re
+import json
 from datetime import datetime
 from ebooklib import epub
 from tqdm import tqdm
@@ -31,6 +32,54 @@ logging.basicConfig(
 def read_config(path):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _default_checkpoint_file(output_path: str) -> str:
+    return f"{output_path}.checkpoint.json"
+
+
+def _load_checkpoint(checkpoint_path: str) -> dict:
+    if not os.path.exists(checkpoint_path):
+        return {}
+
+    try:
+        with open(checkpoint_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logging.warning("Failed to read checkpoint file %s: %s", checkpoint_path, exc)
+        return {}
+
+
+def _save_checkpoint(checkpoint_path: str, checkpoint_data: dict):
+    temp_path = f"{checkpoint_path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(checkpoint_data, f, ensure_ascii=True, indent=2)
+    os.replace(temp_path, checkpoint_path)
+
+
+def _restore_existing_output_content(
+    input_book,
+    output_path: str,
+):
+    if not os.path.exists(output_path):
+        return
+
+    try:
+        output_book = epub.read_epub(output_path)
+    except Exception as exc:
+        logging.warning("Cannot read existing output EPUB for resume (%s): %s", output_path, exc)
+        return
+
+    input_chapters = list(iter_chapters(input_book))
+    output_chapters = list(iter_chapters(output_book))
+
+    restored = 0
+    for input_item, output_item in zip(input_chapters, output_chapters):
+        input_item.content = output_item.content
+        restored += 1
+
+    logging.info("Restored %s chapter documents from existing output EPUB", restored)
 
 
 def sleep_pc():
@@ -72,6 +121,9 @@ def main():
     parser.add_argument("--discord-mention-user-id", default=None)
     parser.add_argument("--description", default=None)
     parser.add_argument("--sleep-pc-after-done", action="store_true")
+    parser.add_argument("--checkpoint-file", default=None)
+    parser.add_argument("--disable-resume", action="store_true")
+    parser.add_argument("--reset-checkpoint", action="store_true")
 
     args = parser.parse_args()
     started_at = datetime.now()
@@ -177,6 +229,11 @@ def main():
         if isinstance(config, dict)
         else 3500
     )
+    html_structure_similarity_threshold = (
+        config.get("translation", {}).get("html_structure_similarity_threshold", 0.99)
+        if isinstance(config, dict)
+        else 0.99
+    )
     max_tries = (
         config.get("translation", {}).get("max_tries", 0)
         if isinstance(config, dict)
@@ -245,6 +302,52 @@ def main():
         f"Translating chapters {start}-{end} of {total_chapters} total chapters"
     )
 
+    checkpoint_file = args.checkpoint_file or _default_checkpoint_file(args.output)
+    resume_enabled = not args.disable_resume
+
+    if args.reset_checkpoint and os.path.exists(checkpoint_file):
+        os.remove(checkpoint_file)
+        logging.info("Deleted checkpoint file: %s", checkpoint_file)
+
+    checkpoint_data = _load_checkpoint(checkpoint_file) if resume_enabled else {}
+    checkpoint_signature = {
+        "input": os.path.abspath(args.input),
+        "output": os.path.abspath(args.output),
+        "engine": args.engine,
+        "from_lang": args.from_lang,
+        "to_lang": args.to_lang,
+    }
+
+    if checkpoint_data:
+        signature_mismatch = any(
+            checkpoint_data.get(key) != value
+            for key, value in checkpoint_signature.items()
+        )
+        if signature_mismatch:
+            logging.warning(
+                "Checkpoint signature mismatch. Ignoring previous checkpoint at %s",
+                checkpoint_file,
+            )
+            checkpoint_data = {}
+
+    last_completed_chapter = int(checkpoint_data.get("last_completed_chapter", 0) or 0)
+
+    # When resuming, merge already translated content from current output file so
+    # subsequent save operations preserve completed chapters.
+    if resume_enabled and last_completed_chapter >= start and os.path.exists(args.output):
+        _restore_existing_output_content(book, args.output)
+
+    effective_start = max(start, last_completed_chapter + 1) if resume_enabled else start
+    selected_chapters = chapters[effective_start - 1:end]
+
+    if resume_enabled and effective_start > start:
+        logging.info(
+            "Resuming from chapter %s (checkpoint file: %s)",
+            effective_start,
+            checkpoint_file,
+        )
+        print(f"Resume enabled: skip to chapter {effective_start}/{total_chapters}")
+
     preview_soup = load_soup(selected_chapters[0]) if selected_chapters else None
     split_tag = detect_split_tag(preview_soup) if preview_soup is not None else "<br>"
     logging.info(f"Auto-detected split_tag: {split_tag}")
@@ -255,25 +358,63 @@ def main():
         consistency_config=consistency_config,
         fallback_max_chunk_size=fallback_max_chunk_size,
         max_tries=max_tries,
+        html_structure_min_similarity=html_structure_similarity_threshold,
     )
 
     try:
-        if args.engine == "openai" and args.openai_batch:
+        if not selected_chapters:
+            logging.info("No chapters to translate in selected range after resume filtering")
+            save_epub(book, args.output, source_path=args.input)
+        elif args.engine == "openai" and args.openai_batch:
             soups = [preview_soup] if preview_soup is not None else []
             soups.extend(load_soup(item) for item in selected_chapters[1:])
             translated_chapters = translator.translate_book_html_batch(soups)
 
-            for item, translated in zip(selected_chapters, translated_chapters):
+            for offset, (item, translated) in enumerate(zip(selected_chapters, translated_chapters), start=0):
+                chapter_number = effective_start + offset
                 item.content = translated.encode("utf-8")
+                save_epub(book, args.output, source_path=args.input)
+
+                if resume_enabled:
+                    checkpoint_payload = {
+                        **checkpoint_signature,
+                        "from_chapter": start,
+                        "to_chapter": end,
+                        "last_completed_chapter": chapter_number,
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    _save_checkpoint(checkpoint_file, checkpoint_payload)
         else:
-            for item in tqdm(selected_chapters, desc="Translating chapters"):
+            for offset, item in enumerate(tqdm(selected_chapters, desc="Translating chapters"), start=0):
+                chapter_number = effective_start + offset
                 soup = load_soup(item)
                 translated = translator.translate_html(soup)
                 item.content = translated.encode("utf-8")
                 save_epub(book, args.output, source_path=args.input)
 
+                if resume_enabled:
+                    checkpoint_payload = {
+                        **checkpoint_signature,
+                        "from_chapter": start,
+                        "to_chapter": end,
+                        "last_completed_chapter": chapter_number,
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    _save_checkpoint(checkpoint_file, checkpoint_payload)
+
         save_epub(book, args.output, source_path=args.input)
         logging.info(f"Saved translated EPUB to {args.output}")
+
+        if resume_enabled:
+            checkpoint_payload = {
+                **checkpoint_signature,
+                "from_chapter": start,
+                "to_chapter": end,
+                "last_completed_chapter": end,
+                "completed": True,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            _save_checkpoint(checkpoint_file, checkpoint_payload)
 
         finished_at = datetime.now()
         elapsed = finished_at - started_at

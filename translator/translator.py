@@ -2,6 +2,7 @@ import time
 import logging
 import re
 import hashlib
+from difflib import SequenceMatcher
 from tqdm import tqdm
 
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
@@ -12,6 +13,7 @@ REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
 MAX_BACKOFF_SECONDS = 60
 FALLBACK_MAX_CHUNK_SIZE = 3500
+DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.99
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
@@ -23,6 +25,7 @@ class Translator:
         consistency_config: dict | None = None,
         fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
         max_tries: int | None = DEFAULT_MAX_TRIES,
+        html_structure_min_similarity: float = DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY,
     ):
         self.engine = engine
         self.split_tag = split_tag
@@ -32,6 +35,10 @@ class Translator:
         else:
             parsed_max_tries = int(max_tries)
             self.max_tries = None if parsed_max_tries <= 0 else parsed_max_tries
+        self.html_structure_min_similarity = min(
+            1.0,
+            max(0.0, float(html_structure_min_similarity)),
+        )
         self._translation_cache: dict[str, str] = {}
         self._chapter_rules_cache: dict[str, str] = {}
 
@@ -415,23 +422,33 @@ class Translator:
         output_has_tag = bool(HTML_TAG_PATTERN.search(output_text or ""))
         return source_has_tag and not output_has_tag
 
-    @staticmethod
-    def _has_html_structure_mismatch(source_text: str, output_text: str) -> bool:
-        source_tags = HTML_TAG_PATTERN.findall(source_text or "")
+    def _has_html_structure_mismatch(self, source_text: str, output_text: str) -> bool:
+        source_tags = [self._canonicalize_html_tag(tag) for tag in HTML_TAG_PATTERN.findall(source_text or "")]
         if not source_tags:
             return False
 
-        output_tags = HTML_TAG_PATTERN.findall(output_text or "")
+        output_tags = [self._canonicalize_html_tag(tag) for tag in HTML_TAG_PATTERN.findall(output_text or "")]
         if not output_tags:
             return True
 
-        # Translation must preserve exact tag order and attributes.
-        mismatch = source_tags != output_tags
+        similarity = SequenceMatcher(None, source_tags, output_tags).ratio()
+        mismatch = similarity < self.html_structure_min_similarity
         if mismatch:
             logging.warning(
-                "HTML tag mismatch | source_tags=%s | output_tags=%s",
+                "HTML tag mismatch | similarity=%.4f | threshold=%.4f | source_tags=%s | output_tags=%s",
+                similarity,
+                self.html_structure_min_similarity,
                 source_tags,
                 output_tags,
+            )
+            
+            logging.warning("Source text with tags:\n%s", source_text)
+            logging.warning("Output text with tags:\n%s", output_text)
+        else:
+            logging.debug(
+                "HTML tag similarity accepted | similarity=%.4f | threshold=%.4f",
+                similarity,
+                self.html_structure_min_similarity,
             )
         return mismatch
 
@@ -489,3 +506,19 @@ class Translator:
 
         visible_text = HTML_TAG_PATTERN.sub("", stripped)
         return not visible_text.strip()
+
+    @staticmethod
+    def _canonicalize_html_tag(tag: str) -> str:
+        if not tag:
+            return tag
+
+        normalized = tag
+
+        if "[http" in normalized:
+            normalized = re.sub(
+                r'([\w:-]+)="\[(https?://[^\]\s]+)\]\((https?://[^)\s]+)\)"',
+                lambda m: f'{m.group(1)}="{m.group(2)}"' if m.group(2) == m.group(3) else m.group(0),
+                normalized,
+            )
+
+        return normalized
