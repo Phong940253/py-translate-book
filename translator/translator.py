@@ -254,6 +254,8 @@ class Translator:
 
                 if self._is_html_tag_missing(text, result):
                     raise ValueError("Model output lost HTML tags")
+                if self._has_html_structure_mismatch(text, result):
+                    raise ValueError("Model output changed HTML structure")
 
                 log_text("AI_RESPONSE", result)
                 self.stats["chunks_translated"] += 1
@@ -373,6 +375,19 @@ class Translator:
         source_has_tag = bool(HTML_TAG_PATTERN.search(source_text or ""))
         output_has_tag = bool(HTML_TAG_PATTERN.search(output_text or ""))
         return source_has_tag and not output_has_tag
+
+    @staticmethod
+    def _has_html_structure_mismatch(source_text: str, output_text: str) -> bool:
+        source_tags = HTML_TAG_PATTERN.findall(source_text or "")
+        if not source_tags:
+            return False
+
+        output_tags = HTML_TAG_PATTERN.findall(output_text or "")
+        if not output_tags:
+            return True
+
+        # Translation must preserve exact tag order and attributes.
+        return source_tags != output_tags
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:
