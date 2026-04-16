@@ -160,9 +160,9 @@ def main():
                 soup = load_soup(item)
                 translated = translator.translate_html(soup)
                 item.content = translated.encode("utf-8")
-                save_epub(book, args.output)
+                save_epub(book, args.output, source_path=args.input)
 
-        save_epub(book, args.output)
+        save_epub(book, args.output, source_path=args.input)
         logging.info(f"Saved translated EPUB to {args.output}")
 
         if args.sleep_pc_after_done:
