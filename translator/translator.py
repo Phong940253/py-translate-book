@@ -159,8 +159,8 @@ class Translator:
 
         # WebAI responses can contain markdown-escaped HTML (e.g. \<tag\>, \_).
         # Unescape only characters that commonly corrupt HTML/XML fragments.
-        if "<" in source_text and any(token in normalized for token in ("\\<", "\\>", "\\_", "\\#")):
-            normalized = re.sub(r"\\([<>_#])", r"\1", normalized)
+        if "<" in source_text and any(token in normalized for token in ("\\<", "\\>", "\\_", "\\#", "\\!")):
+            normalized = re.sub(r"\\([<>_#!])", r"\1", normalized)
 
         return normalized
 
