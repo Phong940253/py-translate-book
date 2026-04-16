@@ -24,6 +24,61 @@ class TranslationEngine(ABC):
     def translate_batch(self, texts: list[str]) -> list[str]:
         raise NotImplementedError("Batch translation is not supported by this engine")
 
+    def build_contextual_input(
+        self,
+        current_chunk: str,
+        chapter_rules: str | None = None,
+        previous_translated: list[str] | None = None,
+        next_source: list[str] | None = None,
+        chunk_index: int | None = None,
+        total_chunks: int | None = None,
+    ) -> str:
+        previous_translated = previous_translated or []
+        next_source = next_source or []
+        rules_text = (chapter_rules or "").strip()
+
+        if not rules_text and not previous_translated and not next_source:
+            return current_chunk
+
+        chunk_position = ""
+        if chunk_index is not None and total_chunks is not None and total_chunks > 0:
+            chunk_position = f"Chunk position: {chunk_index}/{total_chunks}\n"
+
+        prev_block = "\n".join(previous_translated).strip()
+        next_block = "\n".join(next_source).strip()
+
+        return (
+            "Use reference context to resolve pronouns/forms of address consistently.\n"
+            "Translate only CURRENT_CHUNK and output translated CURRENT_CHUNK only.\n"
+            "Do not output REFERENCE sections. Preserve HTML structure in CURRENT_CHUNK.\n\n"
+            f"{chunk_position}"
+            "<CHAPTER_RULES>\n"
+            f"{rules_text}\n"
+            "</CHAPTER_RULES>\n\n"
+            "<REFERENCE_PREVIOUS_TRANSLATED>\n"
+            f"{prev_block}\n"
+            "</REFERENCE_PREVIOUS_TRANSLATED>\n\n"
+            "<REFERENCE_NEXT_SOURCE>\n"
+            f"{next_block}\n"
+            "</REFERENCE_NEXT_SOURCE>\n\n"
+            "<CURRENT_CHUNK>\n"
+            f"{current_chunk}\n"
+            "</CURRENT_CHUNK>"
+        ).strip()
+
+    def chapter_consistency_prompt(self, chapter_excerpt: str) -> str:
+        return (
+            "Analyze this chapter excerpt and create concise Vietnamese rules for consistent forms of address.\n"
+            "Output plain text only, no markdown, no code fences.\n"
+            "Required output sections exactly in this order:\n"
+            "1) Characters: comma-separated names.\n"
+            "2) Address rules: one mapping per line as 'A -> B: ...'.\n"
+            "3) Default fallback: one short line for ambiguous cases.\n"
+            "Keep total output under 25 lines.\n\n"
+            "Chapter excerpt:\n"
+            f"{chapter_excerpt}"
+        )
+
     def system_prompt(self) -> str:
         if self.custom_prompt:
             prompt = self.custom_prompt.strip()

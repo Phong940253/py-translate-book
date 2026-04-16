@@ -1,10 +1,11 @@
 import time
 import logging
 import re
+import hashlib
 from tqdm import tqdm
 
-from .html_utils import extract_html_content, split_html, assemble_html
-from .logging_utils import log_text
+from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
+from .logging_utils import log_text, log_consistency_event
 
 MAX_TRIES = 3
 REQUEST_TIMEOUT = 2
@@ -13,19 +14,40 @@ FALLBACK_MAX_CHUNK_SIZE = 3500
 
 
 class Translator:
-    def __init__(self, engine, split_tag="<br>"):
+    def __init__(self, engine, split_tag="<br>", consistency_config: dict | None = None):
         self.engine = engine
         self.split_tag = split_tag
         self._translation_cache: dict[str, str] = {}
+        self._chapter_rules_cache: dict[str, str] = {}
+
+        consistency_config = consistency_config or {}
+        self.consistency_enabled = bool(consistency_config.get("enabled", False))
+        self.previous_translated_window = max(
+            0, int(consistency_config.get("previous_translated_window", 0))
+        )
+        self.next_source_window = max(
+            0, int(consistency_config.get("next_source_window", 0))
+        )
+        self.analysis_max_chars = max(
+            1000, int(consistency_config.get("analysis_max_chars", 18000))
+        )
+        self.rules_max_chars = max(
+            200, int(consistency_config.get("rules_max_chars", 1200))
+        )
+        self.cache_chapter_rules = bool(consistency_config.get("cache_chapter_rules", True))
 
     def translate_html(self, soup):
         content = extract_html_content(soup, self.split_tag)
-        chunks = split_html(content, self.split_tag)
+        chunk_records = split_html_with_metadata(content, self.split_tag)
+        chunks = [record["text"] for record in chunk_records]
+        chapter_rules = self._analyze_chapter_consistency(content) if self.consistency_enabled else ""
+        if chapter_rules:
+            log_consistency_event("CHAPTER_RULES_READY", f"{len(chapter_rules)} chars")
 
         translated: list[str] = []
 
-        for chunk in tqdm(
-            chunks,
+        for index, chunk in tqdm(
+            enumerate(chunks),
             desc="Translating chunks",
             leave=False,
             total=len(chunks),
@@ -34,13 +56,29 @@ class Translator:
                 translated.append(chunk)
                 continue
 
-            cached_result = self._translation_cache.get(chunk)
+            previous_context = self._collect_previous_translated(translated, index)
+            next_source_context = self._collect_next_source(chunks, index)
+            cache_key = self._build_cache_key(
+                chunk=chunk,
+                chapter_rules=chapter_rules,
+                previous_translated=previous_context,
+                next_source=next_source_context,
+            )
+
+            cached_result = self._translation_cache.get(cache_key)
             if cached_result is not None:
                 translated.append(cached_result)
                 continue
 
-            translated_chunk = self._translate_chunk(chunk)
-            self._translation_cache[chunk] = translated_chunk
+            translated_chunk = self._translate_chunk(
+                chunk,
+                chapter_rules=chapter_rules,
+                previous_translated=previous_context,
+                next_source=next_source_context,
+                chunk_index=index + 1,
+                total_chunks=len(chunks),
+            )
+            self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
 
         return assemble_html(translated, self.split_tag)
@@ -96,8 +134,27 @@ class Translator:
 
         return translated_chapters
 
-    def _translate_chunk(self, text: str) -> str:
+    def _translate_chunk(
+        self,
+        text: str,
+        chapter_rules: str = "",
+        previous_translated: list[str] | None = None,
+        next_source: list[str] | None = None,
+        chunk_index: int | None = None,
+        total_chunks: int | None = None,
+    ) -> str:
+        prepared_input = self.engine.build_contextual_input(
+            current_chunk=text,
+            chapter_rules=chapter_rules,
+            previous_translated=previous_translated,
+            next_source=next_source,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        )
+
         log_text("INPUT_CHUNK", text)
+        if prepared_input != text:
+            log_text("INPUT_CHUNK_WITH_CONTEXT", prepared_input)
 
         # Some chapters (e.g., TOC/nav blocks) may not contain split tags and can become
         # very large single chunks that frequently time out on upstream APIs.
@@ -107,7 +164,17 @@ class Translator:
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"
                 )
-                translated_parts = [self._translate_chunk(part) for part in fallback_parts]
+                translated_parts = [
+                    self._translate_chunk(
+                        part,
+                        chapter_rules=chapter_rules,
+                        previous_translated=previous_translated,
+                        next_source=next_source,
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                    )
+                    for part in fallback_parts
+                ]
                 merged = "".join(translated_parts)
                 log_text("AI_RESPONSE", merged)
                 return merged
@@ -115,11 +182,25 @@ class Translator:
         for attempt in range(1, MAX_TRIES + 1):
             try:
                 text_to_translate = (
-                    text
+                    prepared_input
                     if attempt == 1
-                    else self._build_retry_input(text)
+                    else self._build_retry_input(prepared_input)
                 )
-                result = self.engine.translate(text_to_translate)
+                if (
+                    attempt == 1
+                    and self.consistency_enabled
+                    and hasattr(self.engine, "translate_with_context")
+                ):
+                    result = self.engine.translate_with_context(
+                        text=text,
+                        chapter_rules=chapter_rules,
+                        previous_translated=previous_translated or [],
+                        next_source=next_source or [],
+                        chunk_index=chunk_index,
+                        total_chunks=total_chunks,
+                    )
+                else:
+                    result = self.engine.translate(text_to_translate)
                 result = self._normalize_model_output(result, text)
 
                 log_text("AI_RESPONSE", result)
@@ -134,6 +215,70 @@ class Translator:
 
         logging.error("Giving up on chunk, returning original")
         return text
+
+    def _analyze_chapter_consistency(self, content: str) -> str:
+        if not self.consistency_enabled:
+            return ""
+
+        if not hasattr(self.engine, "analyze_chapter_consistency"):
+            log_consistency_event("SKIP_ANALYSIS", "Engine does not support chapter analysis")
+            return ""
+
+        chapter_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
+        if self.cache_chapter_rules and chapter_hash in self._chapter_rules_cache:
+            log_consistency_event("RULES_CACHE_HIT", chapter_hash[:12])
+            return self._chapter_rules_cache[chapter_hash]
+
+        excerpt = content[: self.analysis_max_chars]
+        try:
+            rules = self.engine.analyze_chapter_consistency(excerpt) or ""
+            rules = rules.strip()
+            if len(rules) > self.rules_max_chars:
+                rules = rules[: self.rules_max_chars].rstrip()
+            if rules:
+                log_text("CHAPTER_RULES", rules)
+                if self.cache_chapter_rules:
+                    self._chapter_rules_cache[chapter_hash] = rules
+            return rules
+        except Exception as error:
+            logging.warning(f"Chapter analysis failed, fallback to normal translation: {error}")
+            log_consistency_event("ANALYSIS_FAILED", str(error))
+            return ""
+
+    def _collect_previous_translated(self, translated: list[str], index: int) -> list[str]:
+        if not self.consistency_enabled or self.previous_translated_window <= 0:
+            return []
+
+        start = max(0, index - self.previous_translated_window)
+        return [chunk for chunk in translated[start:index] if chunk.strip()]
+
+    def _collect_next_source(self, chunks: list[str], index: int) -> list[str]:
+        if not self.consistency_enabled or self.next_source_window <= 0:
+            return []
+
+        end = min(len(chunks), index + 1 + self.next_source_window)
+        return [chunk for chunk in chunks[index + 1:end] if chunk.strip()]
+
+    def _build_cache_key(
+        self,
+        chunk: str,
+        chapter_rules: str,
+        previous_translated: list[str],
+        next_source: list[str],
+    ) -> str:
+        if not self.consistency_enabled:
+            return chunk
+
+        payload = "\n\n".join(
+            [
+                chunk,
+                chapter_rules,
+                "\n".join(previous_translated),
+                "\n".join(next_source),
+            ]
+        )
+        digest = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+        return f"ctx::{digest}"
 
     @staticmethod
     def _build_retry_input(text: str) -> str:

@@ -66,6 +66,11 @@ def main():
 
     args = parser.parse_args()
     config = read_config(args.config)
+    consistency_config = (
+        config.get("translation", {}).get("consistency", {})
+        if isinstance(config, dict)
+        else {}
+    )
     common_custom_prompt = (
         config.get("translation", {}).get("custom_prompt")
         if isinstance(config, dict)
@@ -136,7 +141,11 @@ def main():
     split_tag = detect_split_tag(preview_soup) if preview_soup is not None else "<br>"
     logging.info(f"Auto-detected split_tag: {split_tag}")
 
-    translator = Translator(engine, split_tag=split_tag)
+    translator = Translator(
+        engine,
+        split_tag=split_tag,
+        consistency_config=consistency_config,
+    )
 
     try:
         if args.engine == "openai" and args.openai_batch:

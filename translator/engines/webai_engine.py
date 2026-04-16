@@ -16,6 +16,7 @@ DEFAULT_TEMPERATURE = 0.1
 DEFAULT_CHAT_START_ENDPOINT = "/gemini"
 DEFAULT_CHAT_CONTINUE_ENDPOINT = "/gemini-chat"
 DEFAULT_CHAT_RESET_EVERY_CHUNKS = 30
+DEFAULT_ANALYSIS_TEMPERATURE = 0.2
 
 
 class WebAIEngine(TranslationEngine):
@@ -75,27 +76,70 @@ class WebAIEngine(TranslationEngine):
         log_text("WEBAI_SYSTEM_PROMPT", system_prompt)
         log_text("WEBAI_INPUT", text)
 
-        response_json = self._call_endpoint(system_prompt, text)
-        output = self._extract_output(response_json).strip()
-
-        if not output:
-            raise RuntimeError("Empty WebAI response")
-
+        output = self._translate_with_system_prompt(system_prompt, text)
         log_text("WEBAI_OUTPUT", output)
         return output
 
-    def _call_endpoint(self, system_prompt: str, text: str) -> dict:
+    def translate_with_context(
+        self,
+        text: str,
+        chapter_rules: str,
+        previous_translated: list[str],
+        next_source: list[str],
+        chunk_index: int | None,
+        total_chunks: int | None,
+    ) -> str:
+        contextual_input = self.build_contextual_input(
+            current_chunk=text,
+            chapter_rules=chapter_rules,
+            previous_translated=previous_translated,
+            next_source=next_source,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        )
+        return self.translate(contextual_input)
+
+    def analyze_chapter_consistency(self, chapter_excerpt: str) -> str:
+        analysis_prompt = self.chapter_consistency_prompt(chapter_excerpt)
+        log_text("WEBAI_CONSISTENCY_ANALYSIS_INPUT", analysis_prompt)
+
+        # Use a concise, deterministic system prompt for rule extraction.
+        analysis_system_prompt = (
+            "You are a Vietnamese literary translation consistency assistant. "
+            "Return concise plain-text address-form rules only."
+        )
+        output = self._translate_with_system_prompt(
+            analysis_system_prompt,
+            analysis_prompt,
+            temperature=DEFAULT_ANALYSIS_TEMPERATURE,
+        )
+        log_text("WEBAI_CONSISTENCY_ANALYSIS_OUTPUT", output)
+        return output
+
+    def _translate_with_system_prompt(
+        self,
+        system_prompt: str,
+        text: str,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> str:
+        response_json = self._call_endpoint(system_prompt, text, temperature=temperature)
+        output = self._extract_output(response_json).strip()
+        if not output:
+            raise RuntimeError("Empty WebAI response")
+        return output
+
+    def _call_endpoint(self, system_prompt: str, text: str, temperature: float = DEFAULT_TEMPERATURE) -> dict:
         if self.chat_mode:
             # In chat mode, keep using the OpenAI-compatible endpoint to avoid
             # switching to legacy Gemini-specific routes.
-            return self._post_openai_compatible(system_prompt, text)
+            return self._post_openai_compatible(system_prompt, text, temperature=temperature)
 
         endpoint = self.endpoint
         if endpoint.startswith("/v1beta/models/"):
-            return self._post_google_v1beta(system_prompt, text)
+            return self._post_google_v1beta(system_prompt, text, temperature=temperature)
         if endpoint == "/v1/chat/completions":
-            return self._post_openai_compatible(system_prompt, text)
-        return self._post_gemini_routes(endpoint, system_prompt, text)
+            return self._post_openai_compatible(system_prompt, text, temperature=temperature)
+        return self._post_gemini_routes(endpoint, system_prompt, text, temperature=temperature)
 
     def _choose_chat_endpoint(self) -> str:
         if self._chunks_in_current_chat_session == 0:
@@ -107,7 +151,7 @@ class WebAIEngine(TranslationEngine):
 
         return self.chat_continue_endpoint
 
-    def _post_openai_compatible(self, system_prompt: str, text: str) -> dict:
+    def _post_openai_compatible(self, system_prompt: str, text: str, temperature: float = DEFAULT_TEMPERATURE) -> dict:
         payload = {
             "model": self.model,
             "messages": [
@@ -115,11 +159,11 @@ class WebAIEngine(TranslationEngine):
                 {"role": "user", "content": text},
             ],
             "stream": False,
-            "temperature": DEFAULT_TEMPERATURE,
+            "temperature": temperature,
         }
         return self._post_json(self.endpoint, payload)
 
-    def _post_google_v1beta(self, system_prompt: str, text: str) -> dict:
+    def _post_google_v1beta(self, system_prompt: str, text: str, temperature: float = DEFAULT_TEMPERATURE) -> dict:
         endpoint = self.endpoint
         if ":" not in endpoint.rsplit("/", maxsplit=1)[-1]:
             endpoint = f"{endpoint}:generateContent"
@@ -127,16 +171,23 @@ class WebAIEngine(TranslationEngine):
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [{"text": text}]}],
-            "generationConfig": {"temperature": DEFAULT_TEMPERATURE},
+            "generationConfig": {"temperature": temperature},
         }
         return self._post_json(endpoint, payload)
 
-    def _post_gemini_routes(self, endpoint: str, system_prompt: str, text: str) -> dict:
+    def _post_gemini_routes(
+        self,
+        endpoint: str,
+        system_prompt: str,
+        text: str,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> dict:
         composed_message = f"{system_prompt}\n\nInput:\n{text}".strip()
         payload = {
             "model": self.model,
             "message": composed_message,
             "files": None,
+            "temperature": temperature,
         }
         response = self._post_json(endpoint, payload)
 

@@ -79,6 +79,24 @@ def split_html(
     return chunks
 
 
+def split_html_with_metadata(
+    content: str,
+    split_tag: SplitTag = DEFAULT_SPLIT_TAG,
+    max_size: int = MAX_CHUNK_SIZE,
+) -> list[dict[str, int | str]]:
+    chunks = split_html(content, split_tag=split_tag, max_size=max_size)
+    total = len(chunks)
+
+    return [
+        {
+            "index": index,
+            "total": total,
+            "text": chunk,
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+
+
 def assemble_html(chunks: list[str], split_tag: SplitTag) -> str:
     wrapper = "div" if split_tag == "<br>" else "body"
 

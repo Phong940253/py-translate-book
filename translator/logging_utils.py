@@ -12,3 +12,11 @@ def log_text(label: str, text: str, max_len: int = 1000):
     preview = text[:max_len]
     suffix = " ...[TRUNCATED]" if len(text) > max_len else ""
     logging.info(f"{label} ({len(text)} chars):\n{preview}{suffix}")
+
+
+def log_consistency_event(event: str, details: str | None = None):
+    if details:
+        logging.info(f"CONSISTENCY::{event}: {details}")
+        return
+
+    logging.info(f"CONSISTENCY::{event}")
