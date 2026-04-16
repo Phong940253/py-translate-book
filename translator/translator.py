@@ -133,6 +133,8 @@ class Translator:
             for chunk in chunks:
                 if not chunk.strip():
                     continue
+                if self._is_tag_only_chunk(chunk):
+                    continue
                 if chunk in self._translation_cache or chunk in queued_set:
                     continue
 
@@ -161,6 +163,9 @@ class Translator:
                 if not chunk.strip():
                     translated.append(chunk)
                     continue
+                if self._is_tag_only_chunk(chunk):
+                    translated.append(chunk)
+                    continue
 
                 cached_result = self._translation_cache.get(chunk)
                 if cached_result is None:
@@ -184,6 +189,14 @@ class Translator:
         chunk_index: int | None = None,
         total_chunks: int | None = None,
     ) -> str:
+        if self._is_tag_only_chunk(text):
+            logging.info("Skipping translation for tag-only chunk")
+            log_text("AI_RESPONSE", text)
+            self.stats["chunks_translated"] += 1
+            self.stats["source_chars"] += len(text)
+            self.stats["translated_chars"] += len(text)
+            return text
+
         prepared_input = self.engine.build_contextual_input(
             current_chunk=text,
             chapter_rules=chapter_rules,
@@ -385,6 +398,15 @@ class Translator:
         if "<" in source_text and any(token in normalized for token in ("\\<", "\\>", "\\_", "\\#", "\\!")):
             normalized = re.sub(r"\\([<>_#!])", r"\1", normalized)
 
+        # Some models rewrite attribute URLs into markdown links, e.g.
+        # href="[http://a.com](http://a.com)" which must be restored.
+        if "<" in source_text and "[http" in normalized:
+            normalized = re.sub(
+                r'([\w:-]+)="\[(https?://[^\]\s]+)\]\((https?://[^)\s]+)\)"',
+                lambda m: f'{m.group(1)}="{m.group(2)}"' if m.group(2) == m.group(3) else m.group(0),
+                normalized,
+            )
+
         return normalized
 
     @staticmethod
@@ -404,7 +426,14 @@ class Translator:
             return True
 
         # Translation must preserve exact tag order and attributes.
-        return source_tags != output_tags
+        mismatch = source_tags != output_tags
+        if mismatch:
+            logging.warning(
+                "HTML tag mismatch | source_tags=%s | output_tags=%s",
+                source_tags,
+                output_tags,
+            )
+        return mismatch
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:
@@ -448,3 +477,15 @@ class Translator:
             cursor = split_idx
 
         return [c for c in chunks if c]
+
+    @staticmethod
+    def _is_tag_only_chunk(text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return True
+
+        if not HTML_TAG_PATTERN.search(stripped):
+            return False
+
+        visible_text = HTML_TAG_PATTERN.sub("", stripped)
+        return not visible_text.strip()
