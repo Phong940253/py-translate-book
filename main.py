@@ -300,7 +300,7 @@ def main():
                 webhook_url=discord_config.get("webhook_url", ""),
                 mention_user_id=str(discord_config.get("mention_user_id", "")).strip() or None,
                 stats={
-                    "summary": "Ban dich da xong. Co the tiep tuc voi chuong tiep theo.",
+                    "summary": "Bản dịch đã xong. Có thể tiếp tục với chương tiếp theo.",
                     "input_name": os.path.basename(args.input),
                     "output_name": os.path.basename(args.output),
                     "engine": args.engine,

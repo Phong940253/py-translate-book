@@ -37,8 +37,8 @@ class DiscordNotifier:
             mention_line = f"<@{mention_user_id}>"
 
         embed = {
-            "title": "Dich truyen hoan tat",
-            "description": stats.get("summary", "Qua trinh dich da ket thuc thanh cong."),
+            "title": "Dịch truyện hoàn tất",
+            "description": stats.get("summary", "Quá trình dịch đã kết thúc thành công."),
             "color": 0x3BA55D,
             "fields": [
                 {
@@ -88,7 +88,7 @@ class DiscordNotifier:
                 },
             ],
             "footer": {
-                "text": "py-translate-book notifier",
+                "text": "Thông báo từ py-translate-book",
             },
             "timestamp": (
                 finished_at.isoformat()
@@ -114,23 +114,23 @@ class DiscordNotifier:
         now = datetime.now()
         mention_line = f"<@{mention_user_id}>" if mention_user_id else ""
         embed = {
-            "title": "Discord webhook test",
-            "description": note or "Webhook test from py-translate-book CLI.",
+            "title": "Kiểm tra Discord webhook",
+            "description": note or "Kiểm tra webhook từ CLI của py-translate-book.",
             "color": 0x2D9CDB,
             "fields": [
                 {
-                    "name": "Time",
+                    "name": "Thời gian",
                     "value": DiscordNotifier._format_timestamp(now),
                     "inline": False,
                 },
                 {
-                    "name": "Status",
-                    "value": "If you see this message, webhook is working.",
+                    "name": "Trạng thái",
+                    "value": "Nếu bạn thấy tin này, webhook đang hoạt động.",
                     "inline": False,
                 },
             ],
             "footer": {
-                "text": "py-translate-book notifier",
+                "text": "Thông báo từ py-translate-book",
             },
             "timestamp": now.isoformat(),
         }
