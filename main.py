@@ -177,6 +177,11 @@ def main():
         if isinstance(config, dict)
         else 3500
     )
+    max_tries = (
+        config.get("translation", {}).get("max_tries", 0)
+        if isinstance(config, dict)
+        else 0
+    )
     common_custom_prompt = (
         config.get("translation", {}).get("custom_prompt")
         if isinstance(config, dict)
@@ -249,6 +254,7 @@ def main():
         split_tag=split_tag,
         consistency_config=consistency_config,
         fallback_max_chunk_size=fallback_max_chunk_size,
+        max_tries=max_tries,
     )
 
     try:

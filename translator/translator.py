@@ -7,9 +7,10 @@ from tqdm import tqdm
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
 from .logging_utils import log_text, log_consistency_event
 
-MAX_TRIES = 3
+DEFAULT_MAX_TRIES = 0
 REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
+MAX_BACKOFF_SECONDS = 60
 FALLBACK_MAX_CHUNK_SIZE = 3500
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
@@ -21,10 +22,16 @@ class Translator:
         split_tag="<br>",
         consistency_config: dict | None = None,
         fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
+        max_tries: int | None = DEFAULT_MAX_TRIES,
     ):
         self.engine = engine
         self.split_tag = split_tag
         self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size))
+        if max_tries is None:
+            self.max_tries = None
+        else:
+            parsed_max_tries = int(max_tries)
+            self.max_tries = None if parsed_max_tries <= 0 else parsed_max_tries
         self._translation_cache: dict[str, str] = {}
         self._chapter_rules_cache: dict[str, str] = {}
 
@@ -228,7 +235,8 @@ class Translator:
                 self.stats["translated_chars"] += len(merged or "")
                 return merged
 
-        for attempt in range(1, MAX_TRIES + 1):
+        attempt = 1
+        while True:
             try:
                 text_to_translate = (
                     prepared_input
@@ -264,11 +272,20 @@ class Translator:
                 return result
 
             except Exception as e:
+                max_tries_label = "inf" if self.max_tries is None else str(self.max_tries)
                 logging.warning(
-                    f"Chunk failed (attempt {attempt}/{MAX_TRIES}): {e}"
+                    f"Chunk failed (attempt {attempt}/{max_tries_label}): {e}"
                 )
-                sleep_seconds = REQUEST_TIMEOUT * (BACKOFF_MULTIPLIER ** (attempt - 1))
+
+                if self.max_tries is not None and attempt >= self.max_tries:
+                    break
+
+                sleep_seconds = min(
+                    REQUEST_TIMEOUT * (BACKOFF_MULTIPLIER ** (attempt - 1)),
+                    MAX_BACKOFF_SECONDS,
+                )
                 time.sleep(sleep_seconds)
+                attempt += 1
 
         logging.error("Giving up on chunk, returning original")
         self.stats["failed_chunks"] += 1
