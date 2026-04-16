@@ -15,9 +15,16 @@ HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 class Translator:
-    def __init__(self, engine, split_tag="<br>", consistency_config: dict | None = None):
+    def __init__(
+        self,
+        engine,
+        split_tag="<br>",
+        consistency_config: dict | None = None,
+        fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
+    ):
         self.engine = engine
         self.split_tag = split_tag
+        self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size))
         self._translation_cache: dict[str, str] = {}
         self._chapter_rules_cache: dict[str, str] = {}
 
@@ -160,8 +167,11 @@ class Translator:
 
         # Some chapters (e.g., TOC/nav blocks) may not contain split tags and can become
         # very large single chunks that frequently time out on upstream APIs.
-        if len(text) > FALLBACK_MAX_CHUNK_SIZE:
-            fallback_parts = self._split_oversized_chunk(text)
+        if len(text) > self.fallback_max_chunk_size:
+            fallback_parts = self._split_oversized_chunk(
+                text,
+                max_size=self.fallback_max_chunk_size,
+            )
             if len(fallback_parts) > 1:
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"

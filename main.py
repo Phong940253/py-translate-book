@@ -71,6 +71,11 @@ def main():
         if isinstance(config, dict)
         else {}
     )
+    fallback_max_chunk_size = (
+        config.get("translation", {}).get("fallback_max_chunk_size", 3500)
+        if isinstance(config, dict)
+        else 3500
+    )
     common_custom_prompt = (
         config.get("translation", {}).get("custom_prompt")
         if isinstance(config, dict)
@@ -145,6 +150,7 @@ def main():
         engine,
         split_tag=split_tag,
         consistency_config=consistency_config,
+        fallback_max_chunk_size=fallback_max_chunk_size,
     )
 
     try:
