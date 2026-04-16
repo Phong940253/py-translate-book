@@ -43,12 +43,27 @@ class Translator:
             200, int(consistency_config.get("rules_max_chars", 1200))
         )
         self.cache_chapter_rules = bool(consistency_config.get("cache_chapter_rules", True))
+        self.stats = {
+            "chapters_processed": 0,
+            "chunks_total": 0,
+            "chunks_translated": 0,
+            "cache_hits": 0,
+            "fallback_split_events": 0,
+            "fallback_generated_parts": 0,
+            "batch_submitted": 0,
+            "batch_results": 0,
+            "failed_chunks": 0,
+            "source_chars": 0,
+            "translated_chars": 0,
+        }
 
     def translate_html(self, soup):
         content = extract_html_content(soup, self.split_tag)
         chunk_records = split_html_with_metadata(content, self.split_tag)
         chunks = [record["text"] for record in chunk_records]
         logging.info(f"Chapter split into {len(chunks)} chunks (before fallback split)")
+        self.stats["chapters_processed"] += 1
+        self.stats["chunks_total"] += len(chunks)
         chapter_rules = self._analyze_chapter_consistency(content) if self.consistency_enabled else ""
         if chapter_rules:
             log_consistency_event("CHAPTER_RULES_READY", f"{len(chapter_rules)} chars")
@@ -76,6 +91,7 @@ class Translator:
 
             cached_result = self._translation_cache.get(cache_key)
             if cached_result is not None:
+                self.stats["cache_hits"] += 1
                 translated.append(cached_result)
                 continue
 
@@ -104,6 +120,8 @@ class Translator:
             content = extract_html_content(soup, self.split_tag)
             chunks = split_html(content, self.split_tag)
             chapter_chunks.append(chunks)
+            self.stats["chapters_processed"] += 1
+            self.stats["chunks_total"] += len(chunks)
 
             for chunk in chunks:
                 if not chunk.strip():
@@ -116,6 +134,7 @@ class Translator:
 
         if queued_chunks:
             logging.info(f"Submitting {len(queued_chunks)} unique chunks to batch API")
+            self.stats["batch_submitted"] += len(queued_chunks)
             batch_results = self.engine.translate_batch(queued_chunks)
 
             if len(batch_results) != len(queued_chunks):
@@ -123,6 +142,10 @@ class Translator:
 
             for source, translated in zip(queued_chunks, batch_results):
                 self._translation_cache[source] = translated
+                self.stats["batch_results"] += 1
+                self.stats["chunks_translated"] += 1
+                self.stats["source_chars"] += len(source)
+                self.stats["translated_chars"] += len(translated or "")
 
         translated_chapters: list[str] = []
         for chunks in chapter_chunks:
@@ -136,6 +159,8 @@ class Translator:
                 if cached_result is None:
                     cached_result = self._translate_chunk(chunk)
                     self._translation_cache[chunk] = cached_result
+                else:
+                    self.stats["cache_hits"] += 1
 
                 translated.append(cached_result)
 
@@ -173,6 +198,8 @@ class Translator:
                 max_size=self.fallback_max_chunk_size,
             )
             if len(fallback_parts) > 1:
+                self.stats["fallback_split_events"] += 1
+                self.stats["fallback_generated_parts"] += len(fallback_parts)
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"
                 )
@@ -196,6 +223,9 @@ class Translator:
                     translated_parts.append(translated_part)
                 merged = "".join(translated_parts)
                 log_text("AI_RESPONSE", merged)
+                self.stats["chunks_translated"] += 1
+                self.stats["source_chars"] += len(text)
+                self.stats["translated_chars"] += len(merged or "")
                 return merged
 
         for attempt in range(1, MAX_TRIES + 1):
@@ -226,6 +256,9 @@ class Translator:
                     raise ValueError("Model output lost HTML tags")
 
                 log_text("AI_RESPONSE", result)
+                self.stats["chunks_translated"] += 1
+                self.stats["source_chars"] += len(text)
+                self.stats["translated_chars"] += len(result or "")
                 return result
 
             except Exception as e:
@@ -236,7 +269,11 @@ class Translator:
                 time.sleep(sleep_seconds)
 
         logging.error("Giving up on chunk, returning original")
+        self.stats["failed_chunks"] += 1
         return text
+
+    def get_stats(self) -> dict:
+        return dict(self.stats)
 
     def _analyze_chapter_consistency(self, content: str) -> str:
         if not self.consistency_enabled:

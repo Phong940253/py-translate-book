@@ -3,6 +3,8 @@ import yaml
 import logging
 import platform
 import subprocess
+import os
+from datetime import datetime
 from ebooklib import epub
 from tqdm import tqdm
 
@@ -12,6 +14,7 @@ from translator.engines.webai_engine import WebAIEngine
 from translator.translator import Translator
 from translator.html_utils import detect_split_tag
 from translator.epub_utils import iter_chapters, load_soup, save_epub
+from translator.discord_notifier import DiscordNotifier
 
 LOG_FILE = "translation.log"
 
@@ -65,6 +68,7 @@ def main():
     parser.add_argument("--sleep-pc-after-done", action="store_true")
 
     args = parser.parse_args()
+    started_at = datetime.now()
     config = read_config(args.config)
     consistency_config = (
         config.get("translation", {}).get("consistency", {})
@@ -81,6 +85,7 @@ def main():
         if isinstance(config, dict)
         else None
     )
+    discord_config = config.get("discord", {}) if isinstance(config, dict) else {}
 
     if args.engine == "openai":
         engine_custom_prompt = config.get("openai", {}).get("custom_prompt")
@@ -170,6 +175,50 @@ def main():
 
         save_epub(book, args.output, source_path=args.input)
         logging.info(f"Saved translated EPUB to {args.output}")
+
+        finished_at = datetime.now()
+        elapsed = finished_at - started_at
+        elapsed_seconds = int(elapsed.total_seconds())
+        elapsed_label = (
+            f"{elapsed_seconds // 3600:02d}:{(elapsed_seconds % 3600) // 60:02d}:{elapsed_seconds % 60:02d}"
+        )
+
+        translator_stats = translator.get_stats()
+        input_size = os.path.getsize(args.input) if os.path.exists(args.input) else 0
+        output_size = os.path.getsize(args.output) if os.path.exists(args.output) else 0
+
+        chunk_stats = (
+            f"total={translator_stats.get('chunks_total', 0)} | "
+            f"translated={translator_stats.get('chunks_translated', 0)} | "
+            f"cache_hits={translator_stats.get('cache_hits', 0)} | "
+            f"failed={translator_stats.get('failed_chunks', 0)} | "
+            f"fallback_splits={translator_stats.get('fallback_split_events', 0)}"
+        )
+
+        file_stats = (
+            f"input={input_size / (1024 * 1024):.2f} MB | "
+            f"output={output_size / (1024 * 1024):.2f} MB | "
+            f"src_chars={translator_stats.get('source_chars', 0)} | "
+            f"out_chars={translator_stats.get('translated_chars', 0)}"
+        )
+
+        if discord_config.get("enabled", True):
+            DiscordNotifier.send_translation_completed(
+                webhook_url=discord_config.get("webhook_url", ""),
+                mention_user_id=str(discord_config.get("mention_user_id", "")).strip() or None,
+                stats={
+                    "summary": "Ban dich da xong. Co the tiep tuc voi chuong tiep theo.",
+                    "input_name": os.path.basename(args.input),
+                    "output_name": os.path.basename(args.output),
+                    "engine": args.engine,
+                    "chapters_label": f"{start}-{end} ({len(selected_chapters)} chapters)",
+                    "elapsed_label": elapsed_label,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "chunk_stats": chunk_stats,
+                    "file_stats": file_stats,
+                },
+            )
 
         if args.sleep_pc_after_done:
             logging.info("Sleeping PC after translation as requested")
