@@ -58,7 +58,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", choices=["openai", "gemini", "webai"])
     parser.add_argument("--openai-batch", action="store_true")
-    parser.add_argument("--input", required=True)
+    parser.add_argument("--input", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--config", default=None)
     parser.add_argument("--from-lang", default="EN")
@@ -67,11 +67,49 @@ def main():
     parser.add_argument("--to-chapter", type=int, default=None)
     parser.add_argument("--preview-chapter", type=int, default=None)
     parser.add_argument("--preview-chars", type=int, default=4000)
+    parser.add_argument("--test-discord-webhook", action="store_true")
+    parser.add_argument("--discord-webhook-url", default=None)
+    parser.add_argument("--discord-mention-user-id", default=None)
     parser.add_argument("--description", default=None)
     parser.add_argument("--sleep-pc-after-done", action="store_true")
 
     args = parser.parse_args()
     started_at = datetime.now()
+
+    if args.test_discord_webhook:
+        if not args.config and not args.discord_webhook_url:
+            raise ValueError(
+                "--test-discord-webhook requires --config or --discord-webhook-url"
+            )
+
+        config = read_config(args.config) if args.config else {}
+        discord_config = config.get("discord", {}) if isinstance(config, dict) else {}
+
+        webhook_url = (
+            args.discord_webhook_url
+            or discord_config.get("webhook_url", "")
+        )
+        mention_user_id = (
+            str(args.discord_mention_user_id).strip()
+            if args.discord_mention_user_id is not None
+            else str(discord_config.get("mention_user_id", "")).strip()
+        ) or None
+
+        success = DiscordNotifier.send_test_message(
+            webhook_url=webhook_url,
+            mention_user_id=mention_user_id,
+            note="CLI webhook connectivity test",
+        )
+
+        if success:
+            print("Discord webhook test: SUCCESS")
+            return
+
+        print("Discord webhook test: FAILED (see translation.log for details)")
+        raise SystemExit(2)
+
+    if not args.input:
+        raise ValueError("--input is required unless --test-discord-webhook is used")
 
     book = epub.read_epub(args.input)
     chapters = list(iter_chapters(book))
