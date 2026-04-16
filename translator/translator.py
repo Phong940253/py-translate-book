@@ -40,6 +40,7 @@ class Translator:
         content = extract_html_content(soup, self.split_tag)
         chunk_records = split_html_with_metadata(content, self.split_tag)
         chunks = [record["text"] for record in chunk_records]
+        logging.info(f"Chapter split into {len(chunks)} chunks (before fallback split)")
         chapter_rules = self._analyze_chapter_consistency(content) if self.consistency_enabled else ""
         if chapter_rules:
             log_consistency_event("CHAPTER_RULES_READY", f"{len(chapter_rules)} chars")
@@ -164,17 +165,24 @@ class Translator:
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"
                 )
-                translated_parts = [
-                    self._translate_chunk(
+                translated_parts = []
+                for part_index, part in enumerate(fallback_parts, start=1):
+                    # Collect previously translated fallback parts for consistency
+                    fallback_previous = [p for p in translated_parts if p.strip()]
+                    # Collect next source fallback parts
+                    fallback_next = [
+                        fb for fb in fallback_parts[part_index:part_index + self.next_source_window]
+                        if fb.strip()
+                    ]
+                    translated_part = self._translate_chunk(
                         part,
                         chapter_rules=chapter_rules,
-                        previous_translated=previous_translated,
-                        next_source=next_source,
-                        chunk_index=chunk_index,
-                        total_chunks=total_chunks,
+                        previous_translated=fallback_previous,
+                        next_source=fallback_next,
+                        chunk_index=part_index,
+                        total_chunks=len(fallback_parts),
                     )
-                    for part in fallback_parts
-                ]
+                    translated_parts.append(translated_part)
                 merged = "".join(translated_parts)
                 log_text("AI_RESPONSE", merged)
                 return merged
