@@ -77,7 +77,6 @@ class WebAIEngine(TranslationEngine):
         log_text("WEBAI_INPUT", text)
 
         output = self._translate_with_system_prompt(system_prompt, text)
-        log_text("WEBAI_OUTPUT", output)
         return output
 
     def translate_with_context(
