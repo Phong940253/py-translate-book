@@ -11,20 +11,13 @@ MAX_TRIES = 3
 REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
 FALLBACK_MAX_CHUNK_SIZE = 3500
-PROTECTED_TOKEN_PATTERN = re.compile(r"(<!--.*?-->|<[^>]+>|&[A-Za-z0-9#]+;)", re.DOTALL)
+HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 class Translator:
-    def __init__(
-        self,
-        engine,
-        split_tag="<br>",
-        consistency_config: dict | None = None,
-        fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
-    ):
+    def __init__(self, engine, split_tag="<br>", consistency_config: dict | None = None):
         self.engine = engine
         self.split_tag = split_tag
-        self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size or FALLBACK_MAX_CHUNK_SIZE))
         self._translation_cache: dict[str, str] = {}
         self._chapter_rules_cache: dict[str, str] = {}
 
@@ -167,8 +160,8 @@ class Translator:
 
         # Some chapters (e.g., TOC/nav blocks) may not contain split tags and can become
         # very large single chunks that frequently time out on upstream APIs.
-        if len(text) > self.fallback_max_chunk_size:
-            fallback_parts = self._split_oversized_chunk(text, max_size=self.fallback_max_chunk_size)
+        if len(text) > FALLBACK_MAX_CHUNK_SIZE:
+            fallback_parts = self._split_oversized_chunk(text)
             if len(fallback_parts) > 1:
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"
@@ -219,20 +212,8 @@ class Translator:
                     result = self.engine.translate(text_to_translate)
                 result = self._normalize_model_output(result, text)
 
-                if self._contains_html_like_tokens(text) and not self._has_preserved_protected_tokens(text, result):
-                    logging.warning(
-                        "Model output lost/changed HTML tokens; attempting repair pass"
-                    )
-                    repaired = self._repair_html_output(source_text=text, candidate_output=result)
-                    repaired = self._normalize_model_output(repaired, text)
-
-                    if self._has_preserved_protected_tokens(text, repaired):
-                        result = repaired
-                    else:
-                        logging.error(
-                            "Repair pass failed to preserve HTML tokens; falling back to source chunk"
-                        )
-                        result = text
+                if self._is_html_tag_missing(text, result):
+                    raise ValueError("Model output lost HTML tags")
 
                 log_text("AI_RESPONSE", result)
                 return result
@@ -341,39 +322,10 @@ class Translator:
         return normalized
 
     @staticmethod
-    def _contains_html_like_tokens(text: str) -> bool:
-        return bool(PROTECTED_TOKEN_PATTERN.search(text or ""))
-
-    @staticmethod
-    def _extract_protected_tokens(text: str) -> list[str]:
-        return PROTECTED_TOKEN_PATTERN.findall(text or "")
-
-    @classmethod
-    def _has_preserved_protected_tokens(cls, source_text: str, output_text: str) -> bool:
-        source_tokens = cls._extract_protected_tokens(source_text)
-        if not source_tokens:
-            return True
-
-        output_tokens = cls._extract_protected_tokens(output_text)
-        return source_tokens == output_tokens
-
-    def _repair_html_output(self, source_text: str, candidate_output: str) -> str:
-        repair_input = (
-            "You must repair a translation output that broke HTML token preservation.\n"
-            "Rules (MUST):\n"
-            "1) Copy every HTML tag/comment/entity from SOURCE exactly, same order.\n"
-            "2) Translate only visible text nodes to Vietnamese.\n"
-            "3) Do not add/remove/reorder tags, attributes, or entities.\n"
-            "4) Output repaired content only.\n\n"
-            "<SOURCE>\n"
-            f"{source_text}\n"
-            "</SOURCE>\n\n"
-            "<BROKEN_OUTPUT>\n"
-            f"{candidate_output}\n"
-            "</BROKEN_OUTPUT>"
-        )
-
-        return self.engine.translate(repair_input)
+    def _is_html_tag_missing(source_text: str, output_text: str) -> bool:
+        source_has_tag = bool(HTML_TAG_PATTERN.search(source_text or ""))
+        output_has_tag = bool(HTML_TAG_PATTERN.search(output_text or ""))
+        return source_has_tag and not output_has_tag
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:
