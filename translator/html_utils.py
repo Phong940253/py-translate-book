@@ -71,10 +71,11 @@ def split_html(
             for c in chunks
         ]
     else:
-        chunks = [
-            c if c.endswith("<br>") else c + "<br>"
-            for c in chunks[:-1]
-        ] + [chunks[-1]]
+        if chunks:
+            chunks = [
+                c if c.endswith("<br>") else c + "<br>"
+                for c in chunks[:-1]
+            ] + [chunks[-1]]
 
     return chunks
 
