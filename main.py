@@ -388,7 +388,15 @@ def main():
             for offset, item in enumerate(tqdm(selected_chapters, desc="Translating chapters"), start=0):
                 chapter_number = effective_start + offset
                 soup = load_soup(item)
-                translated = translator.translate_html(soup)
+                translated = translator.translate_html(
+                    soup,
+                    chapter_number=chapter_number,
+                    chapter_file_name=getattr(item, "file_name", None),
+                    chapter_title=(
+                        getattr(item, "title", None)
+                        or getattr(item, "id", None)
+                    ),
+                )
                 item.content = translated.encode("utf-8")
                 save_epub(book, args.output, source_path=args.input)
 
@@ -432,6 +440,7 @@ def main():
             f"translated={translator_stats.get('chunks_translated', 0)} | "
             f"cache_hits={translator_stats.get('cache_hits', 0)} | "
             f"failed={translator_stats.get('failed_chunks', 0)} | "
+            f"manual_skips={translator_stats.get('manual_review_skips', 0)} | "
             f"fallback_splits={translator_stats.get('fallback_split_events', 0)}"
         )
 

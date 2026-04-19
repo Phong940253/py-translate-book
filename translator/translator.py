@@ -2,6 +2,9 @@ import time
 import logging
 import re
 import hashlib
+import os
+import json
+from datetime import datetime
 from difflib import SequenceMatcher
 from tqdm import tqdm
 
@@ -15,6 +18,7 @@ MAX_BACKOFF_SECONDS = 60
 FALLBACK_MAX_CHUNK_SIZE = 3500
 DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.99
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
 
 
 class Translator:
@@ -67,11 +71,18 @@ class Translator:
             "batch_submitted": 0,
             "batch_results": 0,
             "failed_chunks": 0,
+            "manual_review_skips": 0,
             "source_chars": 0,
             "translated_chars": 0,
         }
 
-    def translate_html(self, soup):
+    def translate_html(
+        self,
+        soup,
+        chapter_number: int | None = None,
+        chapter_file_name: str | None = None,
+        chapter_title: str | None = None,
+    ):
         content = extract_html_content(soup, self.split_tag)
         chunk_records = split_html_with_metadata(content, self.split_tag)
         chunks = [record["text"] for record in chunk_records]
@@ -116,6 +127,10 @@ class Translator:
                 next_source=next_source_context,
                 chunk_index=index + 1,
                 total_chunks=len(chunks),
+                chunk_path=str(index + 1),
+                chapter_number=chapter_number,
+                chapter_file_name=chapter_file_name,
+                chapter_title=chapter_title,
             )
             self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
@@ -195,6 +210,10 @@ class Translator:
         next_source: list[str] | None = None,
         chunk_index: int | None = None,
         total_chunks: int | None = None,
+        chunk_path: str | None = None,
+        chapter_number: int | None = None,
+        chapter_file_name: str | None = None,
+        chapter_title: str | None = None,
     ) -> str:
         if self._is_tag_only_chunk(text):
             logging.info("Skipping translation for tag-only chunk")
@@ -246,6 +265,14 @@ class Translator:
                         next_source=fallback_next,
                         chunk_index=part_index,
                         total_chunks=len(fallback_parts),
+                        chunk_path=(
+                            f"{chunk_path}.{part_index}"
+                            if chunk_path
+                            else str(part_index)
+                        ),
+                        chapter_number=chapter_number,
+                        chapter_file_name=chapter_file_name,
+                        chapter_title=chapter_title,
                     )
                     translated_parts.append(translated_part)
                 merged = "".join(translated_parts)
@@ -256,6 +283,7 @@ class Translator:
                 return merged
 
         attempt = 1
+        specific_http500_abort_count = 0
         while True:
             try:
                 text_to_translate = (
@@ -297,6 +325,28 @@ class Translator:
                     f"Chunk failed (attempt {attempt}/{max_tries_label}): {e}"
                 )
 
+                if self._is_google_silent_abort_http500_error(e):
+                    specific_http500_abort_count += 1
+                    if specific_http500_abort_count >= 3:
+                        self.stats["manual_review_skips"] += 1
+                        self._record_manual_translation_task(
+                            source_text=text,
+                            prepared_prompt=prepared_input,
+                            last_attempt_prompt=text_to_translate,
+                            error_message=str(e),
+                            attempt=attempt,
+                            chapter_number=chapter_number,
+                            chapter_file_name=chapter_file_name,
+                            chapter_title=chapter_title,
+                            chunk_index=chunk_index,
+                            total_chunks=total_chunks,
+                            chunk_path=chunk_path,
+                        )
+                        logging.error(
+                            "Skipping chunk after 3 repeated WebAI HTTP 500 silent-abort errors"
+                        )
+                        break
+
                 if self.max_tries is not None and attempt >= self.max_tries:
                     break
 
@@ -310,6 +360,51 @@ class Translator:
         logging.error("Giving up on chunk, returning original")
         self.stats["failed_chunks"] += 1
         return text
+
+    @staticmethod
+    def _is_google_silent_abort_http500_error(error: Exception) -> bool:
+        message = str(error).lower()
+        if "http 500" not in message:
+            return False
+        return "silently aborted by google" in message
+
+    def _record_manual_translation_task(
+        self,
+        source_text: str,
+        prepared_prompt: str,
+        last_attempt_prompt: str,
+        error_message: str,
+        attempt: int,
+        chapter_number: int | None,
+        chapter_file_name: str | None,
+        chapter_title: str | None,
+        chunk_index: int | None,
+        total_chunks: int | None,
+        chunk_path: str | None,
+    ) -> None:
+        payload = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "error": error_message,
+            "attempt": attempt,
+            "source_text": source_text,
+            "prompt": prepared_prompt,
+            "last_attempt_prompt": last_attempt_prompt,
+            "ebook_position": {
+                "chapter_number": chapter_number,
+                "chapter_file_name": chapter_file_name,
+                "chapter_title": chapter_title,
+                "chunk_index": chunk_index,
+                "total_chunks": total_chunks,
+                "chunk_path": chunk_path,
+            },
+        }
+
+        review_file = os.path.abspath(DEFAULT_MANUAL_REVIEW_FILE)
+        with open(review_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False))
+            f.write("\n")
+
+        logging.warning("Manual review task appended to %s", review_file)
 
     def get_stats(self) -> dict:
         return dict(self.stats)
