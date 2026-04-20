@@ -9,7 +9,7 @@ MAX_CHUNK_SIZE = 4000
 
 
 def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
-    container = soup.find("div") or soup.find("body")
+    container = soup.find("body") or soup.find("div")
     if not container:
         return ""
 
@@ -24,7 +24,7 @@ def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
 
 
 def detect_split_tag(soup: BeautifulSoup) -> SplitTag:
-    container = soup.find("div") or soup.find("body")
+    container = soup.find("body") or soup.find("div")
     if not container:
         return DEFAULT_SPLIT_TAG
 

@@ -87,8 +87,8 @@ def _merge_translated_document(original_content, translated_content):
     original_soup = BeautifulSoup(_to_bytes(original_content), "html.parser")
     translated_soup = BeautifulSoup(_to_bytes(translated_content), "html.parser")
 
-    original_container = original_soup.find("div") or original_soup.find("body")
-    translated_container = translated_soup.find("div") or translated_soup.find("body")
+    original_container = original_soup.find("body") or original_soup.find("div")
+    translated_container = translated_soup.find("body") or translated_soup.find("div")
 
     if original_container is None or translated_container is None:
         return _to_bytes(translated_content)
