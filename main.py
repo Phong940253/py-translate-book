@@ -17,6 +17,7 @@ from translator.translator import Translator
 from translator.html_utils import detect_split_tag
 from translator.epub_utils import iter_chapters, load_soup, save_epub
 from translator.discord_notifier import DiscordNotifier
+from translator.illustration import IllustrationManager
 
 LOG_FILE = "translation.log"
 
@@ -244,6 +245,22 @@ def main():
         if isinstance(config, dict)
         else None
     )
+    illustration_config = (
+        config.get("translation", {}).get("illustration", {})
+        if isinstance(config, dict)
+        else {}
+    )
+    if isinstance(config, dict) and isinstance(illustration_config, dict):
+        webai_cfg = config.get("webai", {}) or {}
+        if "webai_base_url" not in illustration_config:
+            illustration_config["webai_base_url"] = webai_cfg.get("base_url", "")
+        if "webai_api_key" not in illustration_config:
+            illustration_config["webai_api_key"] = webai_cfg.get("api_key", "")
+        if "webai_image_endpoint" not in illustration_config:
+            illustration_config["webai_image_endpoint"] = webai_cfg.get(
+                "image_endpoint",
+                "/v1/images/generations",
+            )
     discord_config = config.get("discord", {}) if isinstance(config, dict) else {}
 
     if args.engine == "openai":
@@ -355,6 +372,7 @@ def main():
     translator = Translator(
         engine,
         split_tag=split_tag,
+        illustration_manager=IllustrationManager(book=book, config=illustration_config),
         consistency_config=consistency_config,
         fallback_max_chunk_size=fallback_max_chunk_size,
         max_tries=max_tries,

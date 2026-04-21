@@ -109,6 +109,7 @@ def save_epub(book, path, source_path=None):
     with zipfile.ZipFile(source_path, "r") as source_zip:
         archive_names = set(source_zip.namelist())
         replacements = {}
+        additions = {}
 
         for item in book.get_items():
             file_name = getattr(item, "file_name", None)
@@ -118,6 +119,7 @@ def save_epub(book, path, source_path=None):
 
             archive_name = _resolve_archive_name(archive_names, file_name)
             if archive_name is None:
+                additions[file_name] = _to_bytes(content)
                 continue
 
             original_content = source_zip.read(archive_name)
@@ -130,7 +132,7 @@ def save_epub(book, path, source_path=None):
                 new_content,
             )
 
-        if not replacements:
+        if not replacements and not additions:
             shutil.copyfile(source_path, path)
             return
 
@@ -141,6 +143,11 @@ def save_epub(book, path, source_path=None):
                     data = source_zip.read(info.filename)
 
                 output_zip.writestr(info, data)
+
+            for file_name, content in additions.items():
+                if file_name in archive_names:
+                    continue
+                output_zip.writestr(file_name, content)
         return
 
     normalize_book_toc(book)

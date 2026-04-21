@@ -26,6 +26,7 @@ class Translator:
         self,
         engine,
         split_tag="<br>",
+        illustration_manager=None,
         consistency_config: dict | None = None,
         fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
         max_tries: int | None = DEFAULT_MAX_TRIES,
@@ -33,6 +34,7 @@ class Translator:
     ):
         self.engine = engine
         self.split_tag = split_tag
+        self.illustration_manager = illustration_manager
         self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size))
         if max_tries is None:
             self.max_tries = None
@@ -84,7 +86,18 @@ class Translator:
         chapter_title: str | None = None,
     ):
         content = extract_html_content(soup, self.split_tag)
-        chunk_records = split_html_with_metadata(content, self.split_tag)
+        effective_split_tag = self.split_tag
+        if effective_split_tag not in content:
+            alternate_split_tag = "</p>" if effective_split_tag == "<br>" else "<br>"
+            if alternate_split_tag in content:
+                logging.info(
+                    "Adjusted split_tag for chapter from %s to %s",
+                    effective_split_tag,
+                    alternate_split_tag,
+                )
+                effective_split_tag = alternate_split_tag
+
+        chunk_records = split_html_with_metadata(content, effective_split_tag)
         chunks = [record["text"] for record in chunk_records]
         logging.info(f"Chapter split into {len(chunks)} chunks (before fallback split)")
         self.stats["chapters_processed"] += 1
@@ -135,7 +148,17 @@ class Translator:
             self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
 
-        return assemble_html(translated, self.split_tag)
+        if self.illustration_manager and self.illustration_manager.is_enabled():
+            translated = self.illustration_manager.inject_illustrations(
+                translated_chunks=translated,
+                source_chunks=chunks,
+                split_tag=effective_split_tag,
+                chapter_number=chapter_number,
+                chapter_file_name=chapter_file_name,
+                chapter_title=chapter_title,
+            )
+
+        return assemble_html(translated, effective_split_tag)
 
     def translate_book_html_batch(self, soups: list) -> list[str]:
         if not self.engine.supports_batch():
@@ -179,7 +202,7 @@ class Translator:
                 self.stats["translated_chars"] += len(translated or "")
 
         translated_chapters: list[str] = []
-        for chunks in chapter_chunks:
+        for chapter_offset, chunks in enumerate(chapter_chunks, start=1):
             translated: list[str] = []
             for chunk in chunks:
                 if not chunk.strip():
@@ -197,6 +220,16 @@ class Translator:
                     self.stats["cache_hits"] += 1
 
                 translated.append(cached_result)
+
+            if self.illustration_manager and self.illustration_manager.is_enabled():
+                translated = self.illustration_manager.inject_illustrations(
+                    translated_chunks=translated,
+                    source_chunks=chunks,
+                    split_tag=self.split_tag,
+                    chapter_number=chapter_offset,
+                    chapter_file_name=None,
+                    chapter_title=None,
+                )
 
             translated_chapters.append(assemble_html(translated, self.split_tag))
 
@@ -223,21 +256,8 @@ class Translator:
             self.stats["translated_chars"] += len(text)
             return text
 
-        prepared_input = self.engine.build_contextual_input(
-            current_chunk=text,
-            chapter_rules=chapter_rules,
-            previous_translated=previous_translated,
-            next_source=next_source,
-            chunk_index=chunk_index,
-            total_chunks=total_chunks,
-        )
-
-        log_text("INPUT_CHUNK", text)
-        if prepared_input != text:
-            log_text("INPUT_CHUNK_WITH_CONTEXT", prepared_input)
-
-        # Some chapters (e.g., TOC/nav blocks) may not contain split tags and can become
-        # very large single chunks that frequently time out on upstream APIs.
+        # Split oversized chunks before adding contextual wrappers so each request
+        # stays bounded and context windows remain predictable.
         if len(text) > self.fallback_max_chunk_size:
             fallback_parts = self._split_oversized_chunk(
                 text,
@@ -251,9 +271,14 @@ class Translator:
                 )
                 translated_parts = []
                 for part_index, part in enumerate(fallback_parts, start=1):
-                    # Collect previously translated fallback parts for consistency
-                    fallback_previous = [p for p in translated_parts if p.strip()]
-                    # Collect next source fallback parts
+                    if self.consistency_enabled and self.previous_translated_window > 0:
+                        start = max(0, len(translated_parts) - self.previous_translated_window)
+                        fallback_previous = [
+                            p for p in translated_parts[start:] if p.strip()
+                        ]
+                    else:
+                        fallback_previous = []
+
                     fallback_next = [
                         fb for fb in fallback_parts[part_index:part_index + self.next_source_window]
                         if fb.strip()
@@ -281,6 +306,19 @@ class Translator:
                 self.stats["source_chars"] += len(text)
                 self.stats["translated_chars"] += len(merged or "")
                 return merged
+
+        prepared_input = self.engine.build_contextual_input(
+            current_chunk=text,
+            chapter_rules=chapter_rules,
+            previous_translated=previous_translated,
+            next_source=next_source,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        )
+
+        log_text("INPUT_CHUNK", text)
+        if prepared_input != text:
+            log_text("INPUT_CHUNK_WITH_CONTEXT", prepared_input)
 
         attempt = 1
         specific_http500_abort_count = 0
@@ -515,7 +553,13 @@ class Translator:
     def _is_html_tag_missing(source_text: str, output_text: str) -> bool:
         source_has_tag = bool(HTML_TAG_PATTERN.search(source_text or ""))
         output_has_tag = bool(HTML_TAG_PATTERN.search(output_text or ""))
-        return source_has_tag and not output_has_tag
+        val = source_has_tag and not output_has_tag
+        if val:
+            logging.warning("HTML tag missing in output")
+            logging.warning("Source text with tags:\n%s", source_text)
+            logging.warning("Output text:\n%s", output_text)
+        return val
+    
 
     def _has_html_structure_mismatch(self, source_text: str, output_text: str) -> bool:
         source_tags = [self._canonicalize_html_tag(tag) for tag in HTML_TAG_PATTERN.findall(source_text or "")]
