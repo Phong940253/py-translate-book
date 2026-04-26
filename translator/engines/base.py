@@ -51,6 +51,19 @@ class TranslationEngine(ABC):
             "Use reference context to resolve pronouns/forms of address consistently.\n"
             "Translate only CURRENT_CHUNK and output translated CURRENT_CHUNK only.\n"
             "Do not output REFERENCE sections. Preserve HTML structure in CURRENT_CHUNK.\n\n"
+            "ADDRESSING CONSISTENCY (critical):\n"
+            "- Resolve forms of address by speaker -> addressee for each utterance.\n"
+            "- Never apply a rule for A -> B to narration or to lines spoken by C.\n"
+            "- Do not let second-person forms (you/cau/ban...) override first-person self-reference (I/me...) of the current speaker.\n"
+            "- Keep first-person pronouns tied to who is speaking in CURRENT_CHUNK, not who is addressed in nearby lines.\n"
+            "- If speaker/addressee is unclear, prefer neutral/natural Vietnamese and keep it stable inside the chunk.\n\n"
+            "CRITICAL HTML LOCK (must pass all):\n"
+            "- Copy every HTML tag and entity from CURRENT_CHUNK exactly as-is.\n"
+            "- Keep tag order, tag count, and nesting unchanged.\n"
+            "- Keep all line breaks and separators (including <br>, <br/>, <br />) unchanged.\n"
+            "- Replace only human-readable text nodes between tags.\n"
+            "- Preserve transmission markers exactly: <<...>> or &lt;&lt;...&gt;&gt;; never collapse to <>.\n"
+            "- If unsure, keep original token unchanged; never drop a tag.\n\n"
             f"{chunk_position}"
             "<CHAPTER_RULES>\n"
             f"{rules_text}\n"
@@ -72,8 +85,10 @@ class TranslationEngine(ABC):
             "Output plain text only, no markdown, no code fences.\n"
             "Required output sections exactly in this order:\n"
             "1) Characters: comma-separated names.\n"
-            "2) Address rules: one mapping per line as 'A -> B: ...'.\n"
-            "3) Default fallback: one short line for ambiguous cases.\n"
+            "2) Address rules: one mapping per line as 'Speaker A -> Addressee B: xung ho'.\n"
+            "3) Narration/inner monologue defaults: one short line for first-person and second-person fallback when speaker is unclear.\n"
+            "4) Default fallback: one short line for ambiguous cases.\n"
+            "Rules must be role-specific: do not mix first-person self-reference with second-person address forms.\n"
             "Keep total output under 25 lines.\n\n"
             "Chapter excerpt:\n"
             f"{chapter_excerpt}"
@@ -105,6 +120,9 @@ Output constraints (MUST follow):
     - Think of every tag/entity as protected tokens and copy them 1:1.
     - Never rewrite <...>, </...>, <.../>, comments, or &...; entities.
     - Keep punctuation/spacing around tags natural, but never alter tag text.
+    - Preserve exact tag sequence from input to output (same order and count).
+    - Preserve all explicit line breaks and separators such as <br>, <br/>, <br />.
+    - If uncertain about a fragment, keep it unchanged rather than deleting/reformatting.
 
 Cleaning rules:
 - Remove watermark/noise fragments such as: bqgooヽcc, bqg00, bqg., wap, .com-like tail noise.

@@ -17,7 +17,7 @@ BACKOFF_MULTIPLIER = 1.5
 MAX_BACKOFF_SECONDS = 60
 FALLBACK_MAX_CHUNK_SIZE = 3500
 DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.99
-HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+HTML_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>|<![^>]*>|<\?[^>]*\?>")
 DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
 
 
@@ -516,7 +516,9 @@ class Translator:
         retry_prefix = (
             "Retry translation strictly. Translate ONLY visible text nodes. "
             "Keep all HTML tags, attributes, attribute values, entities, URLs, and code-like tokens unchanged. "
-            "Do not add/remove/reorder tags. Output only translated content.\n\n"
+            "Do not add/remove/reorder tags. Preserve exact tag sequence, line breaks, and <br> separators. "
+            "If any HTML tag would be lost, keep that fragment unchanged instead of rewriting it. "
+            "Output translated content only with original HTML preserved.\n\n"
             "Input:\n"
         )
         return f"{retry_prefix}{text}"
@@ -546,6 +548,12 @@ class Translator:
                 lambda m: f'{m.group(1)}="{m.group(2)}"' if m.group(2) == m.group(3) else m.group(0),
                 normalized,
             )
+
+        # If source uses entity-escaped double-angle markers (&lt;&lt;...&gt;&gt;),
+        # keep that style in output to avoid malformed HTML/text parsing later.
+        source_uses_entity_brackets = "&lt;&lt;" in source_text and "&gt;&gt;" in source_text
+        if source_uses_entity_brackets and ("<<" in normalized or ">>" in normalized):
+            normalized = normalized.replace("<<", "&lt;&lt;").replace(">>", "&gt;&gt;")
 
         return normalized
 
