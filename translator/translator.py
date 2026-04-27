@@ -56,6 +56,12 @@ class Translator:
         self.next_source_window = max(
             0, int(consistency_config.get("next_source_window", 0))
         )
+        self.previous_context_max_chars = max(
+            0, int(consistency_config.get("previous_context_max_chars", 2400))
+        )
+        self.next_source_max_chars = max(
+            0, int(consistency_config.get("next_source_max_chars", 2400))
+        )
         self.analysis_max_chars = max(
             1000, int(consistency_config.get("analysis_max_chars", 18000))
         )
@@ -87,6 +93,15 @@ class Translator:
     ):
         content = extract_html_content(soup, self.split_tag)
         effective_split_tag = self.split_tag
+        br_count = content.count("<br>")
+        p_close_count = content.count("</p>")
+
+        # Re-evaluate split tag per chapter. A global split tag chosen from an
+        # earlier chapter can create tiny + massive chunk pairs on chapters
+        # with different markup density.
+        if p_close_count > 0 and br_count > 0:
+            effective_split_tag = "</p>" if p_close_count >= br_count else "<br>"
+
         if effective_split_tag not in content:
             alternate_split_tag = "</p>" if effective_split_tag == "<br>" else "<br>"
             if alternate_split_tag in content:
@@ -481,14 +496,62 @@ class Translator:
             return []
 
         start = max(0, index - self.previous_translated_window)
-        return [chunk for chunk in translated[start:index] if chunk.strip()]
+        selected = [chunk for chunk in translated[start:index] if chunk.strip()]
+        return self._limit_context_chunks(
+            selected,
+            max_chars=self.previous_context_max_chars,
+            keep_recent_tail=True,
+        )
 
     def _collect_next_source(self, chunks: list[str], index: int) -> list[str]:
         if not self.consistency_enabled or self.next_source_window <= 0:
             return []
 
         end = min(len(chunks), index + 1 + self.next_source_window)
-        return [chunk for chunk in chunks[index + 1:end] if chunk.strip()]
+        selected = [chunk for chunk in chunks[index + 1:end] if chunk.strip()]
+        return self._limit_context_chunks(
+            selected,
+            max_chars=self.next_source_max_chars,
+            keep_recent_tail=False,
+        )
+
+    @staticmethod
+    def _limit_context_chunks(
+        chunks: list[str],
+        max_chars: int,
+        keep_recent_tail: bool,
+    ) -> list[str]:
+        if max_chars <= 0 or not chunks:
+            return []
+
+        ordered = list(reversed(chunks)) if keep_recent_tail else list(chunks)
+        kept: list[str] = []
+        consumed = 0
+
+        for chunk in ordered:
+            text = (chunk or "").strip()
+            if not text:
+                continue
+
+            remaining = max_chars - consumed
+            if remaining <= 0:
+                break
+
+            if len(text) <= remaining:
+                kept.append(text)
+                consumed += len(text)
+                continue
+
+            # Keep a useful tail for previous context and a useful head for next
+            # context so the model still sees nearby dialogue cues.
+            if remaining >= 200:
+                clipped = text[-remaining:] if keep_recent_tail else text[:remaining]
+                kept.append(clipped)
+            break
+
+        if keep_recent_tail:
+            kept.reverse()
+        return kept
 
     def _build_cache_key(
         self,
