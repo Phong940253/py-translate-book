@@ -11,7 +11,7 @@ from tqdm import tqdm
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
 from .logging_utils import log_text, log_consistency_event
 
-DEFAULT_MAX_TRIES = 0
+DEFAULT_MAX_TRIES = 30
 REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
 MAX_BACKOFF_SECONDS = 60
@@ -19,6 +19,32 @@ FALLBACK_MAX_CHUNK_SIZE = 3500
 DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.99
 HTML_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>|<![^>]*>|<\?[^>]*\?>")
 DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
+
+# Tags whose boundaries are allowed to change between source and translated
+# output (paragraphs and page-anchor markers). Their presence/count is not
+# treated as a structural break.
+_IGNORABLE_STRUCTURE_TAGS = {
+    "<p>", "</p>", "<br>", "<br/>", "<br />", "<a>", "</a>",
+}
+_TAG_NAME_RE = re.compile(r"^<(/?)([A-Za-z][A-Za-z0-9]*)")
+
+
+def _normalize_tag_name(tag: str) -> str:
+    """Reduce a tag to its name (drop attributes) for structural comparison."""
+    match = _TAG_NAME_RE.match(tag or "")
+    if not match:
+        return tag
+    slash, name = match.group(1), match.group(2).lower()
+    return f"<{slash}{name}>"
+
+
+def _structural_tags(tags) -> list:
+    return [t for t in tags if t not in _IGNORABLE_STRUCTURE_TAGS]
+
+
+def _similarity_tags(tags) -> list:
+    # Keep everything except paragraph boundaries for sequence similarity.
+    return [t for t in tags if t not in ("<p>", "</p>")]
 
 
 class Translator:
@@ -37,10 +63,10 @@ class Translator:
         self.illustration_manager = illustration_manager
         self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size))
         if max_tries is None:
-            self.max_tries = None
+            self.max_tries = DEFAULT_MAX_TRIES
         else:
             parsed_max_tries = int(max_tries)
-            self.max_tries = None if parsed_max_tries <= 0 else parsed_max_tries
+            self.max_tries = parsed_max_tries if parsed_max_tries > 0 else DEFAULT_MAX_TRIES
         self.html_structure_min_similarity = min(
             1.0,
             max(0.0, float(html_structure_min_similarity)),
@@ -633,25 +659,59 @@ class Translator:
     
 
     def _has_html_structure_mismatch(self, source_text: str, output_text: str) -> bool:
-        source_tags = [self._canonicalize_html_tag(tag) for tag in HTML_TAG_PATTERN.findall(source_text or "")]
-        if not source_tags:
+        if not source_text or not output_text:
             return False
 
-        output_tags = [self._canonicalize_html_tag(tag) for tag in HTML_TAG_PATTERN.findall(output_text or "")]
-        if not output_tags:
+        source_raw = HTML_TAG_PATTERN.findall(source_text or "")
+        output_raw = HTML_TAG_PATTERN.findall(output_text or "")
+        if not source_raw:
+            return False
+        if not output_raw:
             return True
 
-        similarity = SequenceMatcher(None, source_tags, output_tags).ratio()
+        source_tags = [_normalize_tag_name(t) for t in source_raw]
+        output_tags = [_normalize_tag_name(t) for t in output_raw]
+
+        # 1) Structural-tag integrity: div/section/span/strong/em/img must be
+        #    preserved. Paragraph/line-break boundaries are allowed to change
+        #    (models legitimately merge or split paragraphs).
+        if sorted(_structural_tags(source_tags)) != sorted(_structural_tags(output_tags)):
+            logging.warning(
+                "HTML structural tags changed | source=%s | output=%s",
+                sorted(_structural_tags(source_tags)),
+                sorted(_structural_tags(output_tags)),
+            )
+            logging.warning("Source text with tags:\n%s", source_text)
+            logging.warning("Output text with tags:\n%s", output_text)
+            return True
+
+        # 2) Gross content loss: model returned almost nothing.
+        source_text_len = len(HTML_TAG_PATTERN.sub("", source_text).strip())
+        output_text_len = len(HTML_TAG_PATTERN.sub("", output_text).strip())
+        if source_text_len > 0 and output_text_len < 0.3 * source_text_len:
+            logging.warning(
+                "HTML output lost too much text | source_chars=%s | output_chars=%s",
+                source_text_len,
+                output_text_len,
+            )
+            logging.warning("Source text with tags:\n%s", source_text)
+            logging.warning("Output text with tags:\n%s", output_text)
+            return True
+
+        # 3) Tag-sequence similarity ignoring paragraph boundaries.
+        similarity_src = _similarity_tags(source_tags)
+        similarity_out = _similarity_tags(output_tags)
+        if not similarity_src:
+            return False
+
+        similarity = SequenceMatcher(None, similarity_src, similarity_out).ratio()
         mismatch = similarity < self.html_structure_min_similarity
         if mismatch:
             logging.warning(
-                "HTML tag mismatch | similarity=%.4f | threshold=%.4f | source_tags=%s | output_tags=%s",
+                "HTML tag similarity too low | similarity=%.4f | threshold=%.4f",
                 similarity,
                 self.html_structure_min_similarity,
-                source_tags,
-                output_tags,
             )
-            
             logging.warning("Source text with tags:\n%s", source_text)
             logging.warning("Output text with tags:\n%s", output_text)
         else:
@@ -698,7 +758,11 @@ class Translator:
                         split_idx = max(split_idx, candidate)
 
             if split_idx == -1:
-                split_idx = window_end
+                # No semantic boundary found in the window. Cut at the nearest
+                # tag boundary (just after a '>') so we never split an HTML tag
+                # in half, which would corrupt the markup.
+                tag_end = text.rfind(">", cursor, window_end)
+                split_idx = tag_end + 1 if tag_end != -1 else window_end
 
             chunks.append(text[cursor:split_idx])
             cursor = split_idx

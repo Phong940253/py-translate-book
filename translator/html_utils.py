@@ -16,9 +16,10 @@ def extract_html_content(soup: BeautifulSoup, split_tag: SplitTag) -> str:
     content = "".join(str(x).strip() for x in container.contents)
     content = re.sub(r"\n+", "", content)
 
-    if split_tag == "<br>":
-        content = content.replace("<br />", "<br>")
-        content = content.replace("<br/>", "<br>")
+    # Always normalize <br> variants to a single form so re-evaluated split tags
+    # (e.g. when a chapter switches from </p> to <br>) still match correctly.
+    content = content.replace("<br />", "<br>")
+    content = content.replace("<br/>", "<br>")
 
     return content
 
@@ -66,10 +67,15 @@ def split_html(
         chunks.append(buf)
 
     if split_tag == "</p>":
-        chunks = [
-            c if c.endswith("</p>") else c + "</p>"
-            for c in chunks
-        ]
+        # Only re-append a closing </p> when the original content actually
+        # ended with one. Otherwise the trailing fragment is intentional closing
+        # structure (e.g. </section></div>) and appending </p> would corrupt it
+        # into malformed markup like </section></div></p>.
+        if content.endswith("</p>"):
+            chunks = [
+                c if c.endswith("</p>") else c + "</p>"
+                for c in chunks
+            ]
     else:
         if chunks:
             chunks = [

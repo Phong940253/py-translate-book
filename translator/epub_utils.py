@@ -2,9 +2,52 @@ import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 import re
+import os
 import shutil
 import zipfile
 from itertools import count
+
+
+_EXT_MEDIA_TYPE = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".css": "text/css",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+
+
+def _infer_media_type(file_name: str) -> str:
+    ext = os.path.splitext(file_name or "")[1].lower()
+    return _EXT_MEDIA_TYPE.get(ext, "application/octet-stream")
+
+
+def _inject_manifest_entries(opf_text: str, additions: dict) -> str:
+    """Insert <item> manifest entries for newly added files (e.g. illustrations)
+    so they are declared in content.opf and render in EPUB readers."""
+    manifest_close = re.search(r"</manifest\s*>", opf_text, re.IGNORECASE)
+    if not manifest_close:
+        return opf_text
+
+    items = []
+    for file_name in additions:
+        item_id = "added-" + re.sub(r"[^A-Za-z0-9_.-]", "-", str(file_name))
+        media = _infer_media_type(file_name)
+        items.append(
+            f'    <item id="{item_id}" href="{file_name}" media-type="{media}"/>\n'
+        )
+
+    if not items:
+        return opf_text
+
+    pos = manifest_close.start()
+    return opf_text[:pos] + "".join(items) + opf_text[pos:]
 
 
 def iter_chapters(book):
@@ -135,6 +178,20 @@ def save_epub(book, path, source_path=None):
         if not replacements and not additions:
             shutil.copyfile(source_path, path)
             return
+
+        # New items (e.g. generated illustrations) are added to the zip but the
+        # original OPF manifest does not know about them. Inject manifest entries
+        # so readers render them and the EPUB stays valid.
+        if additions:
+            opf_names = [n for n in archive_names if n.lower().endswith(".opf")]
+            if opf_names:
+                opf_name = opf_names[0]
+                opf_bytes = source_zip.read(opf_name)
+                updated_opf = _inject_manifest_entries(
+                    opf_bytes.decode("utf-8", errors="ignore"),
+                    additions,
+                )
+                replacements[opf_name] = updated_opf.encode("utf-8")
 
         with zipfile.ZipFile(path, "w") as output_zip:
             for info in source_zip.infolist():
