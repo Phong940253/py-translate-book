@@ -201,62 +201,119 @@ class Translator:
 
         return assemble_html(translated, effective_split_tag)
 
-    def translate_book_html_batch(self, soups: list) -> list[str]:
+    def translate_book_html_batch(
+        self,
+        soups: list,
+        chapter_numbers: list | None = None,
+        chapter_file_names: list | None = None,
+        chapter_titles: list | None = None,
+    ) -> list[str]:
         if not self.engine.supports_batch():
             raise RuntimeError("Current engine does not support batch translation")
 
-        chapter_chunks: list[list[str]] = []
-        queued_chunks: list[str] = []
-        queued_set: set[str] = set()
+        n = len(soups)
+        chapter_numbers = chapter_numbers or [None] * n
+        chapter_file_names = chapter_file_names or [None] * n
+        chapter_titles = chapter_titles or [None] * n
 
-        for soup in soups:
+        # Per-chapter state: list of (translatable, chunk_text, split_tag, cache_key)
+        chapter_entries: list[list[tuple[bool, str, str, str | None]]] = []
+        queued_texts: list[str] = []
+        queued_text_set: set[str] = set()
+        # cache_key -> chunk text (needed to map batch results back to keys)
+        chunk_text_for_key: dict[str, str] = {}
+
+        for soup, chapter_number, chapter_file_name, chapter_title in zip(
+            soups, chapter_numbers, chapter_file_names, chapter_titles
+        ):
             content = extract_html_content(soup, self.split_tag)
-            chunks = split_html(content, self.split_tag)
-            chapter_chunks.append(chunks)
+
+            # Per-chapter split-tag re-evaluation (same logic as translate_html).
+            effective_split_tag = self.split_tag
+            br_count = content.count("<br>")
+            p_close_count = content.count("</p>")
+            if p_close_count > 0 and br_count > 0:
+                effective_split_tag = "</p>" if p_close_count >= br_count else "<br>"
+            if effective_split_tag not in content:
+                alternate_split_tag = "</p>" if effective_split_tag == "<br>" else "<br>"
+                if alternate_split_tag in content:
+                    effective_split_tag = alternate_split_tag
+
+            chunks = split_html(content, effective_split_tag)
+            chapter_entries.append([])
             self.stats["chapters_processed"] += 1
             self.stats["chunks_total"] += len(chunks)
 
-            for chunk in chunks:
-                if not chunk.strip():
-                    continue
-                if self._is_tag_only_chunk(chunk):
-                    continue
-                if chunk in self._translation_cache or chunk in queued_set:
+            chapter_rules = (
+                self._analyze_chapter_consistency(content)
+                if self.consistency_enabled
+                else ""
+            )
+            if chapter_rules:
+                log_consistency_event("CHAPTER_RULES_READY", f"{len(chapter_rules)} chars")
+
+            for chunk_index, chunk in enumerate(chunks):
+                if not chunk.strip() or self._is_tag_only_chunk(chunk):
+                    # keep original text, not translatable
+                    chapter_entries[-1].append((False, chunk, effective_split_tag, None))
                     continue
 
-                queued_set.add(chunk)
-                queued_chunks.append(chunk)
+                next_source = (
+                    self._collect_next_source(chunks, chunk_index)
+                    if self.consistency_enabled
+                    else []
+                )
+                cache_key = self._build_cache_key(chunk, chapter_rules, [], next_source)
+                if cache_key in self._translation_cache:
+                    chapter_entries[-1].append(
+                        (True, chunk, effective_split_tag, cache_key)
+                    )
+                    continue
+                if cache_key not in chunk_text_for_key:
+                    chunk_text_for_key[cache_key] = chunk
+                    if chunk not in queued_text_set:
+                        queued_text_set.add(chunk)
+                        queued_texts.append(chunk)
+                chapter_entries[-1].append((True, chunk, effective_split_tag, cache_key))
 
-        if queued_chunks:
-            logging.info(f"Submitting {len(queued_chunks)} unique chunks to batch API")
-            self.stats["batch_submitted"] += len(queued_chunks)
-            batch_results = self.engine.translate_batch(queued_chunks)
+        if queued_texts:
+            logging.info(f"Submitting {len(queued_texts)} unique chunks to batch API")
+            self.stats["batch_submitted"] += len(queued_texts)
+            batch_results = self.engine.translate_batch(queued_texts)
 
-            if len(batch_results) != len(queued_chunks):
+            if len(batch_results) != len(queued_texts):
                 raise RuntimeError("Batch result size does not match request size")
 
-            for source, translated in zip(queued_chunks, batch_results):
-                self._translation_cache[source] = translated
+            for source, translated in zip(queued_texts, batch_results):
                 self.stats["batch_results"] += 1
                 self.stats["chunks_translated"] += 1
                 self.stats["source_chars"] += len(source)
                 self.stats["translated_chars"] += len(translated or "")
+                # Store the result under every cache key that maps to this text.
+                for key, text in chunk_text_for_key.items():
+                    if text == source:
+                        self._translation_cache[key] = translated
 
         translated_chapters: list[str] = []
-        for chapter_offset, chunks in enumerate(chapter_chunks, start=1):
+        for chapter_offset, entries in enumerate(chapter_entries, start=1):
             translated: list[str] = []
-            for chunk in chunks:
-                if not chunk.strip():
-                    translated.append(chunk)
-                    continue
-                if self._is_tag_only_chunk(chunk):
+            split_tag = self.split_tag
+            for translatable, chunk, effective_split_tag, cache_key in entries:
+                split_tag = effective_split_tag
+                if not translatable:
                     translated.append(chunk)
                     continue
 
-                cached_result = self._translation_cache.get(chunk)
+                cached_result = self._translation_cache.get(cache_key)
                 if cached_result is None:
-                    cached_result = self._translate_chunk(chunk)
-                    self._translation_cache[chunk] = cached_result
+                    cached_result = self._translate_chunk(
+                        chunk,
+                        chapter_rules="",
+                        chapter_number=chapter_offset,
+                        chapter_file_name=chapter_file_names[chapter_offset - 1],
+                        chapter_title=chapter_titles[chapter_offset - 1],
+                    )
+                    self._translation_cache[cache_key] = cached_result
                 else:
                     self.stats["cache_hits"] += 1
 
@@ -265,14 +322,14 @@ class Translator:
             if self.illustration_manager and self.illustration_manager.is_enabled():
                 translated = self.illustration_manager.inject_illustrations(
                     translated_chunks=translated,
-                    source_chunks=chunks,
-                    split_tag=self.split_tag,
+                    source_chunks=[c for _, c, _, _ in entries],
+                    split_tag=split_tag,
                     chapter_number=chapter_offset,
-                    chapter_file_name=None,
-                    chapter_title=None,
+                    chapter_file_name=chapter_file_names[chapter_offset - 1],
+                    chapter_title=chapter_titles[chapter_offset - 1],
                 )
 
-            translated_chapters.append(assemble_html(translated, self.split_tag))
+            translated_chapters.append(assemble_html(translated, split_tag))
 
         return translated_chapters
 

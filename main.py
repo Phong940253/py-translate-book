@@ -386,7 +386,26 @@ def main():
         elif args.engine == "openai" and args.openai_batch:
             soups = [preview_soup] if preview_soup is not None else []
             soups.extend(load_soup(item) for item in selected_chapters[1:])
-            translated_chapters = translator.translate_book_html_batch(soups)
+
+            batch_chapter_numbers = list(
+                range(effective_start, effective_start + len(selected_chapters))
+            )
+            batch_file_names = [
+                getattr(item, "file_name", None) for item in selected_chapters
+            ]
+            batch_titles = [
+                (
+                    getattr(item, "title", None)
+                    or getattr(item, "id", None)
+                )
+                for item in selected_chapters
+            ]
+            translated_chapters = translator.translate_book_html_batch(
+                soups,
+                chapter_numbers=batch_chapter_numbers,
+                chapter_file_names=batch_file_names,
+                chapter_titles=batch_titles,
+            )
 
             for offset, (item, translated) in enumerate(zip(selected_chapters, translated_chapters), start=0):
                 chapter_number = effective_start + offset

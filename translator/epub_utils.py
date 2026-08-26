@@ -35,8 +35,16 @@ def _inject_manifest_entries(opf_text: str, additions: dict) -> str:
     if not manifest_close:
         return opf_text
 
+    # Skip files that are already declared in the manifest.
+    existing = set(
+        m.group(1)
+        for m in re.finditer(r'<item\b[^>]*\bhref="([^"]*)"', opf_text, re.IGNORECASE)
+    )
+
     items = []
     for file_name in additions:
+        if file_name in existing:
+            continue
         item_id = "added-" + re.sub(r"[^A-Za-z0-9_.-]", "-", str(file_name))
         media = _infer_media_type(file_name)
         items.append(
