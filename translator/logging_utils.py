@@ -4,7 +4,7 @@ import logging
 
 LABEL_MAX_LEN_OVERRIDES = {
     "INPUT_CHUNK": 500,
-    "AI_RESPONSE": 500,
+    "AI_RESPONSE": 9999999,
 }
 
 
