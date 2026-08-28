@@ -61,6 +61,13 @@ class TestWebUI(unittest.TestCase):
         dn_mod.DiscordNotifier.send_translation_completed = staticmethod(lambda **k: None)
 
         from webui import app as webui_app
+        from webui.jobs import JobRegistry
+
+        # Isolate jobs in a temp registry so test jobs don't persist in the real
+        # webui/jobs/ directory (the "Jobs gần đây" list). Restored in cleanup.
+        self._orig_registry = webui_app.registry
+        webui_app.registry = JobRegistry(self.tmp)
+        self.addCleanup(setattr, webui_app, "registry", self._orig_registry)
 
         self.app = webui_app.app
         self.app.config["TESTING"] = True
