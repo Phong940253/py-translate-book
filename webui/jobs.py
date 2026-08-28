@@ -42,8 +42,9 @@ class Job:
 
 
 class JobRegistry:
-    def __init__(self, job_dir: str = JOB_DIR):
+    def __init__(self, job_dir: str = JOB_DIR, relabel_stale: bool = True):
         self.job_dir = job_dir
+        self.relabel_stale = relabel_stale
         os.makedirs(job_dir, exist_ok=True)
         self.jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
@@ -69,7 +70,9 @@ class JobRegistry:
                 # process last ran can no longer have a live worker thread after
                 # a restart, so it is definitively dead. Relabel it "interrupted"
                 # so the UI reflects reality instead of showing a stuck "running".
-                if loaded_status in ("running", "queued"):
+                # (Skipped for workers started by this very process: a child
+                # re-opening the registry must not relabel its own "running" job.)
+                if self.relabel_stale and loaded_status in ("running", "queued"):
                     loaded_status = "interrupted"
                 job.status = loaded_status
                 job.progress = m.get("progress", {}) or {}
@@ -92,6 +95,18 @@ class JobRegistry:
     def get(self, jid: str):
         with self._lock:
             return self.jobs.get(jid)
+
+    def load_meta(self, jid: str) -> dict | None:
+        """Read a single job's metadata file (no relabeling, no caching).
+
+        Used by the SSE stream and by cross-process (subprocess) workers, which
+        cannot share the parent process's in-memory Job objects.
+        """
+        try:
+            with open(self._meta_path(jid), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            return None
 
     def all(self) -> list:
         with self._lock:

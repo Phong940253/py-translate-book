@@ -26,7 +26,7 @@ from flask import (
 )
 
 from webui.jobs import JobRegistry
-from webui.core_runner import start_job
+import webui.core_runner as core_runner
 from webui.config_store import load_config, mask_config, save_config_text
 from webui.books import list_epubs, preview_chapter, chapter_count
 
@@ -73,7 +73,7 @@ def job_new():
         if not params["engine"] or not params["input"]:
             return "engine and input are required", 400
         job = registry.create(params)
-        start_job(registry, job)
+        core_runner.start_job(registry, job)
         return redirect(url_for("job_view", job_id=job.id))
 
     books = list_epubs()
@@ -100,7 +100,23 @@ def job_stop(job_id):
     job = registry.get(job_id)
     if not job:
         abort(404)
+    # Cooperative: persist the stop flag (the worker finishes the current
+    # chapter cleanly). Then hard-kill a subprocess worker for an instant stop.
     registry.request_stop(job)
+    proc = core_runner.request_hard_stop(job_id)
+    if proc is not None:
+        # A real subprocess worker was terminated; its finally block never
+        # runs, so finalize the status from the persisted JSON (authoritative
+        # for process workers). Thread workers set their own status
+        # cooperatively, so we must NOT override theirs.
+        proc.join(timeout=2)
+        core_runner._PROCS.pop(job_id, None)
+        meta = registry.load_meta(job_id) or {}
+        if meta.get("status") in ("running", "queued"):
+            job = registry.get(job_id)
+            if job is not None:
+                job.status = "stopped"
+                registry.save(job)
     return redirect(url_for("job_view", job_id=job_id))
 
 
@@ -126,7 +142,7 @@ def job_resume(job_id):
     job.params = params
     job.status = "running"
     registry.save(job)
-    start_job(registry, job)
+    core_runner.start_job(registry, job)
     return redirect(url_for("job_view", job_id=job_id))
 
 
@@ -136,20 +152,34 @@ def job_stream(job_id):
     if not job:
         abort(404)
 
+    log_path = registry._log_path(job_id)
+
     def gen():
         last = 0
         while True:
-            with job._lock:
-                lines = list(job.log_lines)
-                prog = dict(job.progress) if isinstance(job.progress, dict) else {}
-                status = job.status
-                result = job.result
-                error = job.error
-            for line in lines[last:]:
+            # Read state from disk so it works for both the thread worker (which
+            # shares memory but also persists) and a subprocess worker (which
+            # only shares the JSON / .log files).
+            meta = registry.load_meta(job_id) or {}
+            status = meta.get("status")
+            prog = meta.get("progress") or {}
+            result = meta.get("result")
+            error = meta.get("error")
+
+            lines = []
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, encoding="utf-8") as f:
+                        cur = f.read().splitlines()
+                except Exception:  # noqa: BLE001
+                    cur = []
+                lines = cur[last:]
+                last = len(cur)
+
+            for line in lines:
                 yield "data: " + json.dumps(
                     {"type": "log", "line": line}, ensure_ascii=False
                 ) + "\n\n"
-            last = len(lines)
             payload = {
                 "type": "progress",
                 "progress": prog,

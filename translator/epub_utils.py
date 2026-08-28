@@ -151,10 +151,26 @@ def _merge_translated_document(original_content, translated_content):
     return original_soup.encode("utf-8")
 
 
+def _atomic_write_epub(path, book):
+    """Write an EPUB atomically (temp file + os.replace) so a writer that is
+    killed mid-write (e.g. a job terminated via multiprocessing terminate())
+    never leaves a half-written / corrupt output file behind."""
+    part_path = path + ".part"
+    try:
+        epub.write_epub(part_path, book, {})
+        os.replace(part_path, path)
+    finally:
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+
+
 def save_epub(book, path, source_path=None):
     if source_path is None:
         normalize_book_toc(book)
-        epub.write_epub(path, book, {})
+        _atomic_write_epub(path, book)
         return
 
     with zipfile.ZipFile(source_path, "r") as source_zip:
@@ -201,19 +217,28 @@ def save_epub(book, path, source_path=None):
                 )
                 replacements[opf_name] = updated_opf.encode("utf-8")
 
-        with zipfile.ZipFile(path, "w") as output_zip:
-            for info in source_zip.infolist():
-                data = replacements.get(info.filename)
-                if data is None:
-                    data = source_zip.read(info.filename)
+        part_path = path + ".part"
+        try:
+            with zipfile.ZipFile(part_path, "w") as output_zip:
+                for info in source_zip.infolist():
+                    data = replacements.get(info.filename)
+                    if data is None:
+                        data = source_zip.read(info.filename)
 
-                output_zip.writestr(info, data)
+                    output_zip.writestr(info, data)
 
-            for file_name, content in additions.items():
-                if file_name in archive_names:
-                    continue
-                output_zip.writestr(file_name, content)
+                for file_name, content in additions.items():
+                    if file_name in archive_names:
+                        continue
+                    output_zip.writestr(file_name, content)
+            os.replace(part_path, path)
+        finally:
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
         return
 
     normalize_book_toc(book)
-    epub.write_epub(path, book, {})
+    _atomic_write_epub(path, book)
