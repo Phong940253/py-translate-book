@@ -120,6 +120,88 @@ class TestWebUI(unittest.TestCase):
         rv = self.client.get(f"/jobs/{job_id}")
         self.assertEqual(rv.status_code, 200)
 
+    def test_stop_aborts_job_early(self):
+        # An EPUB with several paragraphs -> several chunks. A slow engine gives
+        # the test time to click Stop between chunks; the job must abort early
+        # (not translate every chunk) instead of running to completion.
+        import time as _time
+
+        book = epub.EpubBook()
+        book.set_identifier("webui-stop")
+        book.set_title("Stop Test")
+        book.set_language("en")
+        paras = "".join(
+            f"<p>Hello world sample text number {i}</p>" for i in range(5)
+        )
+        ch = epub.EpubHtml(title="Ch1", file_name="ch1.xhtml", lang="en")
+        ch.content = ("<html><body>" + paras + "</body></html>").encode("utf-8")
+        book.add_item(ch)
+        book.spine = ["nav", "ch1.xhtml"]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        epub_path = os.path.join(self.tmp, "stop.epub")
+        out_path = os.path.join(self.tmp, "stop.out.epub")
+        epub.write_epub(epub_path, book, {})
+
+        captured = {}
+
+        class SlowEngine(TranslationEngine):
+            def supports_batch(self):
+                return False
+
+            def __init__(self):
+                super().__init__(from_lang="EN", to_lang="VI")
+                self.calls = 0
+
+            def translate(self, text):
+                self.calls += 1
+                _time.sleep(0.6)
+                return text.replace("Hello", "Xin chào")
+
+        def make_engine(*a, **k):
+            eng = SlowEngine()
+            captured["eng"] = eng
+            return eng
+
+        import translator.job as job_mod
+
+        self._orig_build = job_mod.build_engine
+        job_mod.build_engine = make_engine
+
+        try:
+            r = self.client.post(
+                "/jobs/new",
+                data={
+                    "engine": "openai",
+                    "input": epub_path,
+                    "output": out_path,
+                    "from_chapter": "1",
+                    "to_chapter": "1",
+                    "from_lang": "EN",
+                    "to_lang": "VI",
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(r.status_code, 302)
+            job_id = r.headers["Location"].rstrip("/").split("/")[-1]
+
+            # Click Stop almost immediately, while the first chunk is translating.
+            self.client.post(f"/jobs/{job_id}/stop")
+
+            job = None
+            for _ in range(100):
+                job = self.registry.get(job_id)
+                if job and job.status in ("done", "error", "stopped"):
+                    break
+                _time.sleep(0.1)
+
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status, "stopped")
+            # Stop fired before the later chunks ran (<= 1 chunk translated).
+            self.assertLessEqual(captured["eng"].calls, 1)
+        finally:
+            job_mod.build_engine = self._orig_build
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

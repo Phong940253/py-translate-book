@@ -10,6 +10,7 @@ import logging
 import threading
 
 from translator.job import run_translation, read_config
+from translator.translator import _TranslationStopped
 
 
 class _StopRequested(Exception):
@@ -49,10 +50,12 @@ def _run(registry, job):
                 raise _StopRequested()
             registry.record_event(job, event, data)
 
-        stats = run_translation(config, progress_cb=cb, **params)
+        stats = run_translation(
+            config, progress_cb=cb, should_stop=lambda: job.stop_requested, **params
+        )
         job.result = stats
         job.status = "stopped" if job.stop_requested else "done"
-    except _StopRequested:
+    except (_StopRequested, _TranslationStopped):
         job.status = "stopped"
     except Exception as exc:  # noqa: BLE001
         job.error = str(exc)

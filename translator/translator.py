@@ -27,6 +27,14 @@ DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
 _IGNORABLE_STRUCTURE_TAGS = {
     "<p>", "</p>", "<br>", "<br/>", "<br />", "<a>", "</a>",
 }
+
+
+class _TranslationStopped(Exception):
+    """Raised inside the translation loop when a stop was requested.
+
+    Lets callers that pass ``should_stop`` (e.g. the web UI) abort a running
+    job promptly, without waiting for the current chapter/retry to finish.
+    """
 _TAG_NAME_RE = re.compile(r"^<(/?)([A-Za-z][A-Za-z0-9]*)")
 
 
@@ -176,6 +184,7 @@ class Translator:
         chapter_file_name: str | None = None,
         chapter_title: str | None = None,
         progress_callback: Callable[[int, int, int | None], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ):
         content = extract_html_content(soup, self.split_tag)
         effective_split_tag = self.split_tag
@@ -215,6 +224,8 @@ class Translator:
             leave=False,
             total=len(chunks),
         ):
+            if should_stop and should_stop():
+                raise _TranslationStopped
             if not chunk.strip():
                 translated.append(chunk)
                 continue
@@ -247,6 +258,7 @@ class Translator:
                 chapter_number=chapter_number,
                 chapter_file_name=chapter_file_name,
                 chapter_title=chapter_title,
+                should_stop=should_stop,
             )
             self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
@@ -271,6 +283,7 @@ class Translator:
         chapter_numbers: list | None = None,
         chapter_file_names: list | None = None,
         chapter_titles: list | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> list[str]:
         if not self.engine.supports_batch():
             raise RuntimeError("Current engine does not support batch translation")
@@ -290,6 +303,8 @@ class Translator:
         for soup, chapter_number, chapter_file_name, chapter_title in zip(
             soups, chapter_numbers, chapter_file_names, chapter_titles
         ):
+            if should_stop and should_stop():
+                raise _TranslationStopped
             content = extract_html_content(soup, self.split_tag)
 
             # Per-chapter split-tag re-evaluation (same logic as translate_html).
@@ -409,6 +424,7 @@ class Translator:
         chapter_number: int | None = None,
         chapter_file_name: str | None = None,
         chapter_title: str | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> str:
         if self._is_tag_only_chunk(text):
             logging.info("Skipping translation for tag-only chunk")
@@ -485,6 +501,8 @@ class Translator:
         attempt = 1
         specific_http500_abort_count = 0
         while True:
+            if should_stop and should_stop():
+                raise _TranslationStopped
             try:
                 text_to_translate = (
                     prepared_input
@@ -550,6 +568,9 @@ class Translator:
 
                 if self.max_tries is not None and attempt >= self.max_tries:
                     break
+
+                if should_stop and should_stop():
+                    raise _TranslationStopped
 
                 sleep_seconds = min(
                     REQUEST_TIMEOUT * (BACKOFF_MULTIPLIER ** (attempt - 1)),

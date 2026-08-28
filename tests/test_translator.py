@@ -18,6 +18,7 @@ from translator.translator import (
     Translator,
     DEFAULT_MAX_TRIES,
     _repair_wrapper_balance,
+    _TranslationStopped,
 )
 from translator.engines.base import TranslationEngine
 
@@ -175,6 +176,28 @@ class TestWrapperRepair(unittest.TestCase):
         self.assertNotIn("</section>", out)
         self.assertNotIn("</div>", out)
         self.assertIn("Xin chào thế giới đoạn kiểm tra", out)
+
+    def test_translate_chunk_stops_on_should_stop(self):
+        # A chunk that would retry (structure mismatch) must abort via
+        # _TranslationStopped instead of looping, when should_stop fires.
+        class BadEngine(FakeEngine):
+            def translate(self, text):
+                self.calls += 1
+                # drop spans -> structure mismatch -> would otherwise retry
+                return text.replace('<span class="x">', '').replace('</span>', '')
+
+        state = {"n": 0}
+
+        def should_stop():
+            state["n"] += 1
+            return state["n"] >= 2  # allow first attempt, then stop
+
+        t = Translator(BadEngine(), html_structure_min_similarity=0.7,
+                       consistency_config={})
+        with self.assertRaises(_TranslationStopped):
+            t._translate_chunk(SRC, should_stop=should_stop)
+        # Only the first attempt ran: no backoff sleep, no second attempt.
+        self.assertEqual(t.engine.calls, 1)
 
 
 class TestOversizeSplit(unittest.TestCase):

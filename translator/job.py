@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from ebooklib import epub
 
-from translator.translator import Translator
+from translator.translator import Translator, _TranslationStopped
 from translator.html_utils import detect_split_tag
 from translator.epub_utils import iter_chapters, load_soup, save_epub
 from translator.discord_notifier import DiscordNotifier
@@ -179,6 +179,7 @@ def run_translation(
     disable_resume: bool = False,
     checkpoint_file: Optional[str] = None,
     progress_cb: Optional[Callable[[str, dict], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
     sleep_pc_after_done: bool = False,
 ) -> dict:
     """Run a full translation job. Returns the Translator stats dict.
@@ -352,6 +353,7 @@ def run_translation(
                 chapter_numbers=batch_chapter_numbers,
                 chapter_file_names=batch_file_names,
                 chapter_titles=batch_titles,
+                should_stop=should_stop,
             )
 
             for offset, (item, translated) in enumerate(
@@ -395,6 +397,7 @@ def run_translation(
                     chapter_number=chapter_number,
                     chapter_file_name=file_name,
                     chapter_title=title,
+                    should_stop=should_stop,
                 )
                 item.content = translated.encode("utf-8")
                 save_epub(book, output, source_path=input)
@@ -496,6 +499,8 @@ def run_translation(
             },
         )
         return translator_stats
+    except _TranslationStopped:
+        raise
     except Exception as exc:  # noqa: BLE001
         cb("error", {"message": str(exc)})
         raise
