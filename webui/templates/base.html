@@ -8,13 +8,13 @@
 </head>
 <body>
   <header>
-    <div class="brand">📚 Translate Book Manager</div>
+    <div class="brand">{% from "_icons.html" import icon %}{{ icon('books') }} Translate Book Manager</div>
     <nav>
-      <a href="{{ url_for('index') }}">Dashboard</a>
-      <a href="{{ url_for('job_new') }}">+ Job mới</a>
-      <a href="{{ url_for('books') }}">Thư viện</a>
-      <a href="{{ url_for('config_view') }}">Cấu hình</a>
-      <a href="{{ url_for('illustrations') }}">Ảnh minh họa</a>
+      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">{{ icon('dashboard') }} Dashboard</a>
+      <a href="{{ url_for('job_new') }}" class="{{ 'active' if request.endpoint == 'job_new' }}">{{ icon('plus') }} Job mới</a>
+      <a href="{{ url_for('books') }}" class="{{ 'active' if request.endpoint == 'books' }}">{{ icon('books') }} Thư viện</a>
+      <a href="{{ url_for('config_view') }}" class="{{ 'active' if request.endpoint == 'config_view' }}">{{ icon('gear') }} Cấu hình</a>
+      <a href="{{ url_for('illustrations') }}" class="{{ 'active' if request.endpoint == 'illustrations' }}">{{ icon('image') }} Ảnh</a>
     </nav>
   </header>
   <main>

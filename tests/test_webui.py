@@ -6,6 +6,7 @@ let the background runner finish, and assert the output EPUB is produced.
 """
 
 import os
+import base64
 import re
 import shutil
 import sys
@@ -18,6 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ebooklib import epub
 
 from translator.engines.base import TranslationEngine
+from webui import app as webui_app
+
+PROJECT_ROOT = webui_app.PROJECT_ROOT
 
 
 class StubEngine(TranslationEngine):
@@ -81,6 +85,32 @@ def _make_epub(path):
     epub.write_epub(path, book, {})
 
 
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+
+
+def _make_epub_with_cover(path, with_cover=True):
+    book = epub.EpubBook()
+    book.set_identifier("webui-cover-test")
+    book.set_title("Cover Test")
+    book.set_language("en")
+    if with_cover:
+        img = epub.EpubImage()
+        img.id = "cover"
+        img.file_name = "cover.png"
+        img.media_type = "image/png"
+        img.content = _PNG
+        book.add_item(img)
+    ch = epub.EpubHtml(title="Ch1", file_name="ch1.xhtml", lang="en")
+    ch.content = b"<html><body><p>Hello</p></body></html>"
+    book.add_item(ch)
+    book.spine = ["nav", "ch1.xhtml"]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    epub.write_epub(path, book, {})
+
+
 class TestWebUI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -131,6 +161,54 @@ class TestWebUI(unittest.TestCase):
         for path in ("/", "/jobs/new", "/config", "/books", "/illustrations"):
             r = self.client.get(path)
             self.assertEqual(r.status_code, 200, path)
+
+    def test_book_cover_route(self):
+        # Cover bytes are served for an EPUB under PROJECT_ROOT; a path outside
+        # it is rejected (400) and an EPUB with no cover 404s.
+        cover_path = os.path.join(PROJECT_ROOT, "_test_cover.epub")
+        nocov_path = os.path.join(PROJECT_ROOT, "_test_nocover.epub")
+        _make_epub_with_cover(cover_path, with_cover=True)
+        _make_epub_with_cover(nocov_path, with_cover=False)
+        self.addCleanup(lambda: os.path.exists(cover_path) and os.remove(cover_path))
+        self.addCleanup(lambda: os.path.exists(nocov_path) and os.remove(nocov_path))
+
+        r = self.client.get("/books/cover?path=" + cover_path)
+        self.assertEqual(r.status_code, 200, "cover should be served")
+        self.assertTrue(r.content_type.startswith("image/"))
+        self.assertEqual(r.data, _PNG)
+
+        bad = self.client.get("/books/cover?path=/etc/passwd")
+        self.assertEqual(bad.status_code, 400, "path outside PROJECT_ROOT rejected")
+
+        missing = self.client.get("/books/cover?path=" + nocov_path)
+        self.assertEqual(missing.status_code, 404, "no cover -> 404")
+
+    def test_books_page_renders_cover(self):
+        # Force the library listing to contain one book so the cover grid branch
+        # (book-card + /books/cover url + metadata) is exercised, not just the
+        # empty state.
+        real = webui_app.list_epubs
+        epub_path = os.path.join(PROJECT_ROOT, "_test_cover.epub")
+        _make_epub_with_cover(epub_path, with_cover=True)
+        self.addCleanup(lambda: os.path.exists(epub_path) and os.remove(epub_path))
+
+        def fake(dirs=None, with_meta=False):
+            return [{
+                "name": "_test_cover.epub",
+                "path": epub_path,
+                "size_mb": 0.0,
+                "has_checkpoint": False,
+                "meta": {"title": "Cover Test", "creator": "Jane", "language": "en"},
+            }]
+
+        webui_app.list_epubs = fake
+        self.addCleanup(setattr, webui_app, "list_epubs", real)
+
+        r = self.client.get("/books")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("Cover Test", body)
+        self.assertIn("/books/cover?path=", body)
 
     def test_create_and_run_job(self):
         r = self.client.post(

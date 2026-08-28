@@ -28,7 +28,7 @@ from flask import (
 from webui.jobs import JobRegistry
 import webui.core_runner as core_runner
 from webui.config_store import load_config, mask_config, save_config_text
-from webui.books import list_epubs, preview_chapter, chapter_count
+from webui.books import list_epubs, preview_chapter, chapter_count, get_cover
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
@@ -47,7 +47,7 @@ registry = JobRegistry()
 @app.route("/")
 def index():
     jobs = registry.all()
-    books = list_epubs()
+    books = list_epubs(with_meta=True)
     return render_template("dashboard.html", jobs=jobs, books=books, engines=ENGINES)
 
 
@@ -205,7 +205,7 @@ def job_stream(job_id):
 
 @app.route("/books")
 def books():
-    items = list_epubs()
+    items = list_epubs(with_meta=True)
     for it in items:
         it["chapters"] = chapter_count(it["path"])
     return render_template("books.html", books=items)
@@ -229,6 +229,18 @@ def book_preview():
         "shown": len(text),
         "text": text,
     }
+
+
+@app.route("/books/cover")
+def book_cover():
+    path = request.args.get("path", "")
+    if not path.startswith(PROJECT_ROOT) or not os.path.isfile(path):
+        abort(400)
+    cover = get_cover(path)
+    if not cover:
+        abort(404)
+    data, mime = cover
+    return send_file(io.BytesIO(data), mimetype=mime)
 
 
 # --------------------------------------------------------------------------

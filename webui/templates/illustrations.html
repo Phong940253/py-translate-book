@@ -1,18 +1,42 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}Ảnh minh họa{% endblock %}
 {% block content %}
-<h1>Ảnh minh họa</h1>
+<h1>{{ icon('image') }} Ảnh minh họa</h1>
 <p class="muted">Thư mục: <span class="mono">{{ img_dir }}</span></p>
 {% if not images %}
-  <p class="card muted">Chưa có ảnh nào được sinh (illustration chưa bật hoặc chưa chạy).</p>
+  <p class="card empty">{{ icon('image') }} Chưa có ảnh nào được sinh (illustration chưa bật hoặc chưa chạy).</p>
 {% else %}
   <div class="gallery">
     {% for img in images %}
     <div class="thumb card">
-      <img src="{{ url_for('serve_image', filename=img) }}" alt="{{ img }}">
+      <img src="{{ url_for('serve_image', filename=img) }}" alt="{{ img }}" loading="lazy"
+           onclick="openLightbox(this.src, {{ img | tojson }})">
       <div class="mono small">{{ img }}</div>
     </div>
     {% endfor %}
   </div>
 {% endif %}
+
+<div id="lightbox" class="lightbox" onclick="closeLightbox()">
+  <button class="btn btn-ghost lb-close" type="button" aria-label="Đóng"
+          onclick="event.stopPropagation();closeLightbox()">{{ icon('x') }}</button>
+  <img id="lb-img" src="" alt="">
+</div>
+
+<script>
+function openLightbox(src, alt) {
+  const lb = document.getElementById('lightbox');
+  document.getElementById('lb-img').src = src;
+  document.getElementById('lb-img').alt = alt || '';
+  lb.classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.getElementById('lb-img').src = '';
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLightbox();
+});
+</script>
 {% endblock %}

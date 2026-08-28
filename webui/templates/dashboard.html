@@ -39,16 +39,23 @@
   {% if not books %}
     <p class="muted">Không tìm thấy EPUB trong thư mục dự án.</p>
   {% else %}
-    <ul class="booklist">
+    <div class="book-grid compact">
       {% for b in books %}
-      <li>
-        <span class="mono">{{ b.name }}</span>
-        <span class="muted">{{ b.size_mb }} MB</span>
-        {% if b.has_checkpoint %}<span class="badge has-cp">có checkpoint</span>{% endif %}
-        <a href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a>
-      </li>
+      <div class="book-card">
+        <a class="book-cover" href="{{ url_for('book_cover', path=b.path) }}" target="_blank" title="Xem bìa">
+          <img src="{{ url_for('book_cover', path=b.path) }}"
+               alt="Bìa: {{ b.meta.title or b.name }}"
+               loading="lazy"
+               onerror="this.onerror=null;this.src='{{ url_for('static', filename='cover-placeholder.svg') }}'">
+        </a>
+        <div class="book-info">
+          <div class="book-title" title="{{ b.meta.title or b.name }}">{{ b.meta.title or b.name }}</div>
+          <div class="muted small">{{ b.size_mb }} MB</div>
+          <a class="btn btn-primary btn-sm" href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a>
+        </div>
+      </div>
       {% endfor %}
-    </ul>
+    </div>
   {% endif %}
 </section>
 {% endblock %}

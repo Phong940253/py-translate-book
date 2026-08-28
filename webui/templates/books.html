@@ -1,27 +1,42 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}Thư viện{% endblock %}
 {% block content %}
-<h1>Thư viện EPUB</h1>
-<table class="table card">
-  <thead><tr><th>Tên</th><th>Size</th><th>Chapters</th><th>Checkpoint</th><th></th></tr></thead>
-  <tbody>
+<h1>{{ icon('books') }} Thư viện EPUB</h1>
+
+{% if not books %}
+  <p class="card empty">{{ icon('book') }} Không tìm thấy EPUB trong thư mục dự án.</p>
+{% else %}
+  <div class="book-grid">
     {% for b in books %}
-    <tr>
-      <td class="mono">{{ b.name }}</td>
-      <td>{{ b.size_mb }} MB</td>
-      <td>{{ b.chapters }}</td>
-      <td>{% if b.has_checkpoint %}<span class="badge has-cp">có</span>{% else %}-{% endif %}</td>
-      <td>
-        <a href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a> ·
-        <a href="#" onclick="preview('{{ b.path }}');return false;">Preview</a>
-      </td>
-    </tr>
+    <div class="book-card card">
+      <a class="book-cover" href="{{ url_for('book_cover', path=b.path) }}" target="_blank"
+         title="Xem bìa">
+        <img src="{{ url_for('book_cover', path=b.path) }}"
+             alt="Bìa: {{ b.meta.title or b.name }}"
+             loading="lazy"
+             onerror="this.onerror=null;this.src='{{ url_for('static', filename='cover-placeholder.svg') }}'">
+      </a>
+      <div class="book-info">
+        <div class="book-title" title="{{ b.meta.title or b.name }}">{{ b.meta.title or b.name }}</div>
+        <div class="muted small">{{ b.meta.creator or '—' }}</div>
+        <div class="muted small">{{ b.size_mb }} MB · {{ b.chapters or '?' }} chương</div>
+        <div class="book-meta">
+          {% if b.has_checkpoint %}<span class="badge has-cp">{{ icon('check') }} checkpoint</span>{% endif %}
+          {% if b.meta.language %}<span class="badge">{{ b.meta.language }}</span>{% endif %}
+        </div>
+        <div class="book-actions">
+          <a class="btn btn-primary" href="{{ url_for('job_new') }}?input={{ b.path }}">{{ icon('play') }} Dịch</a>
+          <button class="btn btn-ghost" type="button" onclick="preview('{{ b.path }}');">{{ icon('image') }} Preview</button>
+        </div>
+      </div>
+    </div>
     {% endfor %}
-  </tbody>
-</table>
+  </div>
+{% endif %}
 
 <div id="preview-box" class="card" style="display:none">
-  <h2>Preview chương <span id="pv-ch"></span></h2>
+  <h2>{{ icon('image') }} Preview chương <span id="pv-ch"></span></h2>
   <pre id="pv-text" class="log"></pre>
 </div>
 
