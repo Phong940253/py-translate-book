@@ -1,176 +1,184 @@
 # py-translate-book
 
-Công cụ dịch EPUB tiếng Việt (hoặc ngôn ngữ bất kỳ) chạy local, dùng các LLM
-(OpenAI / Google Gemini / WebAI local proxy). Kèm **web UI quản lý** (Flask,
-local-only) để theo dõi tiến trình realtime, quản lý thư viện sách, resume /
-checkpoint, sửa `config.yaml` và xem ảnh minh họa.
+A **local** EPUB translator (e.g. to Vietnamese, or any language pair) powered by
+LLMs (OpenAI / Google Gemini / WebAI local proxy). Includes a **Flask management
+web UI** (local-only) for realtime progress, a book library, resume/checkpoint,
+editing `config.yaml`, and browsing illustrations.
 
-> Mọi thứ chạy **trên máy bạn**. Web UI chỉ bind `127.0.0.1:5000`, không có
-> login. Đừng đưa ra mạng công cộng nếu không tự chịu trách nhiệm bảo mật.
-
----
-
-## Tính năng
-
-- **Dịch EPUB** giữ nguyên cấu trúc HTML (split theo `<p>` / `<br>`, ghép lại).
-- **Nhiều engine**: `openai`, `gemini`, `webai` (proxy local OpenAI-compatible).
-- **Checkpoint / resume**: dịch dở có thể tiếp tục từ chương cuối cùng thành công.
-- **Consistency**: trích quy tắc dịch (cách xưng hô, tên riêng) để nhất quán xuyên chương.
-- **Illustration** (tùy chọn): sinh ảnh minh họa vào `images/generated`.
-- **Discord notify**: báo khi xong job (+ thống kê chunk/file).
-- **Web UI**: dashboard, tạo job, log realtime (SSE), thư viện sách, preview chương,
-  resume, editor `config.yaml` (che API key), test Discord, gallery ảnh.
-- **Offline tests**: suite `unittest` không tốn token AI.
+> Everything runs **on your machine**. The web UI only binds `127.0.0.1:5000` and
+> has **no login**. Do not expose it to the public internet unless you accept the
+> security responsibility.
 
 ---
 
-## Yêu cầu
+## Features
+
+- **Translate EPUB** while preserving HTML structure (split on `<p>` / `<br>`, reassemble).
+- **Multiple engines**: `openai`, `gemini`, `webai` (local OpenAI-compatible proxy).
+- **Checkpoint / resume**: an interrupted job can continue from the last completed chapter.
+- **Consistency**: extracts translation rules (honorifics, character names) to stay
+  consistent across chapters.
+- **Illustration** (optional): generates illustrations into `images/generated`.
+- **Discord notifications**: ping when a job finishes (+ chunk/file stats).
+- **Web UI**: dashboard, job creation, realtime log (SSE), book library, chapter
+  preview, resume, `config.yaml` editor (API keys masked), Discord test, image gallery.
+- **Offline tests**: a `unittest` suite that costs no AI tokens.
+
+---
+
+## Requirements
 
 - **Python >= 3.10**
-- pip packages trong `requirements.txt`
+- pip packages listed in `requirements.txt`
 
 ---
 
-## Cài đặt
+## Installation
 
 ```bat
-# 1) (khuyên dùng) tạo env
+# 1) (recommended) create an env
 conda create -n translate-book python=3.11 -y
 conda activate translate-book
 
-# hoặc venv:
+# or venv:
 python -m venv .venv
 .venv\Scripts\activate
 
-# 2) cài dependency
+# 2) install dependencies
 pip install -r requirements.txt
 ```
 
-## Cấu hình
+## Configuration
 
-File `config.yaml` bị **git-ignore** (chứa API key). Tạo nó từ mẫu:
+`config.yaml` is **git-ignored** (it holds your API keys). Create it from the template:
 
 ```bat
 cp config.example.yaml config.yaml
 ```
 
-Rồi điền: `openai.api_key` / `gemini.api_key` / `webai.base_url` / `discord.webhook_url`.
-Xem `config.example.yaml` để biết mọi key hợp lệ.
+Then fill in `openai.api_key` / `gemini.api_key` / `webai.base_url` /
+`discord.webhook_url`. See `config.example.yaml` for every valid key.
 
-> **Lưu ý model (Gemini / WebAI):** các tên `gemini-3.*` và `gemini-2.*` cũ đã
-> bị gỡ. Dùng `gemini-flash` / `gemini-pro` / `gemini-flash-lite`. Engine `webai`
-> forward thẳng `webai.model` lên server local, nên đặt đúng tên server chấp nhận.
+> **Model name note (Gemini / WebAI):** the old names `gemini-3.*` and `gemini-2.*`
+> have been removed. Use `gemini-flash` / `gemini-pro` / `gemini-flash-lite`. The
+> `webai` engine forwards `webai.model` verbatim to your local server, so set a name
+> **that server accepts**.
 
 ---
 
-## Dùng qua CLI (`main.py`)
+## CLI usage (`main.py`)
 
 ```bat
-# Xem help
+# Show help
 python main.py --help
 
-# Dịch chapter 1..10 bằng WebAI
+# Translate chapters 1..10 with WebAI
 python main.py --engine webai --input book.epub --output book.dich.epub \
                --from-chapter 1 --to-chapter 10 --from-lang EN --to-lang VI
 
-# Preview nội dung 1 chương (không dịch)
+# Preview a chapter's text (no translation)
 python main.py --input book.epub --preview-chapter 3 --preview-chars 4000
 
-# Test Discord webhook
+# Test the Discord webhook
 python main.py --test-discord-webhook --config config.yaml
 
-# Resume: bỏ qua checkpoint cũ và chạy lại từ đầu
+# Resume: discard the old checkpoint and re-run from the start
 python main.py --engine webai --input book.epub --output book.dich.epub --reset-checkpoint
 
-# Tắt resume (luôn dịch từ đầu, không đọc checkpoint)
+# Disable resume (always translate from the start, ignore checkpoint)
 python main.py --engine webai --input book.epub --output book.dich.epub --disable-resume
 ```
 
-Output: `<output>.epub` + `<output>.checkpoint.json` (lưu chương đã xong).
+Outputs: `<output>.epub` + `<output>.checkpoint.json` (records finished chapters).
 
 ---
 
-## Dùng qua Web UI (`webui/`)
+## Web UI usage (`webui/`)
 
 ```bat
-# Cách chuẩn (khuyên dùng):
+# Recommended:
 python -m webui.app
 
-# Hoặc chạy trực tiếp file (vẫn được, code đã tự thêm project root vào sys.path):
+# Or run the file directly (works too; project root is auto-added to sys.path):
 python webui/app.py
 ```
 
-Mở **http://127.0.0.1:5000**.
+Open **http://127.0.0.1:5000**.
 
-| Trang | Chức năng |
-|-------|-----------|
-| `/` | Dashboard: jobs gần đây + thư viện EPUB |
-| `/jobs/new` | Tạo job (engine, input/output, chapter range, lang, …) |
-| `/jobs/<id>` | Theo dõi log realtime (SSE) + thanh progress + nút Dừng |
-| `/books` | Danh sách EPUB, số chương, checkpoint, preview chương |
-| `/config` | Sửa `config.yaml` (API key bị che, backup `.bak`), test Discord |
-| `/illustrations` | Gallery ảnh minh họa đã sinh |
+| Page | Purpose |
+|------|---------|
+| `/` | Dashboard: recent jobs + EPUB library |
+| `/jobs/new` | Create a job (engine, input/output, chapter range, languages, …) |
+| `/jobs/<id>` | Realtime log (SSE) + progress bar + Stop button |
+| `/books` | List EPUBs, chapter counts, checkpoint status, chapter preview |
+| `/config` | Edit `config.yaml` (API keys masked, `.bak` backup), test Discord |
+| `/illustrations` | Gallery of generated illustrations |
 
-**Dừng job:** nút Dừng dừng an toàn tại **ranh giới chương** (không ngắt giữa một
-chunk đang gọi API).
+**Stopping a job:** the Stop button halts safely at a **chapter boundary** (it will
+not abort a chunk that is mid-API-call).
 
 ---
 
-## Cấu trúc dự án
+## Project structure
 
 ```
-main.py                  CLI entry (gọi translator.job.run_translation)
+main.py                  CLI entry (calls translator.job.run_translation)
 translator/
-  translator.py          Translator.core: split -> translate -> ghép, retry, consistency
-  job.py                 run_translation(): orchestration chung cho CLI & web
+  translator.py          Translator core: split -> translate -> reassemble, retry, consistency
+  job.py                 run_translation(): shared orchestration for CLI & web
                          (checkpoint/resume, illustration, discord, stats, progress_cb)
-  epub_utils.py          đọc/ghi EPUB, duyệt chapter, inject manifest
+  epub_utils.py          read/write EPUB, iterate chapters, inject manifest
   html_utils.py          split/assemble HTML, normalize <br>
-  illustration.py        sinh ảnh minh họa
-  discord_notifier.py    gửi Discord webhook
+  illustration.py        generate illustrations
+  discord_notifier.py    send Discord webhook
   engines/                TranslationEngine: openai / gemini / webai (+ base)
 webui/
   app.py                 Flask app (routes + SSE)
-  jobs.py                JobRegistry + Job (trạng thái, log, progress; lưu webui/jobs/)
-  core_runner.py         chạy run_translation trong thread, forward log/event -> SSE
-  config_store.py        đọc/ghi config.yaml an toàn (mask key + backup)
-  books.py               liệt kê EPUB, preview chương
-  templates/  static/    giao diện
-tests/                   unittest offline (không gọi AI)
-requirements.txt         dependency
-config.example.yaml      mẫu cấu hình
+  jobs.py                JobRegistry + Job (state, log, progress; persisted in webui/jobs/)
+  core_runner.py         runs run_translation in a thread, forwards log/events -> SSE
+  config_store.py        safe read/write of config.yaml (mask keys + backup)
+  books.py               list EPUBs, preview chapters
+  templates/  static/    UI
+tests/                   offline unittest (no AI calls)
+requirements.txt         dependencies
+config.example.yaml      config template
 ```
 
 ---
 
-## Chạy test (offline, không tốn tiền)
+## Running the tests (offline, free)
 
 ```bat
 python -m unittest tests.test_html_utils tests.test_translator \
                      tests.test_epub_utils tests.test_job_core tests.test_webui -v
 ```
 
-- `test_job_core`: chạy `run_translation` với engine giả lập + EPUB nhỏ → assert ra
-  output, checkpoint, stats.
-- `test_webui`: Flask test client + job chạy thật (engine/Discord bị stub) → assert
-  sinh được EPUB.
+- `test_job_core`: runs `run_translation` with a fake engine + a small EPUB and
+  asserts the output, checkpoint, and stats are produced.
+- `test_webui`: Flask test client + a real job run (engine/Discord stubbed) and
+  asserts an EPUB is produced.
 
 ---
 
-## Lưu ý bảo mật
+## Security notes
 
-- `config.yaml`, `*.checkpoint.json`, `*.p12`, `webui/jobs/` đều bị git-ignore.
-- Web UI **không có xác thực**. Chỉ chạy local. Nếu cần xa, hãy qua reverse proxy
-  có auth (VPN / Tailscale / Cloudflare Access) — đừng expose trần.
-- API key nằm trong `config.yaml` trên máy local; đừng commit.
+- `config.yaml`, `*.checkpoint.json`, `*.p12`, and `webui/jobs/` are git-ignored.
+- The web UI has **no authentication**. Run it locally only. If you need remote
+  access, put it behind an authenticated reverse proxy (VPN / Tailscale /
+  Cloudflare Access) — never expose it bare.
+- API keys live in `config.yaml` on your local machine; do not commit them.
 
 ---
 
-## Khắc phục nhanh
+## Troubleshooting
 
-| Triệu chứng | Nguyên nhân / fix |
-|-------------|------------------|
-| `ModuleNotFoundError: No module named 'webui'` | chạy `python webui/app.py` sai thư mục. Dùng `python -m webui.app` từ root. |
-| Dịch chạy nhưng "sai model" | `webai.model` đang là tên cũ (`gemini-3.*`). Đổi thành `gemini-flash`. |
-| Job treo / retry vô hạn | do model trả về mất thẻ HTML; code đã giới hạn retry (max 30) + fallback split. |
-| Web UI không hiện log | job chạy trong thread; reload trang `/jobs/<id>` sẽ tải lại từ buffer. |
+| Symptom | Cause / fix |
+|---------|-------------|
+| `ModuleNotFoundError: No module named 'webui'` | ran `python webui/app.py` from the wrong directory. Use `python -m webui.app` from the project root. |
+| Translation runs but uses the "wrong model" | `webai.model` is an old name (`gemini-3.*`). Change it to `gemini-flash`. |
+| Job hangs / retries forever | model returned HTML with lost tags; code caps retries (max 30) + falls back to splitting. |
+| Web UI shows no log | jobs run in a thread; reloading `/jobs/<id>` reloads from the buffer. |
+
+---
+
+Tiếng Việt: see [README.vi.md](README.vi.md).
