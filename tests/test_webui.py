@@ -202,6 +202,137 @@ class TestWebUI(unittest.TestCase):
         finally:
             job_mod.build_engine = self._orig_build
 
+    def test_stale_running_job_marked_interrupted(self):
+        # A job persisted as "running" (or "queued") belongs to a previous
+        # process that is now dead; on load it must become "interrupted" so the
+        # UI reflects reality instead of showing a stuck "running".
+        import json as _json
+        from webui.jobs import JobRegistry
+
+        tmp = tempfile.mkdtemp()
+        running_meta = {
+            "id": "abc12345",
+            "created_at": time.time(),
+            "status": "running",
+            "params": {"engine": "openai", "input": "x.epub", "output": "y.epub"},
+            "progress": {},
+            "result": None,
+            "error": None,
+            "stop_requested": False,
+        }
+        with open(os.path.join(tmp, "abc12345.json"), "w", encoding="utf-8") as f:
+            _json.dump(running_meta, f)
+
+        reg = JobRegistry(tmp)
+        self.assertEqual(reg.get("abc12345").status, "interrupted")
+
+        # A completed job must be left untouched.
+        done_meta = dict(running_meta)
+        done_meta["id"] = "def67890"
+        done_meta["status"] = "done"
+        with open(os.path.join(tmp, "def67890.json"), "w", encoding="utf-8") as f:
+            _json.dump(done_meta, f)
+
+        reg2 = JobRegistry(tmp)
+        self.assertEqual(reg2.get("def67890").status, "done")
+
+    def test_resume_stopped_job(self):
+        # Stop a job almost immediately, then press Resume: the resumed run must
+        # pick the same job back up and finish it (continuing from the checkpoint)
+        # rather than being stuck. Per-chapter checkpoint-skip is covered by
+        # test_job_core.TestRunTranslationCore.test_checkpoint_written_and_resume.
+        import time as _time
+        import translator.job as job_mod
+
+        book = epub.EpubBook()
+        book.set_identifier("webui-resume")
+        book.set_title("Resume Test")
+        book.set_language("en")
+        ch1 = epub.EpubHtml(title="Ch1", file_name="ch1.xhtml", lang="en")
+        ch1.content = b"<html><body><p>Hello world chapter one text</p></body></html>"
+        ch2_paras = "".join(
+            f"<p>Hello world chapter two number {i}</p>" for i in range(4)
+        )
+        ch2 = epub.EpubHtml(title="Ch2", file_name="ch2.xhtml", lang="en")
+        ch2.content = ("<html><body>" + ch2_paras + "</body></html>").encode("utf-8")
+        book.add_item(ch1)
+        book.add_item(ch2)
+        book.spine = ["nav", "ch1.xhtml", "ch2.xhtml"]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        epub_path = os.path.join(self.tmp, "resume.epub")
+        out_path = os.path.join(self.tmp, "resume.out.epub")
+        epub.write_epub(epub_path, book, {})
+
+        captured = {}
+
+        class FastEngine(TranslationEngine):
+            def supports_batch(self):
+                return False
+
+            def __init__(self):
+                super().__init__(from_lang="EN", to_lang="VI")
+                self.calls = 0
+
+            def translate(self, text):
+                self.calls += 1
+                return text.replace("Hello", "Xin chào")
+
+        def make_engine(*a, **k):
+            eng = FastEngine()
+            captured["eng"] = eng
+            return eng
+
+        self._orig_build = job_mod.build_engine
+        try:
+            job_mod.build_engine = make_engine
+            r = self.client.post(
+                "/jobs/new",
+                data={
+                    "engine": "openai",
+                    "input": epub_path,
+                    "output": out_path,
+                    "from_chapter": "1",
+                    "to_chapter": "2",
+                    "from_lang": "EN",
+                    "to_lang": "VI",
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(r.status_code, 302)
+            job_id = r.headers["Location"].rstrip("/").split("/")[-1]
+
+            # Click Stop immediately (before the first chunk is translated).
+            self.client.post(f"/jobs/{job_id}/stop")
+            for _ in range(100):
+                job = self.registry.get(job_id)
+                if job and job.status in ("done", "error", "stopped"):
+                    break
+                _time.sleep(0.1)
+            self.assertEqual(job.status, "stopped")
+            self.assertEqual(captured["eng"].calls, 0)  # aborted before translating
+
+            # Resume: the same job must continue and finish the translation.
+            r = self.client.post(f"/jobs/{job_id}/resume", follow_redirects=False)
+            self.assertEqual(r.status_code, 302)
+            for _ in range(100):
+                job = self.registry.get(job_id)
+                if job and job.status in ("done", "error", "stopped"):
+                    break
+                _time.sleep(0.1)
+            self.assertEqual(job.status, "done")
+            self.assertTrue(os.path.exists(out_path))
+            # The resumed run actually translated the remaining chapters.
+            self.assertGreater(captured["eng"].calls, 0)
+            import zipfile
+
+            with zipfile.ZipFile(out_path) as zf:
+                names = [n for n in zf.namelist() if n.endswith("ch1.xhtml")]
+                ch1_content = zf.read(names[0]).decode("utf-8") if names else ""
+            self.assertIn("Xin chào", ch1_content)
+        finally:
+            job_mod.build_engine = self._orig_build
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

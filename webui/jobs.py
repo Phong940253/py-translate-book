@@ -18,7 +18,7 @@ class Job:
     def __init__(self, job_id: str, params: dict):
         self.id = job_id
         self.created_at = time.time()
-        self.status = "queued"  # queued | running | done | error | stopped
+        self.status = "queued"  # queued | running | done | error | stopped | interrupted
         self.params = params
         self.log_lines: list[str] = []
         self.events: list = []
@@ -64,12 +64,20 @@ class JobRegistry:
                     m = json.load(f)
                 job = Job(m["id"], m.get("params", {}))
                 job.created_at = m.get("created_at", job.created_at)
-                job.status = m.get("status", "queued")
+                loaded_status = m.get("status", "queued")
+                # Any job that was "running" (or still "queued") when this
+                # process last ran can no longer have a live worker thread after
+                # a restart, so it is definitively dead. Relabel it "interrupted"
+                # so the UI reflects reality instead of showing a stuck "running".
+                if loaded_status in ("running", "queued"):
+                    loaded_status = "interrupted"
+                job.status = loaded_status
                 job.progress = m.get("progress", {}) or {}
                 job.result = m.get("result")
                 job.error = m.get("error")
                 job.stop_requested = m.get("stop_requested", False)
                 self.jobs[job.id] = job
+                self.save(job)
             except Exception:  # noqa: BLE001
                 pass
 

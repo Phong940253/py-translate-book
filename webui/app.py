@@ -104,6 +104,32 @@ def job_stop(job_id):
     return redirect(url_for("job_view", job_id=job_id))
 
 
+@app.route("/jobs/<job_id>/resume", methods=["POST"])
+def job_resume(job_id):
+    job = registry.get(job_id)
+    if not job:
+        abort(404)
+    # Only continue jobs that are not actively running and not freshly done.
+    if job.status not in ("stopped", "interrupted", "error"):
+        return redirect(url_for("job_view", job_id=job_id))
+    # Reset per-run state so this run starts clean, but keep the same job id
+    # (the user wants to "continue this job", not spawn a new one).
+    job.stop_requested = False
+    job.error = None
+    job.result = None
+    job.progress = {}
+    job.events = []
+    # Continue from the existing checkpoint instead of wiping it.
+    params = dict(job.params)
+    params["reset_checkpoint"] = False
+    params["disable_resume"] = False
+    job.params = params
+    job.status = "running"
+    registry.save(job)
+    start_job(registry, job)
+    return redirect(url_for("job_view", job_id=job_id))
+
+
 @app.route("/jobs/<job_id>/stream")
 def job_stream(job_id):
     job = registry.get(job_id)
@@ -132,7 +158,7 @@ def job_stream(job_id):
                 "error": error,
             }
             yield "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
-            if status in ("done", "error", "stopped"):
+            if status in ("done", "error", "stopped", "interrupted"):
                 yield "data: " + json.dumps(
                     {"type": "end", "status": status}, ensure_ascii=False
                 ) + "\n\n"

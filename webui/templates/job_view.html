@@ -23,6 +23,11 @@
     <button type="submit" class="warn">⏹ Dừng (tại boundaries chương)</button>
   </form>
   {% endif %}
+  {% if job.status in ('stopped','interrupted','error') %}
+  <form method="post" action="{{ url_for('job_resume', job_id=job.id) }}" style="margin-top:8px">
+    <button type="submit" class="ok">▶ Tiếp tục (resume từ checkpoint)</button>
+  </form>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -55,7 +60,7 @@
       logEl.scrollTop = logEl.scrollHeight;
     } else if (msg.type === 'progress') {
       renderProgress(msg.progress);
-      if (msg.status === 'done' || msg.status === 'error' || msg.status === 'stopped') {
+      if (msg.status === 'done' || msg.status === 'error' || msg.status === 'stopped' || msg.status === 'interrupted') {
         progEl.innerHTML += ` &middot; <b>${msg.status}</b>`;
         if (msg.error) logEl.textContent += 'ERROR: ' + msg.error + '\n';
       }
