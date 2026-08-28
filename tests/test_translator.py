@@ -14,7 +14,11 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bs4 import BeautifulSoup
-from translator.translator import Translator, DEFAULT_MAX_TRIES
+from translator.translator import (
+    Translator,
+    DEFAULT_MAX_TRIES,
+    _repair_wrapper_balance,
+)
 from translator.engines.base import TranslationEngine
 
 
@@ -105,6 +109,72 @@ class TestStructureMismatch(unittest.TestCase):
         src = '<p><span class="C">A</span></p><p><span class="C">B</span></p><p><span class="C">C</span></p>'
         out = '<span class="C">A</span><span class="C">B</span><span class="C">C</span>'
         self.assertFalse(self.t._has_html_structure_mismatch(src, out))
+
+
+class TestWrapperRepair(unittest.TestCase):
+    """Cach B: model may append/complete outer wrapper tags (</section></div>);
+    these must be repaired (not treated as a structural break) so chunks
+    reassemble into valid HTML, while genuine content loss is still rejected.
+    """
+
+    def setUp(self):
+        self.t = Translator(FakeEngine(), html_structure_min_similarity=0.7,
+                            consistency_config={})
+
+    def test_repair_strips_surplus_wrapper_closes(self):
+        # Source chunk opens <div><section> but has NO closing wrapper inside it.
+        src = ('<div class="galley-rw"><section class="body-rw Chapter-rw" id="c5">'
+               '<p><span class="koboSpan" id="k1">Hello world</span></p>')
+        # Model "completes" the document by appending closing wrappers.
+        out = ('<div class="galley-rw"><section class="body-rw Chapter-rw" id="c5">'
+               '<p><span class="koboSpan" id="k1">Xin chào thế giới</span></p>'
+               '</section></div>')
+        repaired = _repair_wrapper_balance(src, out)
+        self.assertNotIn("</section>", repaired)
+        self.assertNotIn("</div>", repaired)
+        # After repair the tag balance matches the source -> no mismatch.
+        self.assertFalse(self.t._has_html_structure_mismatch(src, repaired))
+
+    def test_repair_handles_uppercase_wrapper_close(self):
+        src = '<div class="galley-rw"><section id="c5"><p><span>x</span></p>'
+        out = ('<div class="galley-rw"><section id="c5"><p><span>y</span></p>'
+               '</SECTION></div> ')
+        repaired = _repair_wrapper_balance(src, out)
+        self.assertNotIn("</section>", repaired.lower())
+        self.assertFalse(self.t._has_html_structure_mismatch(src, repaired))
+
+    def test_repair_strips_surplus_wrapper_opens(self):
+        src = '<p><span>x</span></p>'
+        out = '<div><section><p><span>y</span></p>'
+        repaired = _repair_wrapper_balance(src, out)
+        self.assertNotIn("<div>", repaired)
+        self.assertNotIn("<section>", repaired)
+
+    def test_real_leaf_tag_drop_still_rejected(self):
+        # Dropping a real <em> (leaf structural tag) is genuine content loss.
+        src = '<p><span>a</span><em><span>b</span></em><span>c</span></p>'
+        out = '<p><span>x</span><span>y</span><span>z</span></p>'
+        self.assertTrue(self.t._has_html_structure_mismatch(src, out))
+
+    def test_translate_chunk_accepts_surplus_wrapper_close(self):
+        # End-to-end through _translate_chunk: a surplus wrapper close must NOT
+        # cause a retry, and must be stripped from the returned translation.
+        src = ('<div class="galley-rw"><section id="c5">'
+               '<p><span class="k">Hello world test chunk</span></p>')
+
+        class SurplusCloseEngine(FakeEngine):
+            def translate(self, text):
+                self.calls += 1
+                return (text.replace("Hello world test chunk", "Xin chào thế giới đoạn kiểm tra")
+                            + "</section></div>")
+
+        t = Translator(SurplusCloseEngine(), html_structure_min_similarity=0.7,
+                       consistency_config={})
+        out = t._translate_chunk(src, chapter_number=5)
+        self.assertEqual(t.engine.calls, 1)  # no retry
+        self.assertNotIn("</section>", out)
+        self.assertNotIn("</div>", out)
+        self.assertIn("Xin chào thế giới đoạn kiểm tra", out)
 
 
 class TestOversizeSplit(unittest.TestCase):

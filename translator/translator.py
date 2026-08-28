@@ -43,6 +43,64 @@ def _structural_tags(tags) -> list:
     return [t for t in tags if t not in _IGNORABLE_STRUCTURE_TAGS]
 
 
+# Wrapper tags a model may "complete" by adding extra open/close pairs at the
+# boundaries of a chunk (e.g. appending </section></div> to close the chapter
+# wrapper it saw opened at the top of the chunk). These are repaired, not treated
+# as a structural break, because the source chunk is the authoritative balance.
+_WRAPPER_REPAIR_TAGS = ("div", "section", "body")
+
+
+def _count_tag_kind(text: str, tag: str):
+    """Return (open_count, close_count) for a given tag name in ``text``."""
+    opens = closes = 0
+    for raw in HTML_TAG_PATTERN.findall(text or ""):
+        norm = _normalize_tag_name(raw)
+        if norm == f"<{tag}>":
+            opens += 1
+        elif norm == f"</{tag}>":
+            closes += 1
+    return opens, closes
+
+
+def _repair_wrapper_balance(source: str, out: str) -> str:
+    """Strip wrapper tags (div/section/body) the model added beyond the source
+    chunk's own open/close balance, so chunks reassemble into valid HTML.
+
+    Only *surplus* wrapper tags are removed. Tags the model genuinely dropped are
+    intentionally left in place so ``_has_html_structure_mismatch`` still rejects
+    the chunk (and the caller retries).
+    """
+    if not out:
+        return out
+    result = out
+    for tag in _WRAPPER_REPAIR_TAGS:
+        src_open, src_close = _count_tag_kind(source, tag)
+        _, out_close = _count_tag_kind(result, tag)
+
+        # Models often "complete" the document by appending closing wrappers
+        # (e.g. </section></div>) at the end of a chunk. Strip the surplus.
+        for _ in range(out_close - src_close):
+            idx = result.lower().rfind(f"</{tag}")
+            if idx == -1:
+                break
+            end = result.find(">", idx)
+            if end == -1:
+                break
+            result = result[:idx] + result[end + 1:]
+
+        # Mirror handling for surplus opening wrappers added at the start.
+        out_open, _ = _count_tag_kind(result, tag)
+        for _ in range(out_open - src_open):
+            idx = result.lower().find(f"<{tag}")
+            if idx == -1:
+                break
+            end = result.find(">", idx)
+            if end == -1:
+                break
+            result = result[:idx] + result[end + 1:]
+    return result
+
+
 def _similarity_tags(tags) -> list:
     # Keep everything except paragraph boundaries for sequence similarity.
     return [t for t in tags if t not in ("<p>", "</p>")]
@@ -449,6 +507,7 @@ class Translator:
                 else:
                     result = self.engine.translate(text_to_translate)
                 result = self._normalize_model_output(result, text)
+                result = _repair_wrapper_balance(text, result)
 
                 if self._is_html_tag_missing(text, result):
                     raise ValueError("Model output lost HTML tags")
