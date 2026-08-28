@@ -17,7 +17,7 @@ REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
 MAX_BACKOFF_SECONDS = 60
 FALLBACK_MAX_CHUNK_SIZE = 3500
-DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.99
+DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.90
 HTML_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>|<![^>]*>|<\?[^>]*\?>")
 DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
 
@@ -37,6 +37,15 @@ class _TranslationStopped(Exception):
     """
 _TAG_NAME_RE = re.compile(r"^<(/?)([A-Za-z][A-Za-z0-9]*)")
 
+# Decisive attributes for EPUB structure. A change in any of these means the
+# translated chunk is NOT structurally equivalent (e.g. a koboSpan id keeps the
+# <span> name but its id anchors the Kobo reading CSS/JS -- dropping/renaming it
+# silently corrupts the kepub).
+_ID_RE = re.compile(r'\bid="([^"]*)"', re.IGNORECASE)
+_HREF_RE = re.compile(r'\bhref="([^"]*)"', re.IGNORECASE)
+_SRC_RE = re.compile(r'\bsrc="([^"]*)"', re.IGNORECASE)
+_CLASS_RE = re.compile(r'\bclass="([^"]*)"', re.IGNORECASE)
+
 
 def _normalize_tag_name(tag: str) -> str:
     """Reduce a tag to its name (drop attributes) for structural comparison."""
@@ -45,6 +54,48 @@ def _normalize_tag_name(tag: str) -> str:
         return tag
     slash, name = match.group(1), match.group(2).lower()
     return f"<{slash}{name}>"
+
+
+def _tag_signature(tag: str) -> str:
+    """Attribute-aware structure token used by the mismatch guard.
+
+    Decisive attributes are folded into the token so a rewrite that keeps the
+    tag *name* but changes an anchor is still caught:
+
+      ``<span class="koboSpan" id="k1">`` -> ``<span#k1.koboSpan>``
+      ``<a href="u">``                    -> ``<a@u>``
+      ``<img src="x.png">``               -> ``<img@x.png>``
+      ``<span class="koboSpan">``         -> ``<span.koboSpan>``
+      ``<div>``                           -> ``<div>``
+
+    Only the ``koboSpan`` class is decisive (generic span classes are ignored to
+    avoid false positives); ``id`` is decisive for every tag, ``href``/``src``
+    only for their respective elements.
+    """
+    m = _TAG_NAME_RE.match(tag or "")
+    if not m:
+        return tag
+    slash, name = m.group(1), m.group(2).lower()
+    if slash:  # closing tags carry no attributes
+        return f"</{name}>"
+    cls = _CLASS_RE.search(tag)
+    kobo = bool(cls and "koboSpan" in cls.group(1))
+    id_m = _ID_RE.search(tag)
+    if id_m:
+        # id is decisive for every tag; keep the koboSpan marker so a class
+        # rewrite (koboSpan -> plain) with the id preserved is still caught.
+        return f"<{name}#{id_m.group(1)}" + (".koboSpan" if kobo else "") + ">"
+    if name == "a":
+        href = _HREF_RE.search(tag)
+        if href:
+            return f"<{name}@{href.group(1)}>"
+    if name == "img":
+        src = _SRC_RE.search(tag)
+        if src:
+            return f"<{name}@{src.group(1)}>"
+    if kobo:
+        return f"<{name}.koboSpan>"
+    return f"<{name}>"
 
 
 def _structural_tags(tags) -> list:
@@ -110,8 +161,9 @@ def _repair_wrapper_balance(source: str, out: str) -> str:
 
 
 def _similarity_tags(tags) -> list:
-    # Keep everything except paragraph boundaries for sequence similarity.
-    return [t for t in tags if t not in ("<p>", "</p>")]
+    # Keep everything except paragraph AND line-break boundaries for sequence
+    # similarity (models legitimately merge/split paragraphs and move <br>).
+    return [t for t in tags if t not in ("<p>", "</p>", "<br>")]
 
 
 class Translator:
@@ -876,8 +928,8 @@ class Translator:
         if not output_raw:
             return True
 
-        source_tags = [_normalize_tag_name(t) for t in source_raw]
-        output_tags = [_normalize_tag_name(t) for t in output_raw]
+        source_tags = [_tag_signature(t) for t in source_raw]
+        output_tags = [_tag_signature(t) for t in output_raw]
 
         # 1) Structural-tag integrity: div/section/span/strong/em/img must be
         #    preserved. Paragraph/line-break boundaries are allowed to change

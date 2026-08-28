@@ -6,16 +6,15 @@ output is rejected and retried (or given up) during translation.
 
 Two groups:
 
-  A) CURRENT behavior that must stay stable (regression guards). These pass
-     against the present implementation, which compares *tag names only* and
-     ignores tag attributes (ids, hrefs, classes).
+  A) CURRENT behavior that must stay stable (regression guards). These pin down
+     the tag-name-level contract: dropping/duplicating leaf tags, surplus wrappers,
+     content loss and paragraph merges are handled as before.
 
-  B) DESIRED attribute-level behavior. Today the guard silently accepts an output
-     that keeps every tag name but rewrites attributes -- e.g. a ``koboSpan`` whose
-     ``id`` was dropped or changed (the exact kobo.874.2 failure mode). These tests
-     are marked ``expectedFailure`` to document the improvement target: when the
-     mismatch algorithm is taught to compare attributes (like ``chunk_structure``
-     already does), remove the decorator and they should go green.
+  B) Attribute-level behavior (now FIXED). The guard compares attribute-aware
+     signatures (``id`` / ``href`` / ``src`` / ``koboSpan``-class), so it rejects an
+     output that keeps every tag name but rewrites a decisive attribute -- e.g. a
+     ``koboSpan`` whose ``id`` was dropped or changed (the exact kobo.874.2 failure
+     mode). The guard and the live monitor's ``chunk_structure`` now agree.
 
 Run with: python -m unittest tests.test_html_mismatch -v
 """
@@ -112,9 +111,10 @@ class TestMismatchCurrentBehavior(unittest.TestCase):
             '<p><span class="koboSpan" id="k1">Xin chào thế giới</span></p>'))
 
     def test_self_closing_img_preserved_accepted(self):
+        # img tag kept, only text translated, same src -> accepted.
         self.assertFalse(self.g._has_html_structure_mismatch(
             '<p><img src="a.png"/>Hello</p>',
-            '<p><img src="b.png"/>Xin chào</p>'))
+            '<p><img src="a.png"/>Xin chào</p>'))
 
     def test_tagless_both_accepted(self):
         self.assertFalse(self.g._has_html_structure_mismatch(
@@ -156,28 +156,70 @@ class TestHtmlTagMissing(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# B) Documented GAP: the guard compares tag NAMES only, so it accepts an output
-#    that rewrites attributes (koboSpan id, href, ...). chunk_structure (used by
-#    the live monitor) already catches this drift. These tests assert the CURRENT
-#    (limited) behavior so the gap is explicit, not silent.
+# B) Attribute-level behavior (now FIXED): the guard compares tag signatures that
+#    fold in decisive attributes (id / href / src / koboSpan-class), so it rejects
+#    an output that rewrites those while keeping the tag name. chunk_structure (used
+#    by the live monitor) agrees with the guard -- no more silent gap.
 # ---------------------------------------------------------------------------
-class TestMismatchAttributeGap(unittest.TestCase):
+class TestMismatchAttributeAware(unittest.TestCase):
     def setUp(self):
         self.g = _guard()
 
-    def test_guard_accepts_kobospon_id_change(self):
-        # Current behavior: same tag name -> guard returns False (no retry).
-        self.assertFalse(self.g._has_html_structure_mismatch(
+    def test_guard_rejects_kobospon_id_change(self):
+        self.assertTrue(self.g._has_html_structure_mismatch(
             '<p><span class="koboSpan" id="kobo.874.2">The old man</span> looked.</p>',
             '<p><span class="koboSpan" id="kobo.874.3">Ông lão</span> nhìn.</p>'))
 
-    def test_structure_still_flags_the_dropped_id(self):
-        # The monitor's chunk_structure already sees the drift the guard misses.
+    def test_guard_rejects_kobospon_id_dropped(self):
+        self.assertTrue(self.g._has_html_structure_mismatch(
+            '<p><span class="koboSpan" id="k1">Hello</span></p>',
+            '<p><span class="koboSpan">Xin chào</span></p>'))
+
+    def test_guard_rejects_kobospon_class_dropped(self):
+        # id kept but koboSpan class rewritten to plain -> still a drift.
+        self.assertTrue(self.g._has_html_structure_mismatch(
+            '<p><span class="koboSpan" id="k1">Hello</span></p>',
+            '<p><span class="plain" id="k1">Xin chào</span></p>'))
+
+    def test_guard_rejects_anchor_id_changed(self):
+        self.assertTrue(self.g._has_html_structure_mismatch(
+            '<a id="page-1">x</a>', '<a id="page-2">x</a>'))
+
+    def test_guard_rejects_href_changed(self):
+        self.assertTrue(self.g._has_html_structure_mismatch(
+            '<a href="url-a">x</a>', '<a href="url-b">x</a>'))
+
+    def test_guard_rejects_duplicate_kobospon_id(self):
+        src = ('<span class="koboSpan" id="k1">a</span>'
+               '<span class="koboSpan" id="k2">b</span>')
+        out = ('<span class="koboSpan" id="k1">a</span>'
+               '<span class="koboSpan" id="k1">b</span>')
+        self.assertTrue(self.g._has_html_structure_mismatch(src, out))
+
+    def test_guard_rejects_img_src_changed(self):
+        self.assertTrue(self.g._has_html_structure_mismatch(
+            '<p><img src="a.png"/>Hello</p>',
+            '<p><img src="b.png"/>Xin chào</p>'))
+
+    def test_guard_accepts_preserved_kobospon_id(self):
+        # Same id (and koboSpan class) kept -> accepted, only text translated.
+        self.assertFalse(self.g._has_html_structure_mismatch(
+            '<p><span class="koboSpan" id="k1">Hello world</span></p>',
+            '<p><span class="koboSpan" id="k1">Xin chào thế giới</span></p>'))
+
+    def test_guard_ignores_generic_span_class_change(self):
+        # class on a non-koboSpan span is NOT decisive -> accepted.
+        self.assertFalse(self.g._has_html_structure_mismatch(
+            '<p><span class="calibre1">Hello</span></p>',
+            '<p><span class="calibre2">Xin chào</span></p>'))
+
+    def test_structure_agrees_with_guard_on_id_change(self):
+        # Guard and monitor's chunk_structure must agree (no silent gap).
         from webui.diff_utils import chunk_structure
 
         src = '<p><span class="koboSpan" id="k1">Hello</span></p>'
         out = '<p><span class="koboSpan" id="k2">Xin chào</span></p>'
-        self.assertFalse(self.g._has_html_structure_mismatch(src, out))  # current gap
+        self.assertTrue(self.g._has_html_structure_mismatch(src, out))
         st = chunk_structure(src, out)
         self.assertFalse(st["same"])
         self.assertEqual(st["coverage"]["missing"], ["k1"])
@@ -185,49 +227,42 @@ class TestMismatchAttributeGap(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# C) DESIRED attribute-level behavior -- the improvement TARGET.
-#    Once the mismatch guard is taught to compare attributes (like chunk_structure
-#    already does), remove the expectedFailure decorators and these should pass.
+# Unit tests for the attribute-aware signature token itself.
 # ---------------------------------------------------------------------------
-class TestMismatchAttributeLevelTarget(unittest.TestCase):
-    def setUp(self):
-        self.g = _guard()
+class TestTagSignature(unittest.TestCase):
+    def _sig(self, tag):
+        from translator.translator import _tag_signature
+        return _tag_signature(tag)
 
-    @unittest.expectedFailure
-    def test_target_kobospon_id_changed(self):
-        self.assertTrue(self.g._has_html_structure_mismatch(
-            '<p><span class="koboSpan" id="kobo.874.2">The old man</span> looked.</p>',
-            '<p><span class="koboSpan" id="kobo.874.3">Ông lão</span> nhìn.</p>'))
+    def test_kobospon_id(self):
+        self.assertEqual(
+            self._sig('<span class="koboSpan" id="k1">'),
+            "<span#k1.koboSpan>")
 
-    @unittest.expectedFailure
-    def test_target_kobospon_id_dropped(self):
-        self.assertTrue(self.g._has_html_structure_mismatch(
-            '<p><span class="koboSpan" id="k1">Hello</span></p>',
-            '<p><span class="koboSpan">Xin chào</span></p>'))
+    def test_kobospon_id_class_rewrite_kept(self):
+        # id preserved but class dropped -> marker still recorded so it differs.
+        self.assertEqual(self._sig('<span class="plain" id="k1">'), "<span#k1>")
 
-    @unittest.expectedFailure
-    def test_target_kobospon_class_dropped(self):
-        self.assertTrue(self.g._has_html_structure_mismatch(
-            '<p><span class="koboSpan" id="k1">Hello</span></p>',
-            '<p><span class="plain" id="k1">Xin chào</span></p>'))
+    def test_anchor_id(self):
+        self.assertEqual(self._sig('<a id="page-1">'), "<a#page-1>")
 
-    @unittest.expectedFailure
-    def test_target_anchor_id_changed(self):
-        self.assertTrue(self.g._has_html_structure_mismatch(
-            '<a id="page-1">x</a>', '<a id="page-2">x</a>'))
+    def test_href(self):
+        self.assertEqual(self._sig('<a href="url-a">'), "<a@url-a>")
 
-    @unittest.expectedFailure
-    def test_target_href_changed(self):
-        self.assertTrue(self.g._has_html_structure_mismatch(
-            '<a href="url-a">x</a>', '<a href="url-b">x</a>'))
+    def test_img_src(self):
+        self.assertEqual(self._sig('<img src="x.png"/>'), "<img@x.png>")
 
-    @unittest.expectedFailure
-    def test_target_duplicate_kobospon_id(self):
-        src = ('<span class="koboSpan" id="k1">a</span>'
-               '<span class="koboSpan" id="k2">b</span>')
-        out = ('<span class="koboSpan" id="k1">a</span>'
-               '<span class="koboSpan" id="k1">b</span>')
-        self.assertTrue(self.g._has_html_structure_mismatch(src, out))
+    def test_kobospon_no_id(self):
+        self.assertEqual(self._sig('<span class="koboSpan">'), "<span.koboSpan>")
+
+    def test_generic_span(self):
+        self.assertEqual(self._sig('<span class="calibre1">'), "<span>")
+
+    def test_closing_tag(self):
+        self.assertEqual(self._sig('</span>'), "</span>")
+
+    def test_uppercase_name_normalized(self):
+        self.assertEqual(self._sig('<SPAN CLASS="koboSpan" ID="K1">'), "<span#K1.koboSpan>")
 
 
 if __name__ == "__main__":
