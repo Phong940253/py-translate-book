@@ -15,10 +15,10 @@ class GeminiEngine(TranslationEngine):
         genai.configure(api_key=api_key)
 
         self.model = genai.GenerativeModel(
-            "gemini-2.5-flash-lite",
+            "gemini-flash-lite",
             system_instruction=self.system_prompt(),
         )
-        self.analysis_model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        self.analysis_model = genai.GenerativeModel("gemini-flash-lite")
 
         self.safety = {
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,

@@ -10,7 +10,7 @@ from .base import TranslationEngine
 from ..logging_utils import log_text
 
 DEFAULT_ENDPOINT = "/v1/chat/completions"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash"
 DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_CHAT_START_ENDPOINT = "/gemini"

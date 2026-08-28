@@ -127,7 +127,7 @@ def build_engine(
         return WebAIEngine(
             base_url=engine_key_cfg.get("base_url", "http://localhost:6969"),
             endpoint=engine_key_cfg.get("endpoint", "/v1/chat/completions"),
-            model=engine_key_cfg.get("model", "gemini-2.5-flash"),
+            model=engine_key_cfg.get("model", "gemini-flash"),
             api_key=engine_key_cfg.get("api_key"),
             timeout_seconds=engine_key_cfg.get("timeout_seconds", 120),
             chat_mode=engine_key_cfg.get("chat_mode", False),
