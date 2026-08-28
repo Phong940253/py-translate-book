@@ -1,13 +1,18 @@
 """Flask app for managing py-translate-book translations (local-only).
 
-Run:  python webui/app.py
+Run:  python -m webui.app   (or: python webui/app.py)
 Open: http://127.0.0.1:5000
 """
 
 import io
 import json
 import os
+import sys
 import time
+
+# Allow running as a bare script (python webui/app.py): ensure the project root
+# is importable so `from webui.xxx import ...` resolves regardless of CWD.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import (
     Flask,

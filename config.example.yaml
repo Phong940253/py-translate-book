@@ -1,0 +1,70 @@
+# =============================================================================
+# py-translate-book — example configuration
+# Copy this file to `config.yaml` and fill in your own values.
+# `config.yaml` is git-ignored, so your real keys never get committed.
+# =============================================================================
+
+# --- OpenAI (engine: "openai") ---
+openai:
+  api_key: "sk-..."          # required for the openai engine
+  # custom_prompt: "..."      # optional: override the shared translation prompt
+
+# --- Google Gemini (engine: "gemini") ---
+gemini:
+  api_key: "AIza..."         # required for the gemini engine
+  # custom_prompt: "..."      # optional
+
+# --- WebAI local proxy (engine: "webai") ---
+# Talks to a local WebAI server (OpenAI-compatible). The model name is forwarded
+# as-is to that server, so use a name IT accepts (e.g. gemini-flash / gemini-pro).
+webai:
+  base_url: "http://localhost:6969"
+  endpoint: "/v1/chat/completions"
+  model: "gemini-flash"      # <- change to a name your WebAI server accepts
+  api_key: ""                # only if your server requires it
+  timeout_seconds: 240
+  chat_mode: true            # keep conversation state across chunks
+  chat_start_endpoint: "/gemini"
+  chat_continue_endpoint: "/gemini-chat"
+  chat_reset_every_chunks: 30
+
+# --- Groq (engine: "groq") ---
+groq:
+  api_key: "gsk_..."
+
+# --- Translation behavior ---
+translation:
+  fallback_max_chunk_size: 6000          # split oversized chunks to fit the model
+  html_structure_similarity_threshold: 0.7  # tolerate minor HTML drift after translate
+  max_tries: 0                            # 0 = use engine default cap (30 retries)
+  custom_prompt: ""                       # optional global prompt override
+
+  illustration:
+    enabled: false
+    provider: "webai"                     # which engine produces images
+    model: "gemini-flash"                 # image model name forwarded to WebAI
+    webai_image_endpoint: "/v1/chat/completions"
+    every_n_chunks: 3
+    max_images_per_chapter: 3
+    min_chunk_chars: 160
+    prompt_max_chars: 420
+    width: 768
+    height: 1152
+    timeout_seconds: 40
+    output_dir: "images/generated"
+    style_prompt: "Light novel illustration, cinematic composition, no text overlays, safe for work"
+    default_alt_text: "Minh hoa noi dung"
+
+  consistency:
+    enabled: true                         # keep names/address-forms consistent across chapters
+    previous_translated_window: 1
+    next_source_window: 1
+    analysis_max_chars: 30000
+    rules_max_chars: 2000
+    cache_chapter_rules: true
+
+# --- Discord notifications ---
+discord:
+  enabled: true
+  webhook_url: "https://discord.com/api/webhooks/..."   # your webhook URL
+  mention_user_id: ""                      # optional Discord user ID to @mention on finish
