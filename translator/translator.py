@@ -6,6 +6,7 @@ import os
 import json
 from datetime import datetime
 from difflib import SequenceMatcher
+from typing import Callable
 from tqdm import tqdm
 
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
@@ -116,6 +117,7 @@ class Translator:
         chapter_number: int | None = None,
         chapter_file_name: str | None = None,
         chapter_title: str | None = None,
+        progress_callback: Callable[[int, int, int | None], None] | None = None,
     ):
         content = extract_html_content(soup, self.split_tag)
         effective_split_tag = self.split_tag
@@ -172,6 +174,8 @@ class Translator:
             if cached_result is not None:
                 self.stats["cache_hits"] += 1
                 translated.append(cached_result)
+                if progress_callback is not None:
+                    progress_callback(index + 1, len(chunks), chapter_number)
                 continue
 
             translated_chunk = self._translate_chunk(
@@ -188,6 +192,8 @@ class Translator:
             )
             self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
+            if progress_callback is not None:
+                progress_callback(index + 1, len(chunks), chapter_number)
 
         if self.illustration_manager and self.illustration_manager.is_enabled():
             translated = self.illustration_manager.inject_illustrations(

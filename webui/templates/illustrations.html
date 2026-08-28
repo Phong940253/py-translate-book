@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Ảnh minh họa{% endblock %}
+{% block content %}
+<h1>Ảnh minh họa</h1>
+<p class="muted">Thư mục: <span class="mono">{{ img_dir }}</span></p>
+{% if not images %}
+  <p class="card muted">Chưa có ảnh nào được sinh (illustration chưa bật hoặc chưa chạy).</p>
+{% else %}
+  <div class="gallery">
+    {% for img in images %}
+    <div class="thumb card">
+      <img src="{{ url_for('serve_image', filename=img) }}" alt="{{ img }}">
+      <div class="mono small">{{ img }}</div>
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}

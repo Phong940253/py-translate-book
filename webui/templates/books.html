@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Thư viện{% endblock %}
+{% block content %}
+<h1>Thư viện EPUB</h1>
+<table class="table card">
+  <thead><tr><th>Tên</th><th>Size</th><th>Chapters</th><th>Checkpoint</th><th></th></tr></thead>
+  <tbody>
+    {% for b in books %}
+    <tr>
+      <td class="mono">{{ b.name }}</td>
+      <td>{{ b.size_mb }} MB</td>
+      <td>{{ b.chapters }}</td>
+      <td>{% if b.has_checkpoint %}<span class="badge has-cp">có</span>{% else %}-{% endif %}</td>
+      <td>
+        <a href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a> ·
+        <a href="#" onclick="preview('{{ b.path }}');return false;">Preview</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div id="preview-box" class="card" style="display:none">
+  <h2>Preview chương <span id="pv-ch"></span></h2>
+  <pre id="pv-text" class="log"></pre>
+</div>
+
+<script>
+function preview(path) {
+  const ch = prompt('Chương số?', '1');
+  if (!ch) return;
+  fetch(`/books/preview?path=${encodeURIComponent(path)}&chapter=${ch}`)
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('preview-box').style.display = 'block';
+      document.getElementById('pv-ch').textContent = d.chapter + ' / ' + d.total;
+      document.getElementById('pv-text').textContent = d.text;
+    })
+    .catch(e => alert('Lỗi: ' + e));
+}
+</script>
+{% endblock %}

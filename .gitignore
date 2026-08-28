@@ -60,3 +60,23 @@ Thumbs.db
 *.tmp
 *.bak
 *.retry
+
+# =====================
+# Runtime / Checkpoints
+# =====================
+*.checkpoint.json
+*.illustration.jsonl
+manual_translation_queue.jsonl
+webui/jobs/
+
+# =====================
+# Local proxy certs (mitmproxy)
+# =====================
+*.p12
+mitmproxy*
+
+# =====================
+# Node leftover (not used by this project)
+# =====================
+package.json
+package-lock.json

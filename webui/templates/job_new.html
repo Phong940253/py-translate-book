@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Job mới{% endblock %}
+{% block content %}
+<h1>Tạo job dịch mới</h1>
+<form method="post" class="form card">
+  <div class="row">
+    <label>Engine</label>
+    <select name="engine" required>
+      {% for e in engines %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
+    </select>
+  </div>
+
+  <div class="row">
+    <label>Input EPUB</label>
+    <input name="input" required list="books" value="{{ request.args.get('input','') }}">
+    <datalist id="books">
+      {% for b in books %}<option value="{{ b.path }}">{% endfor %}
+    </datalist>
+  </div>
+
+  <div class="row">
+    <label>Output EPUB</label>
+    <input name="output" placeholder="(mặc định: input.translated.epub)">
+  </div>
+
+  <div class="row">
+    <label>Config</label>
+    <input name="config_path" value="{{ default_config }}">
+  </div>
+
+  <div class="row2">
+    <div>
+      <label>From chapter</label>
+      <input type="number" name="from_chapter" min="1" placeholder="1">
+    </div>
+    <div>
+      <label>To chapter</label>
+      <input type="number" name="to_chapter" min="1" placeholder="cuối">
+    </div>
+  </div>
+
+  <div class="row2">
+    <div>
+      <label>From lang</label>
+      <input name="from_lang" value="EN">
+    </div>
+    <div>
+      <label>To lang</label>
+      <input name="to_lang" value="VI">
+    </div>
+  </div>
+
+  <div class="row">
+    <label>Description</label>
+    <input name="description" placeholder="(tùy chọn) ngữ cảnh sách">
+  </div>
+
+  <div class="row checks">
+    <label><input type="checkbox" name="openai_batch" value="1"> OpenAI batch</label>
+    <label><input type="checkbox" name="reset_checkpoint" value="1"> Reset checkpoint</label>
+    <label><input type="checkbox" name="disable_resume" value="1"> Tắt resume</label>
+  </div>
+
+  <button type="submit" class="primary">▶ Bắt đầu dịch</button>
+</form>
+{% endblock %}

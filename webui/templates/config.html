@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Cấu hình{% endblock %}
+{% block content %}
+<h1>Cấu hình (config.yaml)</h1>
+{% if error %}
+  <div class="card error">Lỗi lưu: {{ error }}</div>
+{% endif %}
+<form method="post" class="card">
+  <p class="muted">API key hiển thị là <code>********</code> — để nguyên nếu không muốn đổi.
+  File cũ được backup thành <code>config.yaml.bak</code> trước khi ghi.</p>
+  <textarea name="config_text" class="code" rows="28">{{ config_text }}</textarea>
+  <div class="row checks">
+    <button type="submit" class="primary">💾 Lưu cấu hình</button>
+    <button type="button" class="warn" onclick="testDiscord()">🔔 Test Discord webhook</button>
+  </div>
+  <span id="discord-result" class="muted"></span>
+</form>
+
+<script>
+function testDiscord() {
+  fetch('/config/test-discord', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('discord-result').textContent =
+        d.success ? 'Discord: SUCCESS' : 'Discord: FAILED (xem translation.log)';
+    })
+    .catch(e => alert('Lỗi: ' + e));
+}
+</script>
+{% endblock %}

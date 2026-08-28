@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="card">
+  <h2>Jobs gần đây</h2>
+  {% if not jobs %}
+    <p class="muted">Chưa có job nào. <a href="{{ url_for('job_new') }}">Tạo job mới</a>.</p>
+  {% else %}
+    <table class="table">
+      <thead>
+        <tr><th>ID</th><th>Engine</th><th>Input</th><th>Trạng thái</th><th>Chapter</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td><a href="{{ url_for('job_view', job_id=job.id) }}">{{ job.id }}</a></td>
+          <td>{{ job.params.engine }}</td>
+          <td class="mono small">{{ job.params.input }}</td>
+          <td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
+          <td>
+            {% if job.progress and job.progress.get('current_chapter') %}
+              {{ job.progress.current_chapter }} / {{ job.progress.get('total_chapters') }}
+            {% elif job.progress %}
+              ? / {{ job.progress.get('total_chapters') }}
+            {% else %}-{% endif %}
+          </td>
+          <td><a href="{{ url_for('job_view', job_id=job.id) }}">Xem</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Thư viện EPUB</h2>
+  {% if not books %}
+    <p class="muted">Không tìm thấy EPUB trong thư mục dự án.</p>
+  {% else %}
+    <ul class="booklist">
+      {% for b in books %}
+      <li>
+        <span class="mono">{{ b.name }}</span>
+        <span class="muted">{{ b.size_mb }} MB</span>
+        {% if b.has_checkpoint %}<span class="badge has-cp">có checkpoint</span>{% endif %}
+        <a href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a>
+      </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+{% endblock %}

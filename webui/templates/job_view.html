@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }}{% endblock %}
+{% block content %}
+<h1>Job <span class="mono">{{ job.id }}</span>
+  <span class="badge {{ job.status }}">{{ job.status }}</span>
+</h1>
+
+<div class="card">
+  <div class="row"><label>Engine</label><span class="mono">{{ job.params.engine }}</span></div>
+  <div class="row"><label>Input</label><span class="mono small">{{ job.params.input }}</span></div>
+  <div class="row"><label>Output</label><span class="mono small">{{ job.params.output }}</span></div>
+  <div class="row"><label>Chapter range</label>
+    <span>{{ job.params.from_chapter or 1 }} – {{ job.params.to_chapter or 'cuối' }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Tiến trình</h2>
+  <div id="progress" class="muted">Đang chờ...</div>
+  <div class="progressbar"><div id="bar" style="width:0%"></div></div>
+  {% if job.status == 'running' %}
+  <form method="post" action="{{ url_for('job_stop', job_id=job.id) }}" style="margin-top:8px">
+    <button type="submit" class="warn">⏹ Dừng (tại boundaries chương)</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <pre id="log" class="log"></pre>
+</div>
+
+<script>
+  const jobId = "{{ job.id }}";
+  const logEl = document.getElementById('log');
+  const progEl = document.getElementById('progress');
+  const barEl = document.getElementById('bar');
+
+  function renderProgress(p) {
+    if (!p || !p.total_chapters) { progEl.textContent = 'Đang khởi tạo...'; return; }
+    const cur = p.current_chapter || p.last_completed || '?';
+    const total = p.total_chapters;
+    const done = p.last_completed || 0;
+    progEl.innerHTML = `Chapter <b>${cur}</b> / ${total}` +
+      (p.current_title ? ` — <i>${p.current_title}</i>` : '');
+    const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+    barEl.style.width = pct + '%';
+  }
+
+  const es = new EventSource(`/jobs/${jobId}/stream`);
+  es.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'log') {
+      logEl.textContent += msg.line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    } else if (msg.type === 'progress') {
+      renderProgress(msg.progress);
+      if (msg.status === 'done' || msg.status === 'error' || msg.status === 'stopped') {
+        progEl.innerHTML += ` &middot; <b>${msg.status}</b>`;
+        if (msg.error) logEl.textContent += 'ERROR: ' + msg.error + '\n';
+      }
+    } else if (msg.type === 'end') {
+      es.close();
+    }
+  };
+  es.onerror = () => { progEl.textContent = 'Mất kết nối stream.'; };
+
+  // cũng render trạng thái hiện tại (tránh chớp màn hình khi reload)
+  renderProgress({{ job.progress | tojson }});
+</script>
+{% endblock %}
