@@ -31,6 +31,29 @@
 </div>
 
 <div class="card">
+  <h2>Giám sát</h2>
+  <div id="api" class="muted">API: đang chờ...</div>
+  <div id="subprog" class="muted">Chunk: –</div>
+  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+    <button id="btnStruct" type="button" class="ok" style="font-size:12px">Cấu trúc</button>
+    <button id="btnDiff" type="button" style="font-size:12px">Diff (từ)</button>
+    <button id="btnSide" type="button" style="font-size:12px">Song song (raw)</button>
+  </div>
+  <div id="structView" class="diff"></div>
+  <div id="diffView" class="diff" style="display:none"></div>
+  <div id="diffWrap" class="diff-grid" style="display:none; margin-top:8px">
+    <div>
+      <div class="muted small">Source</div>
+      <pre id="diffSource" class="log"></pre>
+    </div>
+    <div>
+      <div class="muted small">Dịch</div>
+      <pre id="diffTrans" class="log"></pre>
+    </div>
+  </div>
+</div>
+
+<div class="card">
   <h2>Log</h2>
   <pre id="log" class="log"></pre>
 </div>
@@ -50,7 +73,138 @@
       (p.current_title ? ` — <i>${p.current_title}</i>` : '');
     const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
     barEl.style.width = pct + '%';
+    renderMonitor(p);
   }
+
+  function renderMonitor(p) {
+    const api = p && p.api;
+    if (api) {
+      const total_s = (api.total_ms / 1000).toFixed(1);
+      document.getElementById('api').textContent =
+        `API: ${api.calls} calls · tổng ${total_s}s · lần cuối ${Math.round(api.last_ms)}ms · tb ${Math.round(api.avg_ms)}ms`;
+    }
+    if (p && p.chunk_total) {
+      let sub = `Chunk: ${p.chunk_index || '?'} / ${p.chunk_total} (chương ${p.current_chapter || '?'})`;
+      const cc0 = p.current_chunk;
+      if (cc0 && cc0.status === 'retry') {
+        sub += ` · ⚠️ thử lại lần ${cc0.attempt}: ${cc0.error}`;
+      } else if (cc0 && cc0.status === 'failed') {
+        sub += ` · ❌ thất bại (fallback gốc)`;
+      }
+      document.getElementById('subprog').textContent = sub;
+    }
+    const cc = p && p.current_chunk;
+    if (cc) {
+      document.getElementById('diffSource').textContent = cc.source || '';
+      document.getElementById('diffTrans').textContent = cc.translated || '';
+    }
+    renderDiff(p);
+    renderStruct(p);
+  }
+
+  function renderDiff(p) {
+    const cc = p && p.current_chunk;
+    if (!cc || !cc.diff) return;
+    const d = cc.diff;
+    const view = document.getElementById('diffView');
+    view.textContent = '';
+    const stats = document.createElement('div');
+    stats.className = 'muted small';
+    stats.textContent = `Thêm: ${d.added_words} từ · Xoá: ${d.removed_words} từ  (🟢 thêm · 🔴 xoá · ⚪ giữ)`;
+    view.appendChild(stats);
+    for (const line of d.lines) {
+      const row = document.createElement('div');
+      row.className = line.kind;  // equal | del | ins | change
+      for (const part of (line.parts || [])) {
+        const span = document.createElement('span');
+        span.className = part.op;  // eq | del | ins
+        span.textContent = part.text;
+        row.appendChild(span);
+      }
+      view.appendChild(row);
+    }
+    // Auto-scroll to the latest diff only if the user is already near the bottom
+    // (so scrolling up to inspect history isn't yanked back down).
+    const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+    if (nearBottom) view.scrollTop = view.scrollHeight;
+  }
+
+  function renderStruct(p) {
+    const cc = p && p.current_chunk;
+    const st = cc && cc.structure;
+    const view = document.getElementById('structView');
+    if (!st) { view.textContent = ''; return; }
+    view.textContent = '';
+    const summary = document.createElement('div');
+    summary.className = st.same ? 'ok-line' : 'warn-line';
+    summary.textContent = st.same
+      ? `✅ Khớp cấu trúc (${st.source_tags} thẻ, ${st.coverage.total_source} span)`
+      : `⚠️ Lệch cấu trúc (nguồn ${st.source_tags} thẻ/${st.coverage.total_source} span · dịch ${st.translated_tags} thẻ/${st.coverage.total_translated} span)`;
+    view.appendChild(summary);
+    if (cc && cc.status === 'retry') {
+      const r = document.createElement('div');
+      r.className = 'yellow';
+      r.textContent = `⚠️ Thử lại lần ${cc.attempt}: ${cc.error}`;
+      view.appendChild(r);
+    }
+    if (cc && cc.status === 'failed') {
+      const f = document.createElement('div');
+      f.className = 'warn-line';
+      f.textContent = `❌ Chunk thất bại sau ${cc.attempt} lần — dùng bản gốc (${cc.error})`;
+      view.appendChild(f);
+    }
+    if (st.coverage.missing.length) {
+      const m = document.createElement('div');
+      m.className = 'warn-line';
+      m.textContent = '🔴 Thiếu span: ' + st.coverage.missing.join(', ');
+      view.appendChild(m);
+    }
+    if (st.coverage.extra.length) {
+      const e = document.createElement('div');
+      e.className = 'yellow';
+      e.textContent = '🟡 Thừa span: ' + st.coverage.extra.join(', ');
+      view.appendChild(e);
+    }
+    for (const td of st.tag_diff) {
+      const row = document.createElement('div');
+      row.className = td.op;  // del -> red (tag dropped), ins -> green (tag added)
+      row.textContent = (td.op === 'del' ? '🔴 ' : '🟢 ') + td.tag;
+      view.appendChild(row);
+    }
+    const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+    if (nearBottom) view.scrollTop = view.scrollHeight;
+  }
+
+  const structView = document.getElementById('structView');
+  const diffView = document.getElementById('diffView');
+  const diffWrap = document.getElementById('diffWrap');
+  function showStruct() {
+    structView.style.display = 'block';
+    diffView.style.display = 'none';
+    diffWrap.style.display = 'none';
+    document.getElementById('btnStruct').classList.add('ok');
+    document.getElementById('btnDiff').classList.remove('ok');
+    document.getElementById('btnSide').classList.remove('ok');
+  }
+  function showDiff() {
+    structView.style.display = 'none';
+    diffView.style.display = 'block';
+    diffWrap.style.display = 'none';
+    document.getElementById('btnStruct').classList.remove('ok');
+    document.getElementById('btnDiff').classList.add('ok');
+    document.getElementById('btnSide').classList.remove('ok');
+  }
+  function showSide() {
+    structView.style.display = 'none';
+    diffView.style.display = 'none';
+    diffWrap.style.display = 'grid';
+    document.getElementById('btnStruct').classList.remove('ok');
+    document.getElementById('btnDiff').classList.remove('ok');
+    document.getElementById('btnSide').classList.add('ok');
+  }
+  document.getElementById('btnStruct').addEventListener('click', showStruct);
+  document.getElementById('btnDiff').addEventListener('click', showDiff);
+  document.getElementById('btnSide').addEventListener('click', showSide);
 
   const es = new EventSource(`/jobs/${jobId}/stream`);
   es.onmessage = (e) => {

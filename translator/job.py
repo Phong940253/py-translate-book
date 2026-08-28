@@ -191,6 +191,10 @@ def run_translation(
     import subprocess
 
     cb = progress_cb or _noop_cb
+    # ``translator`` is created later (below); ``cb_with_stats`` is (re)bound to
+    # ``cb`` once it exists so every emitted event carries a live stats snapshot
+    # (API timing, current chunk, etc.) for UIs/monitors.
+    cb_with_stats = cb
     started_at = datetime.now()
 
     consistency_config = (
@@ -318,6 +322,14 @@ def run_translation(
         html_structure_min_similarity=html_structure_similarity_threshold,
     )
 
+    _base_cb = cb
+
+    def cb_with_stats(event, data):
+        snap = translator.get_stats()
+        _base_cb(event, {**data, "stats": snap})
+
+    cb = cb_with_stats
+
     cb(
         "job_started",
         {
@@ -398,6 +410,10 @@ def run_translation(
                     chapter_file_name=file_name,
                     chapter_title=title,
                     should_stop=should_stop,
+                    progress_callback=lambda i, n, ch: cb_with_stats(
+                        "chunk_progress",
+                        {"index": i, "total": n, "chapter": ch},
+                    ),
                 )
                 item.content = translated.encode("utf-8")
                 save_epub(book, output, source_path=input)

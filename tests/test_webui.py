@@ -6,6 +6,7 @@ let the background runner finish, and assert the output EPUB is produced.
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -28,6 +29,24 @@ class StubEngine(TranslationEngine):
 
     def translate(self, text):
         return text.replace("Hello", "Xin chào").replace("world", "thế giới")
+
+
+class BadStructureEngine(TranslationEngine):
+    """Returns output with every HTML tag stripped -> HTML structure mismatch.
+
+    Strips *all* tags (not just ``<p>``) so the mismatch survives retries: the
+    retry prompt itself contains ``<br>``, which would otherwise let a
+    ``<p>``-only stripper pass the structural check on attempt 2.
+    """
+
+    def __init__(self):
+        super().__init__(from_lang="EN", to_lang="VI")
+
+    def supports_batch(self):
+        return False
+
+    def translate(self, text):
+        return re.sub(r"<[^>]+>", "", text)
 
 
 class _SubprocSlowEngine(TranslationEngine):
@@ -237,6 +256,124 @@ class TestWebUI(unittest.TestCase):
             self.assertLessEqual(captured["eng"].calls, 1)
         finally:
             job_mod.build_engine = self._orig_build
+
+    def test_job_monitoring_events(self):
+        # A finished job must have emitted chunk_progress events and recorded
+        # live monitoring data (API timing + current chunk diff) into progress.
+        r = self.client.post(
+            "/jobs/new",
+            data={
+                "engine": "openai",
+                "input": self.src,
+                "output": self.out,
+                "from_chapter": "1",
+                "to_chapter": "1",
+                "from_lang": "EN",
+                "to_lang": "VI",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 302)
+        job_id = r.headers["Location"].rstrip("/").split("/")[-1]
+
+        job = None
+        for _ in range(100):
+            job = self.registry.get(job_id)
+            if job and job.status in ("done", "error", "stopped"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(job.status, "done", job.error)
+
+        events = [e for e in job.events if e[0] == "chunk_progress"]
+        self.assertTrue(events, "expected at least one chunk_progress event")
+        self.assertEqual(events[-1][1]["index"], events[-1][1]["total"])
+
+        api = job.progress.get("api")
+        self.assertIsNotNone(api)
+        self.assertGreater(api["calls"], 0)
+        self.assertGreaterEqual(api["total_ms"], 0.0)
+
+        cc = job.progress.get("current_chunk")
+        self.assertIsNotNone(cc)
+        self.assertIn("Hello", cc["source"])
+        self.assertIn("Xin chào", cc["translated"])
+
+        # word-level diff must be attached to the current chunk
+        diff = cc.get("diff")
+        self.assertIsNotNone(diff)
+        self.assertIn("lines", diff)
+        self.assertIn("added_words", diff)
+        self.assertIn("removed_words", diff)
+        self.assertGreater(diff["added_words"], 0)
+
+        # structure + koboSpan coverage must be attached too
+        struct = cc.get("structure")
+        self.assertIsNotNone(struct)
+        self.assertIn("same", struct)
+        self.assertIn("tag_diff", struct)
+        self.assertIn("coverage", struct)
+        self.assertIn("missing", struct["coverage"])
+        self.assertIn("total_source", struct["coverage"])
+        self.assertGreater(struct["source_tags"], 0)
+        self.assertIsInstance(struct["same"], bool)
+
+    def test_job_monitoring_failed_chunk(self):
+        # A chunk whose model output drops HTML tags must surface on the live
+        # monitor with status="failed" (so a dropped koboSpan would be visible),
+        # while the job still finishes (give-up returns the original chunk).
+        import translator.job as job_mod
+        import translator.translator as translator_mod
+
+        orig_build = job_mod.build_engine
+        job_mod.build_engine = lambda *a, **k: BadStructureEngine()
+        self.addCleanup(lambda: setattr(job_mod, "build_engine", orig_build))
+
+        # Keep the retry loop short so the (always-failing) chunk gives up fast.
+        orig_default = translator_mod.DEFAULT_MAX_TRIES
+        translator_mod.DEFAULT_MAX_TRIES = 2
+        self.addCleanup(
+            lambda: setattr(translator_mod, "DEFAULT_MAX_TRIES", orig_default)
+        )
+
+        r = self.client.post(
+            "/jobs/new",
+            data={
+                "engine": "openai",
+                "input": self.src,
+                "output": self.out,
+                "from_chapter": "1",
+                "to_chapter": "1",
+                "from_lang": "EN",
+                "to_lang": "VI",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 302)
+        job_id = r.headers["Location"].rstrip("/").split("/")[-1]
+
+        job = None
+        for _ in range(100):
+            job = self.registry.get(job_id)
+            if job and job.status in ("done", "error", "stopped"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(job.status, "done", job.error)
+
+        # at least one chunk_progress event reported the failed attempt
+        failed_events = [
+            e
+            for e in job.events
+            if e[0] == "chunk_progress"
+            and (e[1].get("stats") or {}).get("current_chunk", {}).get("status") == "failed"
+        ]
+        self.assertTrue(failed_events, "expected a chunk_progress with status=failed")
+        cc = failed_events[-1][1]["stats"]["current_chunk"]
+        self.assertEqual(cc["status"], "failed")
+        self.assertIsNotNone(cc.get("error"))
+        # the persisted current chunk also reflects the failure
+        self.assertEqual(
+            (job.progress.get("current_chunk") or {}).get("status"), "failed"
+        )
 
     def test_stale_running_job_marked_interrupted(self):
         # A job persisted as "running" (or "queued") belongs to a previous

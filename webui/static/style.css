@@ -60,6 +60,16 @@ textarea.code { width: 100%; font-family: ui-monospace, Consolas, monospace; bac
 .error { background: #4a1f1f; color: var(--err); }
 .log { background: #0a0e13; color: #c9d1d9; padding: 10px; border-radius: 6px; height: 420px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .progressbar { background: #0a0e13; border-radius: 6px; height: 12px; overflow: hidden; margin-top: 8px; }
+.diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.diff-grid pre { height: 300px; margin: 0; }
+.diff { background: #0a0e13; color: #c9d1d9; padding: 10px; border-radius: 6px; height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.diff .ins { color: #7ee787; }
+.diff .del { color: #ff7b72; text-decoration: line-through; }
+.diff .eq { color: #c9d1d9; }
+.diff .ok-line { color: #7ee787; font-weight: bold; }
+.diff .warn-line { color: #ff7b72; font-weight: bold; }
+.diff .yellow { color: #e3b341; }
+@media (max-width: 760px) { .diff-grid { grid-template-columns: 1fr; } }
 #bar { background: var(--accent); height: 100%; transition: width 0.4s; }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
 .thumb { padding: 8px; text-align: center; }

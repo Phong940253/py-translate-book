@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 
+from webui.diff_utils import diff_chunk, chunk_structure
+
 JOB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 
 
@@ -149,6 +151,36 @@ class JobRegistry:
                     job.progress["total"] = data.get("total")
                 elif event == "chapter_done":
                     job.progress["last_completed"] = data.get("chapter_number")
+                elif event == "chunk_progress":
+                    job.progress["chunk_index"] = data.get("index")
+                    job.progress["chunk_total"] = data.get("total")
+                    job.progress["current_chapter"] = data.get("chapter")
+                    stats = data.get("stats") or {}
+                    job.progress["api"] = {
+                        "calls": stats.get("api_calls", 0),
+                        "total_ms": stats.get("api_time_total_ms", 0.0),
+                        "last_ms": stats.get("api_time_last_ms", 0.0),
+                        "avg_ms": stats.get("api_time_avg_ms", 0.0),
+                    }
+                    cc = stats.get("current_chunk")
+                    if cc:
+                        job.progress["current_chunk"] = {
+                            "chapter": cc.get("chapter"),
+                            "index": cc.get("index"),
+                            "total": cc.get("total"),
+                            "source": cc.get("source"),
+                            "translated": cc.get("translated"),
+                            "api_ms": cc.get("api_ms"),
+                            "status": cc.get("status"),
+                            "attempt": cc.get("attempt"),
+                            "error": cc.get("error"),
+                            "diff": diff_chunk(
+                                cc.get("source") or "", cc.get("translated") or ""
+                            ),
+                            "structure": chunk_structure(
+                                cc.get("source") or "", cc.get("translated") or ""
+                            ),
+                        }
                 elif event == "job_done":
                     job.progress["done"] = True
         self.save(job)

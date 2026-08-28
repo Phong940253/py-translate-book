@@ -268,5 +268,44 @@ class TestBatchPath(unittest.TestCase):
         self.assertIn("DICH_", out[0])
 
 
+class _TimedFakeEngine(FakeEngine):
+    """FakeEngine that actually waits a moment so API timing is measurable."""
+
+    def translate(self, text):
+        import time as _t
+
+        _t.sleep(0.001)
+        return super().translate(text)
+
+
+class TestMonitoring(unittest.TestCase):
+    def test_stats_track_api_time_and_current_chunk(self):
+        soup = BeautifulSoup(
+            "<html><body><p>Hello world this is a test</p>"
+            "<p>Second paragraph here friend</p></body></html>",
+            "html.parser",
+        )
+        eng = _TimedFakeEngine("good")
+        t = Translator(eng, consistency_config={}, html_structure_min_similarity=0.7)
+        out = t.translate_html(soup, chapter_number=3)
+        self.assertIn("DICH_", out)
+
+        stats = t.get_stats()
+        # API timing
+        self.assertEqual(stats["api_calls"], eng.calls)
+        self.assertGreater(stats["api_calls"], 0)
+        self.assertGreater(stats["api_time_total_ms"], 0)
+        self.assertGreaterEqual(stats["api_time_avg_ms"], 0)
+        # current chunk diff snapshot (last chunk processed)
+        cc = stats["current_chunk"]
+        self.assertIsNotNone(cc)
+        self.assertEqual(cc["chapter"], 3)
+        # index must equal total: current_chunk always reflects the final chunk
+        self.assertEqual(cc["index"], cc["total"])
+        self.assertGreaterEqual(cc["index"], 1)
+        self.assertTrue(cc["source"])
+        self.assertIn("DICH_", cc["translated"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

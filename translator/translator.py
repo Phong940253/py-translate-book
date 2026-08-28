@@ -175,6 +175,10 @@ class Translator:
             "manual_review_skips": 0,
             "source_chars": 0,
             "translated_chars": 0,
+            "api_calls": 0,
+            "api_time_total_ms": 0.0,
+            "api_time_last_ms": 0.0,
+            "current_chunk": None,
         }
 
     def translate_html(
@@ -243,6 +247,14 @@ class Translator:
             if cached_result is not None:
                 self.stats["cache_hits"] += 1
                 translated.append(cached_result)
+                self.stats["current_chunk"] = {
+                    "chapter": chapter_number,
+                    "index": index + 1,
+                    "total": len(chunks),
+                    "source": chunk,
+                    "translated": cached_result,
+                    "api_ms": None,
+                }
                 if progress_callback is not None:
                     progress_callback(index + 1, len(chunks), chapter_number)
                 continue
@@ -259,6 +271,7 @@ class Translator:
                 chapter_file_name=chapter_file_name,
                 chapter_title=chapter_title,
                 should_stop=should_stop,
+                progress_callback=progress_callback,
             )
             self._translation_cache[cache_key] = translated_chunk
             translated.append(translated_chunk)
@@ -425,6 +438,7 @@ class Translator:
         chapter_file_name: str | None = None,
         chapter_title: str | None = None,
         should_stop: Callable[[], bool] | None = None,
+        progress_callback: Callable[[int, int, int | None], None] | None = None,
     ) -> str:
         if self._is_tag_only_chunk(text):
             logging.info("Skipping translation for tag-only chunk")
@@ -476,6 +490,7 @@ class Translator:
                         chapter_number=chapter_number,
                         chapter_file_name=chapter_file_name,
                         chapter_title=chapter_title,
+                        progress_callback=progress_callback,
                     )
                     translated_parts.append(translated_part)
                 merged = "".join(translated_parts)
@@ -500,6 +515,9 @@ class Translator:
 
         attempt = 1
         specific_http500_abort_count = 0
+        result = None
+        dt_ms = None
+        last_error = None
         while True:
             if should_stop and should_stop():
                 raise _TranslationStopped
@@ -514,7 +532,7 @@ class Translator:
                     and self.consistency_enabled
                     and hasattr(self.engine, "translate_with_context")
                 ):
-                    result = self.engine.translate_with_context(
+                    api_call = lambda: self.engine.translate_with_context(
                         text=text,
                         chapter_rules=chapter_rules,
                         previous_translated=previous_translated or [],
@@ -523,7 +541,13 @@ class Translator:
                         total_chunks=total_chunks,
                     )
                 else:
-                    result = self.engine.translate(text_to_translate)
+                    api_call = lambda: self.engine.translate(text_to_translate)
+                t0 = time.perf_counter()
+                result = api_call()
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                self.stats["api_calls"] += 1
+                self.stats["api_time_total_ms"] += dt_ms
+                self.stats["api_time_last_ms"] = dt_ms
                 result = self._normalize_model_output(result, text)
                 result = _repair_wrapper_balance(text, result)
 
@@ -536,6 +560,14 @@ class Translator:
                 self.stats["chunks_translated"] += 1
                 self.stats["source_chars"] += len(text)
                 self.stats["translated_chars"] += len(result or "")
+                self.stats["current_chunk"] = {
+                    "chapter": chapter_number,
+                    "index": chunk_index,
+                    "total": total_chunks,
+                    "source": text,
+                    "translated": result,
+                    "api_ms": dt_ms,
+                }
                 return result
 
             except Exception as e:
@@ -543,6 +575,22 @@ class Translator:
                 logging.warning(
                     f"Chunk failed (attempt {attempt}/{max_tries_label}): {e}"
                 )
+                last_error = str(e)
+                # Surface the failed attempt on the live monitor (so a structural
+                # mismatch like a dropped koboSpan id is visible before give-up).
+                self.stats["current_chunk"] = {
+                    "chapter": chapter_number,
+                    "index": chunk_index,
+                    "total": total_chunks,
+                    "source": text,
+                    "translated": result if result is not None else "",
+                    "api_ms": dt_ms,
+                    "status": "retry",
+                    "attempt": attempt,
+                    "error": last_error,
+                }
+                if progress_callback is not None:
+                    progress_callback(chunk_index, total_chunks, chapter_number)
 
                 if self._is_google_silent_abort_http500_error(e):
                     specific_http500_abort_count += 1
@@ -581,6 +629,19 @@ class Translator:
 
         logging.error("Giving up on chunk, returning original")
         self.stats["failed_chunks"] += 1
+        self.stats["current_chunk"] = {
+            "chapter": chapter_number,
+            "index": chunk_index,
+            "total": total_chunks,
+            "source": text,
+            "translated": result if result is not None else "",
+            "api_ms": None,
+            "status": "failed",
+            "attempt": attempt,
+            "error": last_error or "exceeded max tries",
+        }
+        if progress_callback is not None:
+            progress_callback(chunk_index, total_chunks, chapter_number)
         return text
 
     @staticmethod
@@ -629,7 +690,10 @@ class Translator:
         logging.warning("Manual review task appended to %s", review_file)
 
     def get_stats(self) -> dict:
-        return dict(self.stats)
+        s = dict(self.stats)
+        calls = s.get("api_calls", 0)
+        s["api_time_avg_ms"] = (s.get("api_time_total_ms", 0.0) / calls) if calls else 0.0
+        return s
 
     def _analyze_chapter_consistency(self, content: str) -> str:
         if not self.consistency_enabled:
