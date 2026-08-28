@@ -6,6 +6,7 @@ let the background runner finish, and assert the output EPUB is produced.
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -46,6 +47,7 @@ def _make_epub(path):
 class TestWebUI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.src = os.path.join(self.tmp, "in.epub")
         self.out = os.path.join(self.tmp, "out.epub")
         _make_epub(self.src)

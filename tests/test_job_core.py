@@ -6,6 +6,7 @@ orchestration (chapter loop, save_epub, checkpoint, stats, progress_cb) works.
 
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,7 @@ def _make_epub(path, n_chapters=2):
 class TestRunTranslationCore(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.src = os.path.join(self.tmp, "in.epub")
         self.out = os.path.join(self.tmp, "out.epub")
         _make_epub(self.src, n_chapters=2)
