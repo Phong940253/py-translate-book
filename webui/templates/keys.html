@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ t('keys.title') }}{% endblock %}
+{% block content %}
+<h1 class="page-title">{{ t('keys.heading') }}</h1>
+
+{% if saved %}
+<div class="card ok-msg">{{ icon('check') }} {{ t('keys.saved') }}</div>
+{% endif %}
+
+<p class="muted">{{ t('keys.note') }}</p>
+
+<form method="post" class="form">
+  {% for p in providers %}
+  <div class="card provider-card" id="provider-{{ p.name }}">
+    <div class="provider-head">
+      <strong class="provider-name">{{ icon('key', 'icon-sm') }} {{ p.name }}</strong>
+      <span class="badge">{{ p.type }}</span>
+      <span class="status-text {{ 'ok' if p.ready else 'missing' }}">
+        {% if p.ready %}
+          {{ t('keys.ready') if p.needs_key else t('keys.local') }}
+        {% else %}
+          {{ t('keys.no_key') }}
+        {% endif %}
+      </span>
+    </div>
+
+    <div class="row">
+      <label for="key-{{ p.name }}">{{ t('keys.api_key') }}</label>
+      <div class="field-stack">
+        <input id="key-{{ p.name }}" type="password" name="key_{{ p.name }}"
+               autocomplete="off" spellcheck="false" value=""
+               placeholder="{{ t('keys.keep_blank') }}">
+        {% if p.has_key %}<small class="muted">{{ t('keys.key_set') }}</small>{% endif %}
+      </div>
+    </div>
+
+    {% if p.show_base %}
+    <div class="row">
+      <label for="base-{{ p.name }}">{{ t('keys.base_url') }}</label>
+      <input id="base-{{ p.name }}" name="base_{{ p.name }}" value="{{ p.base_url }}"
+             placeholder="https://api.example.com/v1">
+    </div>
+    {% endif %}
+
+    {% if p.type != 'gemini' %}
+    <div class="row">
+      <label for="model-{{ p.name }}">{{ t('keys.model') }}</label>
+      <div class="field-stack">
+        <input id="model-{{ p.name }}" name="model_{{ p.name }}" list="models-{{ p.name }}"
+               value="{{ p.model }}" placeholder="{{ t('keys.model_ph') }}">
+        <datalist id="models-{{ p.name }}">
+          {% for m in model_suggestions.get(p.name, []) %}<option value="{{ m }}">{% endfor %}
+        </datalist>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">{{ icon('save') }} {{ t('keys.save') }}</button>
+    <a class="btn btn-ghost" href="{{ url_for('config_view') }}">{{ t('keys.advanced') }}</a>
+  </div>
+</form>
+{% endblock %}

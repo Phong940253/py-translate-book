@@ -183,32 +183,346 @@ class TestWebUI(unittest.TestCase):
         missing = self.client.get("/books/cover?path=" + nocov_path)
         self.assertEqual(missing.status_code, 404, "no cover -> 404")
 
-    def test_books_page_renders_cover(self):
-        # Force the library listing to contain one book so the cover grid branch
-        # (book-card + /books/cover url + metadata) is exercised, not just the
-        # empty state.
-        real = webui_app.list_epubs
-        epub_path = os.path.join(PROJECT_ROOT, "_test_cover.epub")
-        _make_epub_with_cover(epub_path, with_cover=True)
-        self.addCleanup(lambda: os.path.exists(epub_path) and os.remove(epub_path))
-
-        def fake(dirs=None, with_meta=False):
-            return [{
-                "name": "_test_cover.epub",
-                "path": epub_path,
-                "size_mb": 0.0,
-                "has_checkpoint": False,
-                "meta": {"title": "Cover Test", "creator": "Jane", "language": "en"},
-            }]
-
-        webui_app.list_epubs = fake
-        self.addCleanup(setattr, webui_app, "list_epubs", real)
-
+    def test_books_page_renders_shell_fast(self):
+        # /books no longer blocks on a full library scan: it renders the toolbar
+        # and an empty #lib container that client JS fills via /api/library.
         r = self.client.get("/books")
         self.assertEqual(r.status_code, 200)
         body = r.get_data(as_text=True)
-        self.assertIn("Cover Test", body)
-        self.assertIn("/books/cover?path=", body)
+        self.assertIn('id="lib"', body)
+        self.assertIn('id="lib-search"', body)
+        self.assertIn('id="lib-refresh"', body)
+        self.assertIn("filter-chip", body)
+        # window.APP config the client needs is embedded.
+        self.assertIn("libUrl", body)
+        self.assertIn("coverUrl", body)
+        # Preview bug regression: paths must never be embedded into JS literals.
+        self.assertNotIn("onclick=\"preview('", body)
+
+    @staticmethod
+    def _fake_library():
+        """Two groups — one fully translated, one untranslated."""
+        src_path = os.path.join(PROJECT_ROOT, "_test_cover.epub")
+
+        def entry(base, title, kind, status, label, name):
+            return {
+                "name": name, "path": src_path, "size_mb": 0.0,
+                "has_checkpoint": False, "base_name": base, "kind": kind,
+                "status": status, "label": label, "progress": None,
+                "source_path": src_path, "translations": [], "chapters": 1,
+                "meta": {"title": title, "creator": "Jane", "language": "en"},
+            }
+
+        src = entry("Done", "Done Book", "source", "untranslated", "Nguồn",
+                    "Done.epub")
+        tr = entry("Done", "Done Book", "translated", "done", "Đã dịch",
+                   "Done-dich.epub")
+        src["translations"] = [os.path.normcase(os.path.abspath(src_path))]
+        done_group = {"base_name": "Done", "title": "Done Book", "source": src,
+                      "entries": [src, tr], "translations": [tr],
+                      "rank": "done", "rank_label": "Đã dịch"}
+        untr = entry("Todo", "Todo Book", "source", "untranslated", "Nguồn",
+                     "Todo.epub")
+        todo_group = {"base_name": "Todo", "title": "Todo Book", "source": untr,
+                      "entries": [untr], "translations": [],
+                      "rank": "untranslated", "rank_label": "Chưa dịch"}
+        return {"groups": [todo_group, done_group], "stats": {"total": 2, "files": 3,
+                "untranslated": 1, "partial": 0, "assumed": 0, "done": 1}}
+
+    def test_books_filter_initializes_client_side(self):
+        # /books?filter=done hands the active filter to the client JS. The
+        # actual rank filtering happens in the browser; the server only renders
+        # the correct initial state.
+        r = self.client.get("/books?filter=done")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn('window.APP.initialFilter = "done";', body)
+        self.assertIn('class="btn btn-primary filter-chip" data-filter="done"', body)
+        self.assertIn('class="btn btn-ghost filter-chip" data-filter=""', body)
+
+        r2 = self.client.get("/books?filter=nonsense")
+        self.assertEqual(r2.status_code, 200)
+        self.assertIn('window.APP.initialFilter = "";', r2.get_data(as_text=True))
+
+    def test_dashboard_renders_jobs_and_lib_placeholder(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("Jobs gần đây", body)
+        self.assertIn('id="lib-mini"', body)
+        # Library cards are client-rendered -> not present in the SSR HTML.
+        self.assertNotIn("book-card", body)
+
+    def test_books_and_dashboard_skip_library_build(self):
+        # Shell rendering must not trigger the expensive per-request build.
+        real = webui_app.build_library
+
+        def fake(*a, **k):
+            raise AssertionError("build_library must not run for shell render")
+
+        webui_app.build_library = fake
+        self.addCleanup(setattr, webui_app, "build_library", real)
+        for path in ("/", "/books"):
+            r = self.client.get(path)
+            self.assertEqual(r.status_code, 200, path)
+
+    def test_api_library_json(self):
+        real = webui_app.build_library
+
+        def fake(dirs=None, with_meta=True, with_chapters=False,
+                 use_cache=True, refresh=False):
+            return self._fake_library()
+
+        webui_app.build_library = fake
+        self.addCleanup(setattr, webui_app, "build_library", real)
+
+        r = self.client.get("/api/library")
+        self.assertEqual(r.status_code, 200)
+        payload = r.get_json()
+        self.assertEqual(payload["locale"], "vi")
+        self.assertEqual(payload["stats"]["total"], 2)
+        self.assertEqual([g["rank"] for g in payload["groups"]],
+                         ["untranslated", "done"])
+        done = payload["groups"][1]
+        self.assertEqual(done["rank_label"], "Đã dịch")
+        tr = [e for e in done["entries"] if e["kind"] == "translated"][0]
+        self.assertEqual(tr["label"], "Đã dịch")
+        self.assertEqual(done["source"]["meta"]["title"], "Done Book")
+        # Internal keys must not leak to the client.
+        for g in payload["groups"]:
+            for e in g["entries"]:
+                self.assertNotIn("abs", e)
+
+    def test_api_library_passes_params(self):
+        real = webui_app.build_library
+        seen = {}
+
+        def fake(dirs=None, with_meta=True, with_chapters=False,
+                 use_cache=True, refresh=False):
+            seen["with_chapters"] = with_chapters
+            seen["use_cache"] = use_cache
+            seen["refresh"] = refresh
+            return self._fake_library()
+
+        webui_app.build_library = fake
+        self.addCleanup(setattr, webui_app, "build_library", real)
+
+        self.client.get("/api/library?chapters=1")
+        self.assertIs(seen["with_chapters"], True)
+        self.assertIs(seen["use_cache"], True)
+        self.assertIs(seen["refresh"], False)
+
+        self.client.get("/api/library?refresh=1")
+        self.assertIs(seen["refresh"], True)
+        self.assertIs(seen["use_cache"], False)
+
+    def test_api_library_json_locale(self):
+        real = webui_app.build_library
+
+        def fake(dirs=None, with_meta=True, with_chapters=False,
+                 use_cache=True, refresh=False):
+            return self._fake_library()
+
+        webui_app.build_library = fake
+        self.addCleanup(setattr, webui_app, "build_library", real)
+
+        payload = self.client.get("/api/library?lang=en").get_json()
+        self.assertEqual(payload["locale"], "en")
+        done = [g for g in payload["groups"] if g["rank"] == "done"][0]
+        self.assertEqual(done["rank_label"], "Done")
+        tr = [e for e in done["entries"] if e["kind"] == "translated"][0]
+        self.assertEqual(tr["label"], "Done")
+
+    def test_preview_rejects_bad_path_with_json(self):
+        r = self.client.get("/books/preview?path=/etc/passwd&chapter=1")
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(r.is_json)
+        self.assertIn("error", r.get_json())
+
+    def test_preview_rejects_invalid_chapter_with_json(self):
+        path = os.path.join(PROJECT_ROOT, "_test_preview_bad.epub")
+        _make_epub(path)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        r = self.client.get("/books/preview?path=" + path + "&chapter=abc")
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(r.is_json)
+        self.assertIn("error", r.get_json())
+
+    def test_preview_ok(self):
+        path = os.path.join(PROJECT_ROOT, "_test_preview_ok.epub")
+        _make_epub(path)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        r = self.client.get("/books/preview?path=" + path + "&chapter=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.is_json)
+        payload = r.get_json()
+        self.assertIn("Hello world", payload["text"])
+        self.assertGreater(payload["total"], 0)
+
+    def test_preview_windows_path_with_backslashes(self):
+        # Regression for the reported bug: the Windows path travelled inside a
+        # JS string literal and the backslashes were eaten as escapes. The
+        # server must accept the fully-serialized path.
+        name = "86—EIGHTY-SIX - LN 10-dich.epub"
+        path = os.path.join(PROJECT_ROOT, name)
+        _make_epub(path)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        r = self.client.get("/books/preview?path=" + path + "&chapter=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Hello world", r.get_json()["text"])
+
+    def test_set_lang_sets_cookie(self):
+        r = self.client.get("/set-lang/en?next=/books")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("lang=en", r.headers.get("Set-Cookie", ""))
+        # Unsupported language is rejected.
+        r2 = self.client.get("/set-lang/xx")
+        self.assertEqual(r2.status_code, 400)
+
+    def test_pages_localized_by_locale(self):
+        r = self.client.get("/books")
+        body = r.get_data(as_text=True)
+        self.assertIn("Thư viện</a>", body)
+        self.assertIn("Thư viện EPUB", body)
+
+        self.client.set_cookie("lang", "en")
+        r2 = self.client.get("/books")
+        body2 = r2.get_data(as_text=True)
+        self.assertIn("Library</a>", body2)
+        self.assertIn("EPUB Library", body2)
+        self.assertNotIn("Thư viện EPUB", body2)
+
+    def test_theme_toggle_present(self):
+        r = self.client.get("/")
+        body = r.get_data(as_text=True)
+        self.assertIn('id="theme-toggle"', body)
+        self.assertIn("toggleTheme", body)
+        self.assertIn('data-theme="dark"', body)
+
+    def test_job_view_page_renders(self):
+        # The job view HTML must expose every element job_view.js wires up, and
+        # keep the no-inline-handler / no-emoji contract (component of the
+        # WebUI refactor: monitor panes moved into templates, JS reads DOM ids).
+        job = self.registry.create(
+            {
+                "engine": "openai",
+                "input": self.src,
+                "output": self.out,
+                "from_chapter": 1,
+                "to_chapter": None,
+            }
+        )
+        job.status = "interrupted"
+        self.registry.save(job)
+
+        r = self.client.get(f"/jobs/{job.id}")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+
+        # window.APP config + monitor wiring ids job_view.js depends on.
+        for needle in (
+            "window.APP.jobData",
+            "streamUrl",
+            'id="btnStruct"',
+            'id="btnDiff"',
+            'id="btnSide"',
+            'id="structView"',
+            'id="diffView"',
+            'id="diffWrap"',
+            'id="diffSource"',
+            'id="diffTrans"',
+            'id="log"',
+            'id="progress"',
+            'id="bar"',
+        ):
+            self.assertIn(needle, body)
+
+        # No model paths baked into JS string literals; no emoji labels.
+        self.assertNotIn("onclick=\"preview('", body)
+        for emoji in ("✅", "⏳", "📖", "❓", "▶"):
+            self.assertNotIn(emoji, body)
+
+        # An interrupted job offers resume, not stop.
+        self.assertIn(f'action="/jobs/{job.id}/resume"', body)
+        self.assertNotIn(f'action="/jobs/{job.id}/stop"', body)
+
+    def test_job_view_page_localized(self):
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        job.status = "interrupted"
+        self.registry.save(job)
+
+        r = self.client.get(f"/jobs/{job.id}")
+        body = r.get_data(as_text=True)
+        self.assertIn("Thông số", body)
+        self.assertIn("Tiến trình", body)
+        self.assertIn("Giám sát", body)
+        self.assertIn("Bị gián đoạn", body)
+        self.assertIn("Tiếp tục (resume từ checkpoint)", body)
+
+        self.client.set_cookie("lang", "en")
+        r2 = self.client.get(f"/jobs/{job.id}")
+        body2 = r2.get_data(as_text=True)
+        self.assertIn("Parameters", body2)
+        self.assertIn("Progress", body2)
+        self.assertIn("Monitor", body2)
+        self.assertIn("Interrupted", body2)
+        self.assertIn("Continue (resume from checkpoint)", body2)
+        self.assertNotIn("Tiến trình", body2)
+
+    def test_additional_pages_localized_by_locale(self):
+        r = self.client.get("/jobs/new")
+        body = r.get_data(as_text=True)
+        self.assertIn("Tạo job dịch mới", body)
+        self.assertIn("Bắt đầu dịch", body)
+        self.assertIn("Tắt resume", body)
+        self.assertIn("(mặc định: input.translated.epub)", body)
+
+        r = self.client.get("/config")
+        body = r.get_data(as_text=True)
+        self.assertIn("Cấu hình (config.yaml)", body)
+        self.assertIn("Lưu cấu hình", body)
+
+        r = self.client.get("/illustrations")
+        body = r.get_data(as_text=True)
+        self.assertIn("Ảnh minh họa", body)
+
+        self.client.set_cookie("lang", "en")
+        r = self.client.get("/jobs/new")
+        body = r.get_data(as_text=True)
+        self.assertIn("Create a new translation job", body)
+        self.assertIn("Start translation", body)
+        self.assertIn("Disable resume", body)
+
+        r = self.client.get("/config")
+        body = r.get_data(as_text=True)
+        self.assertIn("Configuration (config.yaml)", body)
+        self.assertIn("Save configuration", body)
+
+        r = self.client.get("/illustrations")
+        body = r.get_data(as_text=True)
+        self.assertIn("Illustrations", body)
+        self.assertNotIn("Ảnh minh họa", body)
+        self.assertNotIn("Cấu hình", body)
+
+    def test_job_status_localized_on_dashboard(self):
+        # Status tokens are rendered localized (vi default) on the dashboard.
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        job.status = "error"
+        self.registry.save(job)
+
+        r = self.client.get("/")
+        body = r.get_data(as_text=True)
+        self.assertIn('badge error', body)
+        self.assertIn("Lỗi</span>", body)
+
+        self.client.set_cookie("lang", "en")
+        r2 = self.client.get("/")
+        body2 = r2.get_data(as_text=True)
+        self.assertIn("Error</span>", body2)
 
     def test_create_and_run_job(self):
         r = self.client.post(
@@ -653,6 +967,137 @@ class TestWebUI(unittest.TestCase):
             self.assertEqual(self.registry.load_meta(job.id)["status"], "stopped")
         finally:
             cr_mod._USE_PROCESS = saved
+
+
+    def test_keys_page_renders_providers(self):
+        """GET /config/keys shows every configured provider with key status and
+        never leaks a raw key value into the HTML."""
+        r = self.client.get("/config/keys")
+        self.assertEqual(r.status_code, 200)
+        for name in ("openai", "gemini", "webai", "groq", "deepseek", "openrouter", "ollama"):
+            self.assertIn(name, r.get_data(as_text=True), f"provider {name} missing")
+        # Raw real keys must not appear (only masked status labels).
+        page = r.get_data(as_text=True)
+        self.assertNotIn("sk-proj", page)
+        self.assertNotIn("gsk_", page)
+        # Compatible/openai providers expose a base_url field.
+        self.assertIn("base_openrouter", page)
+
+    def test_keys_page_save_keeps_existing_and_sets_new(self):
+        """POST /config/keys on a temp config: a filled key is saved, a blank
+        field keeps the existing key, and MASKED is never written."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old", "model": "gpt-5.4-mini"},
+                    "gemini": {"api_key": "ai-old"},
+                    "webai": {"base_url": "http://localhost:6969", "api_key": ""},
+                    "groq": {
+                        "type": "openai_compatible",
+                        "base_url": "https://api.groq.com/openai/v1",
+                        "model": "openai/gpt-oss-120b",
+                        "api_key": "gsk-old",
+                    },
+                    "openrouter": {
+                        "type": "openai_compatible",
+                        "base_url": "https://openrouter.ai/api/v1",
+                        "api_key": "",
+                    },
+                    "ollama": {
+                        "type": "openai_compatible",
+                        "base_url": "http://localhost:11434/v1",
+                        "model": "qwen3:14b",
+                        "api_key": "",
+                    },
+                },
+                f,
+                allow_unicode=True,
+            )
+
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        rv = self.client.post(
+            "/config/keys",
+            data={
+                "key_openrouter": "sk-or-new",
+                "key_groq": "",  # blank -> keep gsk-old
+                "key_gemini": "",  # blank -> keep ai-old
+                "model_groq": "openai/gpt-oss-20b",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["openrouter"]["api_key"], "sk-or-new")
+        self.assertEqual(cfg["groq"]["api_key"], "gsk-old", "blank must keep key")
+        self.assertEqual(cfg["gemini"]["api_key"], "ai-old", "blank must keep key")
+        self.assertEqual(cfg["groq"]["model"], "openai/gpt-oss-20b")
+        self.assertNotIn("********", open(tmp_cfg, encoding="utf-8").read())
+
+    def test_keys_page_supports_new_compatible_provider(self):
+        """A brand-new provider section (type: openai_compatible) appears on the
+        keys page and is saved through the form."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old"},
+                    "gemini": {"api_key": "ai-old"},
+                    "webai": {"base_url": "http://localhost:6969"},
+                    "groq": {
+                        "type": "openai_compatible",
+                        "base_url": "https://api.groq.com/openai/v1",
+                        "model": "openai/gpt-oss-120b",
+                        "api_key": "gsk-old",
+                    },
+                    "mistral": {
+                        "type": "openai_compatible",
+                        "base_url": "https://api.mistral.ai/v1",
+                        "model": "mistral-large",
+                        "api_key": "",
+                    },
+                },
+                f,
+                allow_unicode=True,
+            )
+
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        r = self.client.get("/config/keys")
+        page = r.get_data(as_text=True)
+        self.assertIn("mistral", page)
+        self.assertIn("base_mistral", page)
+
+        rv = self.client.post("/config/keys", data={"key_mistral": "mi-new-key"})
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["mistral"]["api_key"], "mi-new-key")
+
+    def test_job_new_shows_model_datalist_and_missing_key_hint(self):
+        """job_new page embeds model suggestions per engine and flags engines
+        that are missing a required key."""
+        r = self.client.get("/jobs/new")
+        self.assertEqual(r.status_code, 200)
+        page = r.get_data(as_text=True)
+        # datalist id + the Model field exist
+        self.assertIn('id="model-suggestions"', page)
+        self.assertIn('name="model"', page)
+        # Missing-key engines are listed (deepseek/openrouter have no key in the
+        # real config; groq/openai do).
+        self.assertIn("deepseek", page)
 
 
 if __name__ == "__main__":

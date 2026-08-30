@@ -1,236 +1,79 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% block title %}Job {{ job.id }}{% endblock %}
+{% block title %}{{ t('job.view.title') }} {{ job.id }}{% endblock %}
+{% block app_config %}
+window.APP.jobData = {
+  id: {{ job.id|tojson }},
+  status: {{ job.status|tojson }},
+  progress: {{ job.progress|tojson }},
+  streamUrl: {{ url_for('job_stream', job_id=job.id)|tojson }}
+};
+{% endblock %}
 {% block content %}
-<h1>Job <span class="mono">{{ job.id }}</span>
-  <span class="badge {{ job.status }}">{{ job.status }}</span>
+<h1 class="page-title">{{ t('job.view.title') }} <span class="mono">{{ job.id }}</span>
+  <span class="badge {{ job.status }}"><span class="status-dot"></span>{{ t('job.status.' + job.status) }}</span>
 </h1>
 
-<div class="card">
-  <div class="row"><label>Engine</label><span class="mono">{{ job.params.engine }}</span></div>
-  <div class="row"><label>Input</label><span class="mono small">{{ job.params.input }}</span></div>
-  <div class="row"><label>Output</label><span class="mono small">{{ job.params.output }}</span></div>
-  <div class="row"><label>Chapter range</label>
-    <span>{{ job.params.from_chapter or 1 }} – {{ job.params.to_chapter or 'cuối' }}</span>
-  </div>
-</div>
+<section class="card">
+  <h2 class="card-title">{{ t('job.view.params') }}</h2>
+  <dl class="kv">
+    <div><dt>{{ t('job.view.engine') }}</dt><dd class="mono">{{ job.params.engine }}</dd></div>
+    <div><dt>{{ t('job.view.input') }}</dt><dd class="mono small">{{ job.params.input }}</dd></div>
+    <div><dt>{{ t('job.view.output') }}</dt><dd class="mono small">{{ job.params.output }}</dd></div>
+    <div><dt>{{ t('job.view.chapter_range') }}</dt><dd>{{ job.params.from_chapter or 1 }} – {{ job.params.to_chapter or t('job.new.to_chapter_ph') }}</dd></div>
+  </dl>
+</section>
 
-<div class="card">
-  <h2>Tiến trình</h2>
-  <div id="progress" class="muted">Đang chờ...</div>
-  <div class="progressbar"><div id="bar" style="width:0%"></div></div>
+<section class="card">
+  <h2 class="card-title">{{ t('job.view.progress') }}</h2>
+  <p id="progress" class="muted">{{ t('job.view.waiting') }}</p>
+  <div class="progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="{{ t('job.view.progress_aria') }}"><div id="bar" style="width:0%"></div></div>
   {% if job.status == 'running' %}
-  <form method="post" action="{{ url_for('job_stop', job_id=job.id) }}" style="margin-top:8px">
-    <button type="submit" class="btn btn-warn">{{ icon('stop') }} Dừng (tại boundaries chương)</button>
+  <form method="post" action="{{ url_for('job_stop', job_id=job.id) }}" class="mt">
+    <button type="submit" class="btn btn-danger">{{ icon('stop') }} {{ t('job.view.stop') }}</button>
   </form>
   {% endif %}
   {% if job.status in ('stopped','interrupted','error') %}
-  <form method="post" action="{{ url_for('job_resume', job_id=job.id) }}" style="margin-top:8px">
-    <button type="submit" class="btn btn-ok">{{ icon('retry') }} Tiếp tục (resume từ checkpoint)</button>
+  <form method="post" action="{{ url_for('job_resume', job_id=job.id) }}" class="mt">
+    <button type="submit" class="btn btn-primary">{{ icon('retry') }} {{ t('job.view.resume') }}</button>
   </form>
   {% endif %}
   {% if job.status == 'done' and job.params.output %}
-  <div style="margin-top:8px">
-    <a class="btn btn-primary" href="{{ url_for('download') }}?path={{ job.params.output }}">{{ icon('download') }} Tải kết quả EPUB</a>
+  <div class="mt">
+    <a class="btn btn-primary" href="{{ url_for('download') }}?path={{ job.params.output }}">{{ icon('download') }} {{ t('job.view.download') }}</a>
   </div>
   {% endif %}
-</div>
+</section>
 
-<div class="card">
-  <h2>Giám sát</h2>
-  <div id="api" class="muted">API: đang chờ...</div>
-  <div id="subprog" class="muted">Chunk: –</div>
-  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
-    <button id="btnStruct" type="button" class="btn ok">Cấu trúc</button>
-    <button id="btnDiff" type="button" class="btn btn-ghost">Diff (từ)</button>
-    <button id="btnSide" type="button" class="btn btn-ghost">Song song (raw)</button>
+<section class="card">
+  <h2 class="card-title">{{ t('job.view.monitor') }}</h2>
+  <p id="api" class="muted">{{ t('job.view.api_waiting') }}</p>
+  <p id="subprog" class="muted">{{ t('job.view.chunk_blank') }}</p>
+  <div class="seg mt" role="group" aria-label="{{ t('job.view.view_label') }}">
+    <button id="btnStruct" type="button" class="btn btn-ghost btn-sm" aria-pressed="true">{{ t('job.view.view_struct') }}</button>
+    <button id="btnDiff" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ t('job.view.view_diff') }}</button>
+    <button id="btnSide" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ t('job.view.view_side') }}</button>
   </div>
-  <div id="structView" class="diff"></div>
-  <div id="diffView" class="diff" style="display:none"></div>
-  <div id="diffWrap" class="diff-grid" style="display:none; margin-top:8px">
+  <div id="structView" class="diff mt"></div>
+  <div id="diffView" class="diff mt" hidden></div>
+  <div id="diffWrap" class="diff-grid mt" hidden>
     <div>
-      <div class="muted small">Source</div>
+      <div class="muted small">{{ t('job.view.source') }}</div>
       <pre id="diffSource" class="log"></pre>
     </div>
     <div>
-      <div class="muted small">Dịch</div>
+      <div class="muted small">{{ t('job.view.translated') }}</div>
       <pre id="diffTrans" class="log"></pre>
     </div>
   </div>
-</div>
+</section>
 
-<div class="card">
-  <h2>Log</h2>
+<section class="card">
+  <h2 class="card-title">{{ t('job.view.log') }}</h2>
   <pre id="log" class="log"></pre>
-</div>
+</section>
+{% endblock %}
 
-<script>
-  const jobId = "{{ job.id }}";
-  const logEl = document.getElementById('log');
-  const progEl = document.getElementById('progress');
-  const barEl = document.getElementById('bar');
-
-  function renderProgress(p) {
-    if (!p || !p.total_chapters) { progEl.textContent = 'Đang khởi tạo...'; return; }
-    const cur = p.current_chapter || p.last_completed || '?';
-    const total = p.total_chapters;
-    const done = p.last_completed || 0;
-    progEl.innerHTML = `Chapter <b>${cur}</b> / ${total}` +
-      (p.current_title ? ` — <i>${p.current_title}</i>` : '');
-    const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
-    barEl.style.width = pct + '%';
-    renderMonitor(p);
-  }
-
-  function renderMonitor(p) {
-    const api = p && p.api;
-    if (api) {
-      const total_s = (api.total_ms / 1000).toFixed(1);
-      document.getElementById('api').textContent =
-        `API: ${api.calls} calls · tổng ${total_s}s · lần cuối ${Math.round(api.last_ms)}ms · tb ${Math.round(api.avg_ms)}ms`;
-    }
-    if (p && p.chunk_total) {
-      let sub = `Chunk: ${p.chunk_index || '?'} / ${p.chunk_total} (chương ${p.current_chapter || '?'})`;
-      const cc0 = p.current_chunk;
-      if (cc0 && cc0.status === 'retry') {
-        sub += ` · ⚠️ thử lại lần ${cc0.attempt}: ${cc0.error}`;
-      } else if (cc0 && cc0.status === 'failed') {
-        sub += ` · ❌ thất bại (fallback gốc)`;
-      }
-      document.getElementById('subprog').textContent = sub;
-    }
-    const cc = p && p.current_chunk;
-    if (cc) {
-      document.getElementById('diffSource').textContent = cc.source || '';
-      document.getElementById('diffTrans').textContent = cc.translated || '';
-    }
-    renderDiff(p);
-    renderStruct(p);
-  }
-
-  function renderDiff(p) {
-    const cc = p && p.current_chunk;
-    if (!cc || !cc.diff) return;
-    const d = cc.diff;
-    const view = document.getElementById('diffView');
-    view.textContent = '';
-    const stats = document.createElement('div');
-    stats.className = 'muted small';
-    stats.textContent = `Thêm: ${d.added_words} từ · Xoá: ${d.removed_words} từ  (🟢 thêm · 🔴 xoá · ⚪ giữ)`;
-    view.appendChild(stats);
-    for (const line of d.lines) {
-      const row = document.createElement('div');
-      row.className = line.kind;  // equal | del | ins | change
-      for (const part of (line.parts || [])) {
-        const span = document.createElement('span');
-        span.className = part.op;  // eq | del | ins
-        span.textContent = part.text;
-        row.appendChild(span);
-      }
-      view.appendChild(row);
-    }
-    // Auto-scroll to the latest diff only if the user is already near the bottom
-    // (so scrolling up to inspect history isn't yanked back down).
-    const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
-    if (nearBottom) view.scrollTop = view.scrollHeight;
-  }
-
-  function renderStruct(p) {
-    const cc = p && p.current_chunk;
-    const st = cc && cc.structure;
-    const view = document.getElementById('structView');
-    if (!st) { view.textContent = ''; return; }
-    view.textContent = '';
-    const summary = document.createElement('div');
-    summary.className = st.same ? 'ok-line' : 'warn-line';
-    summary.textContent = st.same
-      ? `✅ Khớp cấu trúc (${st.source_tags} thẻ, ${st.coverage.total_source} span)`
-      : `⚠️ Lệch cấu trúc (nguồn ${st.source_tags} thẻ/${st.coverage.total_source} span · dịch ${st.translated_tags} thẻ/${st.coverage.total_translated} span)`;
-    view.appendChild(summary);
-    if (cc && cc.status === 'retry') {
-      const r = document.createElement('div');
-      r.className = 'yellow';
-      r.textContent = `⚠️ Thử lại lần ${cc.attempt}: ${cc.error}`;
-      view.appendChild(r);
-    }
-    if (cc && cc.status === 'failed') {
-      const f = document.createElement('div');
-      f.className = 'warn-line';
-      f.textContent = `❌ Chunk thất bại sau ${cc.attempt} lần — dùng bản gốc (${cc.error})`;
-      view.appendChild(f);
-    }
-    if (st.coverage.missing.length) {
-      const m = document.createElement('div');
-      m.className = 'warn-line';
-      m.textContent = '🔴 Thiếu span: ' + st.coverage.missing.join(', ');
-      view.appendChild(m);
-    }
-    if (st.coverage.extra.length) {
-      const e = document.createElement('div');
-      e.className = 'yellow';
-      e.textContent = '🟡 Thừa span: ' + st.coverage.extra.join(', ');
-      view.appendChild(e);
-    }
-    for (const td of st.tag_diff) {
-      const row = document.createElement('div');
-      row.className = td.op;  // del -> red (tag dropped), ins -> green (tag added)
-      row.textContent = (td.op === 'del' ? '🔴 ' : '🟢 ') + td.tag;
-      view.appendChild(row);
-    }
-    const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
-    if (nearBottom) view.scrollTop = view.scrollHeight;
-  }
-
-  const structView = document.getElementById('structView');
-  const diffView = document.getElementById('diffView');
-  const diffWrap = document.getElementById('diffWrap');
-  function showStruct() {
-    structView.style.display = 'block';
-    diffView.style.display = 'none';
-    diffWrap.style.display = 'none';
-    document.getElementById('btnStruct').classList.add('ok');
-    document.getElementById('btnDiff').classList.remove('ok');
-    document.getElementById('btnSide').classList.remove('ok');
-  }
-  function showDiff() {
-    structView.style.display = 'none';
-    diffView.style.display = 'block';
-    diffWrap.style.display = 'none';
-    document.getElementById('btnStruct').classList.remove('ok');
-    document.getElementById('btnDiff').classList.add('ok');
-    document.getElementById('btnSide').classList.remove('ok');
-  }
-  function showSide() {
-    structView.style.display = 'none';
-    diffView.style.display = 'none';
-    diffWrap.style.display = 'grid';
-    document.getElementById('btnStruct').classList.remove('ok');
-    document.getElementById('btnDiff').classList.remove('ok');
-    document.getElementById('btnSide').classList.add('ok');
-  }
-  document.getElementById('btnStruct').addEventListener('click', showStruct);
-  document.getElementById('btnDiff').addEventListener('click', showDiff);
-  document.getElementById('btnSide').addEventListener('click', showSide);
-
-  const es = new EventSource(`/jobs/${jobId}/stream`);
-  es.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'log') {
-      logEl.textContent += msg.line + '\n';
-      logEl.scrollTop = logEl.scrollHeight;
-    } else if (msg.type === 'progress') {
-      renderProgress(msg.progress);
-      if (msg.status === 'done' || msg.status === 'error' || msg.status === 'stopped' || msg.status === 'interrupted') {
-        progEl.innerHTML += ` &middot; <b>${msg.status}</b>`;
-        if (msg.error) logEl.textContent += 'ERROR: ' + msg.error + '\n';
-      }
-    } else if (msg.type === 'end') {
-      es.close();
-    }
-  };
-  es.onerror = () => { progEl.textContent = 'Mất kết nối stream.'; };
-
-  // cũng render trạng thái hiện tại (tránh chớp màn hình khi reload)
-  renderProgress({{ job.progress | tojson }});
-</script>
+{% block scripts %}
+<script src="{{ url_for('static', filename='job_view.js') }}"></script>
 {% endblock %}

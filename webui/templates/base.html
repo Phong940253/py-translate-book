@@ -1,27 +1,65 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="{{ locale }}" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Translate Book Manager{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script>
+    // Apply the saved/preferred theme before first paint to avoid a flash.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <script>
+    window.APP = {
+      locale: {{ locale|tojson }},
+      i18n: {{ js_i18n|tojson }},
+      libUrl: {{ url_for('api_library')|tojson }},
+      jobNewUrl: {{ url_for('job_new')|tojson }},
+      previewUrl: {{ url_for('book_preview')|tojson }},
+      coverUrl: {{ url_for('book_cover')|tojson }},
+      downloadUrl: {{ url_for('download')|tojson }},
+      coverPlaceholder: {{ url_for('static', filename='cover-placeholder.svg')|tojson }}
+    };
+    {% block app_config %}{% endblock %}
+  </script>
 </head>
 <body>
-  <header>
-    <div class="brand">{% from "_icons.html" import icon %}{{ icon('books') }} Translate Book Manager</div>
-    <nav>
-      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">{{ icon('dashboard') }} Dashboard</a>
-      <a href="{{ url_for('job_new') }}" class="{{ 'active' if request.endpoint == 'job_new' }}">{{ icon('plus') }} Job mới</a>
-      <a href="{{ url_for('books') }}" class="{{ 'active' if request.endpoint == 'books' }}">{{ icon('books') }} Thư viện</a>
-      <a href="{{ url_for('config_view') }}" class="{{ 'active' if request.endpoint == 'config_view' }}">{{ icon('gear') }} Cấu hình</a>
-      <a href="{{ url_for('illustrations') }}" class="{{ 'active' if request.endpoint == 'illustrations' }}">{{ icon('image') }} Ảnh</a>
+  <header class="topbar">
+    <div class="brand">{% from "_icons.html" import icon %}{{ icon('books') }}<span>Translate Book Manager</span></div>
+    <nav class="topnav" aria-label="Main">
+      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">{{ icon('dashboard') }} {{ t('nav.dashboard') }}</a>
+      <a href="{{ url_for('job_new') }}" class="{{ 'active' if request.endpoint == 'job_new' }}">{{ icon('plus') }} {{ t('nav.job_new') }}</a>
+      <a href="{{ url_for('books') }}" class="{{ 'active' if request.endpoint == 'books' }}">{{ icon('books') }} {{ t('nav.library') }}</a>
+      <a href="{{ url_for('keys_view') }}" class="{{ 'active' if request.endpoint == 'keys_view' }}">{{ icon('key') }} {{ t('nav.keys') }}</a>
+      <a href="{{ url_for('config_view') }}" class="{{ 'active' if request.endpoint == 'config_view' }}">{{ icon('gear') }} {{ t('nav.config') }}</a>
+      <a href="{{ url_for('illustrations') }}" class="{{ 'active' if request.endpoint == 'illustrations' }}">{{ icon('image') }} {{ t('nav.images') }}</a>
     </nav>
+    <div class="topbar-tools">
+      <div class="lang-switch" role="group" aria-label="Language">
+        <a class="lang-btn {{ 'active' if locale == 'vi' }}" data-lang="vi" href="/set-lang/vi">VI</a>
+        <a class="lang-btn {{ 'active' if locale == 'en' }}" data-lang="en" href="/set-lang/en">EN</a>
+      </div>
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-sm icon-btn" title="Theme" onclick="toggleTheme()">
+        <span class="ic ic-sun">{{ icon('sun') }}</span>
+        <span class="ic ic-moon">{{ icon('moon') }}</span>
+      </button>
+    </div>
   </header>
   <main>
     {% block content %}{% endblock %}
   </main>
   <footer>
-    <small>Local only · 127.0.0.1:5000</small>
+    <small>{{ t('footer.local') }}</small>
   </footer>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -4,6 +4,7 @@ Run:  python -m webui.app   (or: python webui/app.py)
 Open: http://127.0.0.1:5000
 """
 
+import copy
 import io
 import json
 import os
@@ -17,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import (
     Flask,
     abort,
+    jsonify,
     render_template,
     request,
     redirect,
@@ -25,18 +27,89 @@ from flask import (
     send_file,
 )
 
-from webui.jobs import JobRegistry
 import webui.core_runner as core_runner
-from webui.config_store import load_config, mask_config, save_config_text
-from webui.books import list_epubs, preview_chapter, chapter_count, get_cover
+from webui.jobs import JobRegistry
+from webui.config_store import load_config, mask_config, save_config_text, save_config_dict
+from webui.books import (
+    build_library,
+    list_epubs,
+    preview_chapter,
+    get_cover,
+)
+import webui.i18n as i18n
+
+from translator.job import (
+    list_supported_engines,
+    list_engine_models,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
-ENGINES = ["openai", "gemini", "webai"]
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 registry = JobRegistry()
+
+
+@app.context_processor
+def _inject_i18n():
+    """Make ``t()``, the resolved ``locale`` and the locale translation table
+    available to every template."""
+    loc = i18n.resolve_locale(request)
+
+    def t(key, **fmt):
+        s = i18n.t(loc, key)
+        for k, v in fmt.items():
+            s = s.replace("{" + k + "}", str(v))
+        return s
+
+    return {"locale": loc, "t": t, "js_i18n": i18n.table(loc)}
+
+
+# --------------------------------------------------------------------------
+# Engine / key-status helpers (shared by job_new + API Keys pages)
+# --------------------------------------------------------------------------
+
+
+def _local_host(url: str) -> bool:
+    """True when a base_url points at the local machine (webai proxy, Ollama)."""
+    if not url:
+        return False
+    host = url.split("://")[-1].split("/")[0].split(":")[0].strip("[]").lower()
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
+def _engine_info(config: dict, engine_name: str) -> dict:
+    sec = config.get(engine_name) if isinstance(config, dict) else None
+    sec = sec if isinstance(sec, dict) else {}
+    ptype = {
+        "openai": "openai",
+        "gemini": "gemini",
+        "webai": "webai",
+    }.get(engine_name, sec.get("type") or ("openai_compatible" if sec else "openai"))
+    has_key = bool(sec.get("api_key"))
+    # openai/gemini always need a key; cloud compatible providers need one,
+    # but local endpoints (Ollama, mitmproxy webai) work without a key.
+    needs_key = engine_name in ("openai", "gemini") or (
+        ptype == "openai_compatible" and not _local_host(sec.get("base_url"))
+    )
+    return {
+        "name": engine_name,
+        "type": ptype,
+        "has_key": has_key,
+        "needs_key": needs_key,
+        "ready": (not needs_key) or has_key,
+        "base_url": sec.get("base_url", ""),
+        "model": sec.get("model", ""),
+        "show_base": ptype in ("webai", "openai_compatible"),
+    }
+
+
+def _model_suggestions(config: dict) -> dict:
+    return {
+        engine: list_engine_models(config, engine)
+        for engine in list_supported_engines(config)
+    }
 
 
 # --------------------------------------------------------------------------
@@ -47,8 +120,7 @@ registry = JobRegistry()
 @app.route("/")
 def index():
     jobs = registry.all()
-    books = list_epubs(with_meta=True)
-    return render_template("dashboard.html", jobs=jobs, books=books, engines=ENGINES)
+    return render_template("dashboard.html", jobs=jobs)
 
 
 @app.route("/jobs/new", methods=["GET", "POST"])
@@ -66,6 +138,7 @@ def job_new():
             "from_lang": p.get("from_lang", "EN"),
             "to_lang": p.get("to_lang", "VI"),
             "description": p.get("description") or None,
+            "model": (p.get("model") or "").strip() or None,
             "openai_batch": bool(p.get("openai_batch")),
             "reset_checkpoint": bool(p.get("reset_checkpoint")),
             "disable_resume": bool(p.get("disable_resume")),
@@ -78,12 +151,19 @@ def job_new():
 
     books = list_epubs()
     config = load_config()
+    engines = list_supported_engines(config)
+    model_suggestions = _model_suggestions(config)
+    engine_status = {e: _engine_info(config, e)["ready"] for e in engines}
+    missing = [e for e in engines if not engine_status[e]]
     return render_template(
         "job_new.html",
-        engines=ENGINES,
+        engines=engines,
         books=books,
         config=config,
         default_config=DEFAULT_CONFIG_PATH,
+        model_suggestions=model_suggestions,
+        engine_status=engine_status,
+        engine_missing=missing,
     )
 
 
@@ -202,33 +282,108 @@ def job_stream(job_id):
 # Books library
 # --------------------------------------------------------------------------
 
+_STATUS_T = {
+    "done": "status.done",
+    "partial": "status.partial",
+    "assumed": "status.assumed",
+    "untranslated": "status.untranslated",
+}
+_RANK_T = {
+    "done": "rank.done",
+    "partial": "rank.partial",
+    "assumed": "rank.assumed",
+    "untranslated": "rank.untranslated",
+}
+
+
+def _entry_payload(e: dict, loc: str, with_meta: bool) -> dict:
+    out = {
+        "name": e["name"],
+        "path": e["path"],
+        "size_mb": e.get("size_mb"),
+        "kind": e["kind"],
+        "status": e["status"],
+        "label": i18n.t(loc, _STATUS_T[e["status"]]),
+        "progress": e.get("progress"),
+        "chapters": e.get("chapters"),
+    }
+    if with_meta:
+        out["meta"] = e.get("meta") or {}
+    return out
+
+
+def _slim_library(library: dict) -> dict:
+    """Strip internal fields (``abs``, raw ``translations`` paths, …) and
+    localize the status/rank labels for the current request locale."""
+    loc = i18n.resolve_locale(request)
+    groups = []
+    for g in library["groups"]:
+        groups.append(
+            {
+                "base_name": g["base_name"],
+                "title": g["title"],
+                "rank": g["rank"],
+                "rank_label": i18n.t(loc, _RANK_T[g["rank"]]),
+                "source": _entry_payload(g["source"], loc, True) if g["source"] else None,
+                "translations": [_entry_payload(e, loc, False) for e in g["translations"]],
+                "entries": [_entry_payload(e, loc, True) for e in g["entries"]],
+            }
+        )
+    return {"groups": groups, "stats": library["stats"], "locale": loc}
+
+
+@app.route("/api/library")
+def api_library():
+    refresh = request.args.get("refresh") == "1"
+    library = build_library(
+        with_chapters=request.args.get("chapters") == "1",
+        use_cache=not refresh,
+        refresh=refresh,
+    )
+    return jsonify(_slim_library(library))
+
+
+@app.route("/set-lang/<code>")
+def set_lang(code):
+    if code not in i18n.SUPPORTED:
+        abort(400)
+    resp = redirect(request.args.get("next") or url_for("index"))
+    resp.set_cookie("lang", code, max_age=60 * 60 * 24 * 365)
+    return resp
+
 
 @app.route("/books")
 def books():
-    items = list_epubs(with_meta=True)
-    for it in items:
-        it["chapters"] = chapter_count(it["path"])
-    return render_template("books.html", books=items)
+    valid = {"untranslated", "partial", "done", "assumed"}
+    active = request.args.get("filter")
+    if active not in valid:
+        active = None
+    return render_template("books.html", active_filter=active)
 
 
 @app.route("/books/preview")
 def book_preview():
     path = request.args.get("path", "")
-    chapter = int(request.args.get("chapter", "1"))
-    max_chars = int(request.args.get("max_chars", "4000"))
-    if not os.path.isfile(path) or not path.startswith(PROJECT_ROOT):
-        abort(400)
+    try:
+        chapter = int(request.args.get("chapter", "1"))
+        max_chars = int(request.args.get("max_chars", "4000"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "chapter/max_chars must be integers"}), 400
+    if not path or not os.path.isfile(path) or not path.startswith(PROJECT_ROOT):
+        return jsonify({"error": "invalid path"}), 400
     try:
         text, total = preview_chapter(path, chapter, max_chars)
     except ValueError as e:
-        return str(e), 400
-    return {
-        "path": path,
-        "chapter": chapter,
-        "total": total,
-        "shown": len(text),
-        "text": text,
-    }
+        return jsonify({"error": str(e)}), 400
+    return jsonify(
+        {
+            "path": path,
+            "chapter": chapter,
+            "total": total,
+            "shown": len(text),
+            "text": text,
+        }
+    )
 
 
 @app.route("/books/cover")
@@ -256,12 +411,46 @@ def config_view():
             save_config_text(text)
         except Exception as e:  # noqa: BLE001
             return render_template(
-                "config.html", config_text=text, error=str(e), engines=ENGINES
+                "config.html", config_text=text, error=str(e)
             )
         return redirect(url_for("config_view"))
     cfg = load_config()
     return render_template(
-        "config.html", config_text=yaml_dump(mask_config(cfg)), error=None, engines=ENGINES
+        "config.html", config_text=yaml_dump(mask_config(cfg)), error=None
+    )
+
+
+@app.route("/config/keys", methods=["GET", "POST"])
+def keys_view():
+    cfg = load_config()
+    engines = list_supported_engines(cfg)
+
+    if request.method == "POST":
+        p = request.form
+        new_cfg = copy.deepcopy(cfg)
+        for name in engines:
+            sec = new_cfg.setdefault(name, {})
+            if not isinstance(sec, dict):
+                sec = {}
+            key_val = (p.get(f"key_{name}") or "").strip()
+            if key_val:
+                sec["api_key"] = key_val
+            base_val = (p.get(f"base_{name}") or "").strip()
+            if base_val:
+                sec["base_url"] = base_val
+            model_val = (p.get(f"model_{name}") or "").strip()
+            if model_val:
+                sec["model"] = model_val
+            new_cfg[name] = sec
+        save_config_dict(new_cfg)
+        return redirect(url_for("keys_view", saved=1))
+
+    providers = [_engine_info(cfg, e) for e in engines]
+    return render_template(
+        "keys.html",
+        providers=providers,
+        model_suggestions=_model_suggestions(cfg),
+        saved=bool(request.args.get("saved")),
     )
 
 

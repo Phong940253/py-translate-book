@@ -1,66 +1,110 @@
 {% extends "base.html" %}
-{% block title %}Job mới{% endblock %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ t('job.new.title') }}{% endblock %}
 {% block content %}
-<h1>Tạo job dịch mới</h1>
-<form method="post" class="form card">
+<h1 class="page-title">{{ t('job.new.heading') }}</h1>
+<form method="post" class="card form">
   <div class="row">
-    <label>Engine</label>
-    <select name="engine" required>
-      {% for e in engines %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
+    <label for="inp-engine">{{ t('job.new.engine') }}</label>
+    <select id="inp-engine" name="engine" required>
+      {% for e in engines %}<option value="{{ e }}" {{ 'selected' if loop.first }}>{{ e }}</option>{% endfor %}
     </select>
+  </div>
+  {% if engine_missing %}
+  <div class="hint engine-key-hint">
+    {{ icon('warn') }} <span>{{ t('job.new.missing_key', engines=engine_missing|join(', ')) }}</span>
+  </div>
+  {% endif %}
+  <div class="row">
+    <label for="inp-model">{{ t('job.new.model') }}</label>
+    <input id="inp-model" name="model" list="model-suggestions" placeholder="{{ t('job.new.model_ph') }}">
+    <datalist id="model-suggestions"></datalist>
   </div>
 
   <div class="row">
-    <label>Input EPUB</label>
-    <input name="input" required list="books" value="{{ request.args.get('input','') }}">
+    <label for="inp-input">{{ t('job.new.input') }}</label>
+    <input id="inp-input" name="input" required list="books" value="{{ request.args.get('input','') }}">
     <datalist id="books">
       {% for b in books %}<option value="{{ b.path }}">{% endfor %}
     </datalist>
   </div>
 
   <div class="row">
-    <label>Output EPUB</label>
-    <input name="output" placeholder="(mặc định: input.translated.epub)">
+    <label for="inp-output">{{ t('job.new.output') }}</label>
+    <input id="inp-output" name="output" placeholder="{{ t('job.new.output_ph') }}">
   </div>
 
   <div class="row">
-    <label>Config</label>
-    <input name="config_path" value="{{ default_config }}">
+    <label for="inp-config">{{ t('job.new.config') }}</label>
+    <input id="inp-config" name="config_path" value="{{ default_config }}">
   </div>
 
   <div class="row2">
     <div>
-      <label>From chapter</label>
-      <input type="number" name="from_chapter" min="1" placeholder="1">
+      <label for="inp-from-ch">{{ t('job.new.from_chapter') }}</label>
+      <input id="inp-from-ch" type="number" name="from_chapter" min="1" placeholder="1">
     </div>
     <div>
-      <label>To chapter</label>
-      <input type="number" name="to_chapter" min="1" placeholder="cuối">
+      <label for="inp-to-ch">{{ t('job.new.to_chapter') }}</label>
+      <input id="inp-to-ch" type="number" name="to_chapter" min="1" placeholder="{{ t('job.new.to_chapter_ph') }}">
     </div>
   </div>
 
   <div class="row2">
     <div>
-      <label>From lang</label>
-      <input name="from_lang" value="EN">
+      <label for="inp-from-lang">{{ t('job.new.from_lang') }}</label>
+      <input id="inp-from-lang" name="from_lang" value="EN">
     </div>
     <div>
-      <label>To lang</label>
-      <input name="to_lang" value="VI">
+      <label for="inp-to-lang">{{ t('job.new.to_lang') }}</label>
+      <input id="inp-to-lang" name="to_lang" value="VI">
     </div>
   </div>
 
   <div class="row">
-    <label>Description</label>
-    <input name="description" placeholder="(tùy chọn) ngữ cảnh sách">
+    <label for="inp-desc">{{ t('job.new.description') }}</label>
+    <input id="inp-desc" name="description" placeholder="{{ t('job.new.description_ph') }}">
   </div>
 
   <div class="row checks">
-    <label><input type="checkbox" name="openai_batch" value="1"> OpenAI batch</label>
-    <label><input type="checkbox" name="reset_checkpoint" value="1"> Reset checkpoint</label>
-    <label><input type="checkbox" name="disable_resume" value="1"> Tắt resume</label>
+    <label><input type="checkbox" name="openai_batch" value="1"> {{ t('job.new.openai_batch') }}</label>
+    <label><input type="checkbox" name="reset_checkpoint" value="1"> {{ t('job.new.reset_checkpoint') }}</label>
+    <label><input type="checkbox" name="disable_resume" value="1"> {{ t('job.new.disable_resume') }}</label>
   </div>
 
-  <button type="submit" class="btn btn-primary">▶ Bắt đầu dịch</button>
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">{{ icon('play') }} {{ t('job.new.submit') }}</button>
+  </div>
 </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Model suggestions per engine, injected as JSON from the server (i18n-safe).
+  var MODEL_SUGGESTIONS = {{ model_suggestions | tojson }};
+  var inpEngine = document.getElementById('inp-engine');
+  var inpModel = document.getElementById('inp-model');
+  var dl = document.getElementById('model-suggestions');
+
+  function refreshModelList() {
+    if (!inpEngine || !dl) return;
+    var engine = inpEngine.value;
+    var models = (MODEL_SUGGESTIONS && MODEL_SUGGESTIONS[engine]) || [];
+    dl.innerHTML = '';
+    models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m;
+      dl.appendChild(opt);
+    });
+    // Keep the currently typed model unless it's now unsupported.
+    if (inpModel.value && models.indexOf(inpModel.value) === -1) {
+      // leave the value — it may be a valid model not listed yet.
+    }
+  }
+
+  if (inpEngine) {
+    inpEngine.addEventListener('change', refreshModelList);
+    refreshModelList();
+  }
+</script>
 {% endblock %}

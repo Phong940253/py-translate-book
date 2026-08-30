@@ -2,16 +2,34 @@
 # py-translate-book — example configuration
 # Copy this file to `config.yaml` and fill in your own values.
 # `config.yaml` is git-ignored, so your real keys never get committed.
+#
+# KHÔNG cần sửa file này bằng tay: chạy web UI (python -m webui.app) rồi mở
+# trang "API Keys" để dán key từng provider qua form.
 # =============================================================================
 
 # --- OpenAI (engine: "openai") ---
 openai:
   api_key: "sk-..."          # required for the openai engine
+  model: gpt-5.4-mini        # default model (form "Model" trên Job có thể để trống hoặc ghi đè)
+  models:                    # danh sách gợi ý cho dropdown Model (tuỳ chọn)
+    - gpt-5.5
+    - gpt-5.4-mini
+    - gpt-5.3
+    - gpt-5.4-nano
+    - gpt-5-mini-2025-08-07
   # custom_prompt: "..."      # optional: override the shared translation prompt
 
 # --- Google Gemini (engine: "gemini") ---
 gemini:
   api_key: "AIza..."         # required for the gemini engine
+  model: gemini-3.5-flash-lite
+  analysis_model: gemini-3.5-flash-lite   # model dùng để phân tích consistency (tuỳ chọn)
+  models:
+    - gemini-3.7-flash
+    - gemini-3.6-flash
+    - gemini-3.5-flash
+    - gemini-3.5-flash-lite
+    - gemini-3.1-pro-preview
   # custom_prompt: "..."      # optional
 
 # --- WebAI local proxy (engine: "webai") ---
@@ -28,9 +46,62 @@ webai:
   chat_continue_endpoint: "/gemini-chat"
   chat_reset_every_chunks: 30
 
+# --- OpenAI-compatible providers ---
+# Mỗi section là một engine: tên section = tên engine. Chỉ cần
+# `type: openai_compatible` + `base_url` + `api_key`. Thêm bớt thoải mái.
+# Key của các provider cloud nhập tại web UI → API Keys (không cần sửa YAML).
+
 # --- Groq (engine: "groq") ---
 groq:
+  type: openai_compatible
+  base_url: https://api.groq.com/openai/v1
+  model: openai/gpt-oss-120b
+  models:
+    - openai/gpt-oss-120b
+    - openai/gpt-oss-20b
+    - groq/compound
+    - groq/compound-mini
+    - qwen/qwen3.6-27b
   api_key: "gsk_..."
+  timeout_seconds: 240
+
+# --- DeepSeek (engine: "deepseek") ---
+deepseek:
+  type: openai_compatible
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  models:
+    - deepseek-v4-pro
+    - deepseek-v4-flash
+  api_key: ""
+  timeout_seconds: 240
+
+# --- OpenRouter (engine: "openrouter") — 1 key truy cập 400+ model ---
+openrouter:
+  type: openai_compatible
+  base_url: https://openrouter.ai/api/v1
+  model: openai/gpt-5.5
+  models:
+    - openrouter/auto
+    - openai/gpt-5.5
+    - anthropic/claude-4.7-opus
+    - google/gemini-3.5-flash-lite
+    - deepseek/deepseek-v4-flash
+  api_key: "sk-or-v1-..."
+  timeout_seconds: 240
+
+# --- Ollama (engine: "ollama") — local, không cần key ---
+ollama:
+  type: openai_compatible
+  base_url: http://localhost:11434/v1
+  model: qwen3:14b
+  models:
+    - qwen3:14b
+    - qwen3:8b
+    - gemma3:12b
+    - llama3.3:70b
+  api_key: ""
+  timeout_seconds: 240
 
 # --- Translation behavior ---
 translation:

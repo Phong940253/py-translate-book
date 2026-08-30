@@ -1,42 +1,24 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% block title %}Ảnh minh họa{% endblock %}
+{% block title %}{{ t('images.title') }}{% endblock %}
 {% block content %}
-<h1>{{ icon('image') }} Ảnh minh họa</h1>
-<p class="muted">Thư mục: <span class="mono">{{ img_dir }}</span></p>
+<h1 class="page-title">{{ icon('image') }} {{ t('images.heading') }}</h1>
+<p class="muted">{{ t('images.dir') }} <span class="mono">{{ img_dir }}</span></p>
 {% if not images %}
-  <p class="card empty">{{ icon('image') }} Chưa có ảnh nào được sinh (illustration chưa bật hoặc chưa chạy).</p>
+  <p class="card empty">{{ icon('image') }} {{ t('images.empty') }}</p>
 {% else %}
   <div class="gallery">
     {% for img in images %}
-    <div class="thumb card">
-      <img src="{{ url_for('serve_image', filename=img) }}" alt="{{ img }}" loading="lazy"
-           onclick="openLightbox(this.src, {{ img | tojson }})">
-      <div class="mono small">{{ img }}</div>
-    </div>
+    <figure class="thumb card" data-src="{{ url_for('serve_image', filename=img) }}" data-alt="{{ img }}">
+      <img src="{{ url_for('serve_image', filename=img) }}" alt="{{ img }}" loading="lazy">
+      <figcaption class="mono small">{{ img }}</figcaption>
+    </figure>
     {% endfor %}
   </div>
 {% endif %}
 
-<div id="lightbox" class="lightbox" onclick="closeLightbox()">
-  <button class="btn btn-ghost lb-close" type="button" aria-label="Đóng"
-          onclick="event.stopPropagation();closeLightbox()">{{ icon('x') }}</button>
+<div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="{{ t('images.preview_aria') }}">
+  <button id="lb-close" class="btn btn-ghost icon-btn lb-close" type="button" aria-label="{{ t('images.close') }}">{{ icon('x') }}</button>
   <img id="lb-img" src="" alt="">
 </div>
-
-<script>
-function openLightbox(src, alt) {
-  const lb = document.getElementById('lightbox');
-  document.getElementById('lb-img').src = src;
-  document.getElementById('lb-img').alt = alt || '';
-  lb.classList.add('open');
-}
-function closeLightbox() {
-  document.getElementById('lightbox').classList.remove('open');
-  document.getElementById('lb-img').src = '';
-}
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeLightbox();
-});
-</script>
 {% endblock %}

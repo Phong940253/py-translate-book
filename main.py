@@ -7,7 +7,7 @@ from ebooklib import epub
 
 from translator.epub_utils import iter_chapters, load_soup
 from translator.discord_notifier import DiscordNotifier
-from translator.job import read_config, run_translation
+from translator.job import read_config, run_translation, list_supported_engines
 
 LOG_FILE = "translation.log"
 
@@ -21,7 +21,8 @@ logging.basicConfig(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--engine", choices=["openai", "gemini", "webai"])
+    parser.add_argument("--engine", default=None)
+    parser.add_argument("--model", default=None)
     parser.add_argument("--openai-batch", action="store_true")
     parser.add_argument("--input", default=None)
     parser.add_argument("--output", default=None)
@@ -131,12 +132,21 @@ def main():
         raise ValueError("--engine is required unless --preview-chapter is used")
 
     config = read_config(args.config)
+    supported_engines = list_supported_engines(config)
+    if args.engine not in supported_engines:
+        raise ValueError(
+            f"Unsupported engine: {args.engine}. Available with this config: "
+            f"{', '.join(supported_engines)}. "
+            "Thiết lập key tại web UI → API Keys (chạy: python -m webui.app), "
+            "hoặc khai báo provider 'type: openai_compatible' trong config.yaml."
+        )
 
     run_translation(
         config,
         input=args.input,
         output=args.output,
         engine=args.engine,
+        model=args.model,
         from_chapter=args.from_chapter,
         to_chapter=args.to_chapter,
         from_lang=args.from_lang,

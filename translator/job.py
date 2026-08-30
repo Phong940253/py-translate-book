@@ -95,6 +95,7 @@ def build_engine(
     to_lang: str = "VI",
     description: Optional[str] = None,
     custom_prompt: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     """Construct a TranslationEngine from config (mirrors the CLI factory)."""
     from translator.engines.openai_engine import OpenAIEngine
@@ -108,16 +109,29 @@ def build_engine(
     effective_prompt = custom_prompt or engine_custom_prompt or common_custom_prompt
 
     if engine_name == "openai":
+        api_key = engine_key_cfg.get("api_key") if isinstance(engine_key_cfg, dict) else None
+        if not api_key:
+            raise ValueError(
+                "openai.api_key is required — nhập key tại web UI → API Keys"
+            )
         return OpenAIEngine(
-            api_key=engine_key_cfg["api_key"],
+            api_key=api_key,
+            model=model or engine_key_cfg.get("model"),
             from_lang=from_lang,
             to_lang=to_lang,
             description=description,
             custom_prompt=effective_prompt,
         )
     if engine_name == "gemini":
+        api_key = engine_key_cfg.get("api_key") if isinstance(engine_key_cfg, dict) else None
+        if not api_key:
+            raise ValueError(
+                "gemini.api_key is required — nhập key tại web UI → API Keys"
+            )
         return GeminiEngine(
-            api_key=engine_key_cfg["api_key"],
+            api_key=api_key,
+            model=model or engine_key_cfg.get("model"),
+            analysis_model=engine_key_cfg.get("analysis_model"),
             from_lang=from_lang,
             to_lang=to_lang,
             description=description,
@@ -127,7 +141,7 @@ def build_engine(
         return WebAIEngine(
             base_url=engine_key_cfg.get("base_url", "http://localhost:6969"),
             endpoint=engine_key_cfg.get("endpoint", "/v1/chat/completions"),
-            model=engine_key_cfg.get("model", "gemini-flash"),
+            model=model or engine_key_cfg.get("model", "gemini-flash"),
             api_key=engine_key_cfg.get("api_key"),
             timeout_seconds=engine_key_cfg.get("timeout_seconds", 120),
             chat_mode=engine_key_cfg.get("chat_mode", False),
@@ -139,7 +153,73 @@ def build_engine(
             description=description,
             custom_prompt=effective_prompt,
         )
-    raise ValueError(f"Unsupported engine: {engine_name}")
+
+    # Dynamic OpenAI-compatible providers (Groq, DeepSeek, OpenRouter, Ollama, ...)
+    # defined purely by a `type: openai_compatible` section in config.yaml.
+    if isinstance(engine_key_cfg, dict) and engine_key_cfg.get("type") == "openai_compatible":
+        from translator.engines.compatible import OpenAICompatibleEngine
+
+        base_url = engine_key_cfg.get("base_url")
+        if not base_url:
+            raise ValueError(
+                f"{engine_name}.base_url is required (type: openai_compatible) — "
+                "nhập tại web UI → API Keys"
+            )
+        return OpenAICompatibleEngine(
+            base_url=base_url,
+            model=model or engine_key_cfg.get("model"),
+            api_key=engine_key_cfg.get("api_key"),
+            timeout_seconds=engine_key_cfg.get("timeout_seconds", 180),
+            from_lang=from_lang,
+            to_lang=to_lang,
+            description=description,
+            custom_prompt=effective_prompt,
+        )
+
+    raise ValueError(
+        f"Unsupported engine: {engine_name}. Supported: openai, gemini, webai "
+        "+ mọi provider 'type: openai_compatible' trong config.yaml — "
+        "nhập key tại web UI → API Keys."
+    )
+
+
+def list_supported_engines(config: dict) -> list[str]:
+    """All usable engine names: built-ins plus every OpenAI-compatible provider
+    declared in config (section with ``type: openai_compatible``)."""
+    names = ["openai", "gemini", "webai"]
+    if isinstance(config, dict):
+        for key, value in config.items():
+            if isinstance(value, dict) and value.get("type") == "openai_compatible":
+                if key not in names:
+                    names.append(key)
+    return names
+
+
+def list_engine_models(config: dict, engine_name: str) -> list[str]:
+    """Model suggestions for a provider (dedup), for the web UI dropdown.
+
+    Priority: ``models:`` list from config → single ``model:`` → built-in
+    defaults for openai/gemini so the dropdown is never empty.
+    """
+    cfg = config.get(engine_name) if isinstance(config, dict) else None
+    models = cfg.get("models") if isinstance(cfg, dict) else None
+    if isinstance(models, list) and models:
+        seen: set[str] = set()
+        out: list[str] = []
+        for m in models:
+            if m and str(m) not in seen:
+                seen.add(str(m))
+                out.append(str(m))
+        return out
+    if isinstance(cfg, dict) and cfg.get("model"):
+        return [str(cfg["model"])]
+    if engine_name == "openai":
+        from translator.engines.openai_engine import DEFAULT_MODEL
+
+        return [DEFAULT_MODEL]
+    if engine_name == "gemini":
+        return ["gemini-flash-lite"]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +254,7 @@ def run_translation(
     to_lang: str = "VI",
     description: Optional[str] = None,
     custom_prompt: Optional[str] = None,
+    model: Optional[str] = None,
     openai_batch: bool = False,
     reset_checkpoint: bool = False,
     disable_resume: bool = False,
@@ -268,6 +349,8 @@ def run_translation(
         "from_lang": from_lang,
         "to_lang": to_lang,
     }
+    if model is not None:
+        checkpoint_signature["model"] = model
 
     if checkpoint_data:
         signature_mismatch = any(
@@ -310,6 +393,7 @@ def run_translation(
         to_lang=to_lang,
         description=description,
         custom_prompt=custom_prompt,
+        model=model,
     )
 
     translator = Translator(

@@ -16,8 +16,9 @@ BATCH_ENDPOINT = "/v1/chat/completions"
 
 
 class OpenAIEngine(TranslationEngine):
-    def __init__(self, api_key: str, **kwargs):
+    def __init__(self, api_key: str, model: str | None = None, **kwargs):
         super().__init__(**kwargs)
+        self.model = model or DEFAULT_MODEL
 
         # ✅ DIRECT OPENAI
         self.client = OpenAI(
@@ -33,7 +34,7 @@ class OpenAIEngine(TranslationEngine):
         messages = self._build_messages(system_prompt, text)
 
         response = self.client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=self.model,
             messages=messages,
         )
 
@@ -64,7 +65,7 @@ class OpenAIEngine(TranslationEngine):
                 "method": "POST",
                 "url": BATCH_ENDPOINT,
                 "body": {
-                    "model": DEFAULT_MODEL,
+                    "model": self.model,
                     "messages": self._build_messages(system_prompt, text),
                 },
             }

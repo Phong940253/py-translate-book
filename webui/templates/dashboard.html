@@ -1,61 +1,46 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<h1 class="page-title">Dashboard</h1>
 
 <section class="card">
-  <h2>Jobs gần đây</h2>
+  <h2 class="card-title">{{ t('dashboard.recent_jobs') }}</h2>
   {% if not jobs %}
-    <p class="muted">Chưa có job nào. <a href="{{ url_for('job_new') }}">Tạo job mới</a>.</p>
+    <p class="muted empty">{{ t('dashboard.no_jobs') }} <a href="{{ url_for('job_new') }}">{{ t('dashboard.create_job') }}</a>.</p>
   {% else %}
-    <table class="table">
-      <thead>
-        <tr><th>ID</th><th>Engine</th><th>Input</th><th>Trạng thái</th><th>Chapter</th><th></th></tr>
-      </thead>
-      <tbody>
-        {% for job in jobs %}
-        <tr>
-          <td><a href="{{ url_for('job_view', job_id=job.id) }}">{{ job.id }}</a></td>
-          <td>{{ job.params.engine }}</td>
-          <td class="mono small">{{ job.params.input }}</td>
-          <td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
-          <td>
-            {% if job.progress and job.progress.get('current_chapter') %}
-              {{ job.progress.current_chapter }} / {{ job.progress.get('total_chapters') }}
-            {% elif job.progress %}
-              ? / {{ job.progress.get('total_chapters') }}
-            {% else %}-{% endif %}
-          </td>
-          <td><a href="{{ url_for('job_view', job_id=job.id) }}">Xem</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>{{ t('dashboard.col_id') }}</th><th>{{ t('dashboard.col_engine') }}</th><th>{{ t('dashboard.col_input') }}</th><th>{{ t('dashboard.col_status') }}</th><th>{{ t('dashboard.col_chapter') }}</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for job in jobs %}
+          <tr>
+            <td><a href="{{ url_for('job_view', job_id=job.id) }}" class="mono">{{ job.id }}</a></td>
+            <td>{{ job.params.engine }}</td>
+            <td class="mono small cell-mono" title="{{ job.params.input }}">{{ job.params.input }}</td>
+            <td><span class="badge {{ job.status }}"><span class="status-dot"></span>{{ t('job.status.' + job.status) }}</span></td>
+            <td>
+              {% if job.progress and job.progress.get('current_chapter') %}
+                {{ job.progress.current_chapter }} / {{ job.progress.get('total_chapters') }}
+              {% elif job.progress %}
+                ? / {{ job.progress.get('total_chapters') }}
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+            <td><a class="btn btn-ghost btn-sm" href="{{ url_for('job_view', job_id=job.id) }}">{{ icon('chevron-right') }} {{ t('dashboard.view') }}</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% endif %}
 </section>
 
 <section class="card">
-  <h2>Thư viện EPUB</h2>
-  {% if not books %}
-    <p class="muted">Không tìm thấy EPUB trong thư mục dự án.</p>
-  {% else %}
-    <div class="book-grid compact">
-      {% for b in books %}
-      <div class="book-card">
-        <a class="book-cover" href="{{ url_for('book_cover', path=b.path) }}" target="_blank" title="Xem bìa">
-          <img src="{{ url_for('book_cover', path=b.path) }}"
-               alt="Bìa: {{ b.meta.title or b.name }}"
-               loading="lazy"
-               onerror="this.onerror=null;this.src='{{ url_for('static', filename='cover-placeholder.svg') }}'">
-        </a>
-        <div class="book-info">
-          <div class="book-title" title="{{ b.meta.title or b.name }}">{{ b.meta.title or b.name }}</div>
-          <div class="muted small">{{ b.size_mb }} MB</div>
-          <a class="btn btn-primary btn-sm" href="{{ url_for('job_new') }}?input={{ b.path }}">Dịch</a>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  {% endif %}
+  <h2 class="card-title">{{ icon('books') }} {{ t('books.title') }}
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('books') }}">{{ t('books.view_all') }}</a>
+  </h2>
+  <div id="lib-mini" class="lib-loading muted">{{ t('books.loading') }}…</div>
 </section>
 {% endblock %}

@@ -9,16 +9,24 @@ DEFAULT_ANALYSIS_MAX_OUTPUT_TOKENS = 1200
 
 
 class GeminiEngine(TranslationEngine):
-    def __init__(self, api_key: str, **kwargs):
+    def __init__(
+        self,
+        api_key: str,
+        model: str | None = None,
+        analysis_model: str | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
 
         genai.configure(api_key=api_key)
 
+        self.model_name = model or "gemini-flash-lite"
+        self.analysis_model_name = analysis_model or self.model_name
         self.model = genai.GenerativeModel(
-            "gemini-flash-lite",
+            self.model_name,
             system_instruction=self.system_prompt(),
         )
-        self.analysis_model = genai.GenerativeModel("gemini-flash-lite")
+        self.analysis_model = genai.GenerativeModel(self.analysis_model_name)
 
         self.safety = {
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,

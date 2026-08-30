@@ -1,57 +1,49 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% block title %}Thư viện{% endblock %}
+{% block title %}{{ t('books.title') }}{% endblock %}
+{% block app_config %}
+window.APP.initialFilter = {{ (active_filter or '')|tojson }};
+{% endblock %}
 {% block content %}
-<h1>{{ icon('books') }} Thư viện EPUB</h1>
+<h1 class="page-title">{{ icon('books') }} {{ t('books.title') }}</h1>
 
-{% if not books %}
-  <p class="card empty">{{ icon('book') }} Không tìm thấy EPUB trong thư mục dự án.</p>
-{% else %}
-  <div class="book-grid">
-    {% for b in books %}
-    <div class="book-card card">
-      <a class="book-cover" href="{{ url_for('book_cover', path=b.path) }}" target="_blank"
-         title="Xem bìa">
-        <img src="{{ url_for('book_cover', path=b.path) }}"
-             alt="Bìa: {{ b.meta.title or b.name }}"
-             loading="lazy"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='cover-placeholder.svg') }}'">
-      </a>
-      <div class="book-info">
-        <div class="book-title" title="{{ b.meta.title or b.name }}">{{ b.meta.title or b.name }}</div>
-        <div class="muted small">{{ b.meta.creator or '—' }}</div>
-        <div class="muted small">{{ b.size_mb }} MB · {{ b.chapters or '?' }} chương</div>
-        <div class="book-meta">
-          {% if b.has_checkpoint %}<span class="badge has-cp">{{ icon('check') }} checkpoint</span>{% endif %}
-          {% if b.meta.language %}<span class="badge">{{ b.meta.language }}</span>{% endif %}
-        </div>
-        <div class="book-actions">
-          <a class="btn btn-primary" href="{{ url_for('job_new') }}?input={{ b.path }}">{{ icon('play') }} Dịch</a>
-          <button class="btn btn-ghost" type="button" onclick="preview('{{ b.path }}');">{{ icon('image') }} Preview</button>
-        </div>
-      </div>
-    </div>
-    {% endfor %}
+<div class="lib-toolbar">
+  <div class="filter-chips" role="group" aria-label="Filters">
+    <button type="button" class="btn {{ 'btn-primary' if not active_filter else 'btn-ghost' }} filter-chip" data-filter="">{{ t('filter.all') }}</button>
+    <button type="button" class="btn {{ 'btn-primary' if active_filter == 'untranslated' else 'btn-ghost' }} filter-chip" data-filter="untranslated">{{ t('filter.untranslated') }}</button>
+    <button type="button" class="btn {{ 'btn-primary' if active_filter == 'partial' else 'btn-ghost' }} filter-chip" data-filter="partial">{{ t('filter.partial') }}</button>
+    <button type="button" class="btn {{ 'btn-primary' if active_filter == 'done' else 'btn-ghost' }} filter-chip" data-filter="done">{{ t('filter.done') }}</button>
+    <button type="button" class="btn {{ 'btn-primary' if active_filter == 'assumed' else 'btn-ghost' }} filter-chip" data-filter="assumed">{{ t('filter.assumed') }}</button>
   </div>
-{% endif %}
-
-<div id="preview-box" class="card" style="display:none">
-  <h2>{{ icon('image') }} Preview chương <span id="pv-ch"></span></h2>
-  <pre id="pv-text" class="log"></pre>
+  <div class="lib-search-wrap">
+    <input id="lib-search" class="search-input" type="search" placeholder="{{ t('books.search_placeholder') }}" autocomplete="off" aria-label="{{ t('books.search_placeholder') }}">
+    <button id="lib-refresh" type="button" class="btn btn-ghost btn-sm">{{ icon('refresh') }} {{ t('books.refresh') }}</button>
+  </div>
 </div>
 
-<script>
-function preview(path) {
-  const ch = prompt('Chương số?', '1');
-  if (!ch) return;
-  fetch(`/books/preview?path=${encodeURIComponent(path)}&chapter=${ch}`)
-    .then(r => r.json())
-    .then(d => {
-      document.getElementById('preview-box').style.display = 'block';
-      document.getElementById('pv-ch').textContent = d.chapter + ' / ' + d.total;
-      document.getElementById('pv-text').textContent = d.text;
-    })
-    .catch(e => alert('Lỗi: ' + e));
-}
-</script>
+<div class="lib-legend">
+  <span class="badge status-done">{{ t('filter.done') }}</span>
+  <span class="badge status-partial">{{ t('legend.partial') }}</span>
+  <span class="badge status-assumed">{{ t('legend.assumed') }}</span>
+  <span class="badge status-untranslated">{{ t('legend.untranslated') }}</span>
+</div>
+<p id="lib-stats" class="muted small"></p>
+
+<div id="lib" class="lib-loading">{{ t('books.loading') }}…</div>
+
+<section id="preview-box" class="card pv" hidden>
+  <div class="card-row">
+    <h2>{{ icon('image') }} {{ t('books.preview_title') }}<span id="pv-ch"></span></h2>
+    <button id="pv-close" type="button" class="btn btn-ghost btn-sm icon-btn" aria-label="{{ t('books.preview_cancel') }}">{{ icon('x') }}</button>
+  </div>
+  <div id="pv-prompt" class="pv-prompt" hidden>
+    <label class="muted small" for="pv-input">{{ t('books.preview_hint') }}</label>
+    <div class="pv-prompt-row">
+      <input id="pv-input" class="search-input" type="number" min="1" value="1" inputmode="numeric">
+      <button id="pv-go" type="button" class="btn btn-primary btn-sm">{{ t('books.preview_go') }}</button>
+      <button id="pv-cancel" type="button" class="btn btn-ghost btn-sm">{{ t('books.preview_cancel') }}</button>
+    </div>
+  </div>
+  <pre id="pv-text" class="log" hidden></pre>
+</section>
 {% endblock %}

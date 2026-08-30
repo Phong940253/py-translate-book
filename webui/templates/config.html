@@ -1,30 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Cấu hình{% endblock %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ t('config.title') }}{% endblock %}
 {% block content %}
-<h1>Cấu hình (config.yaml)</h1>
+<h1 class="page-title">{{ t('config.heading') }}</h1>
 {% if error %}
-  <div class="card error">Lỗi lưu: {{ error }}</div>
+  <div class="card error-msg">{{ t('config.save_error') }} {{ error }}</div>
 {% endif %}
 <form method="post" class="card">
-  <p class="muted">API key hiển thị là <code>********</code> — để nguyên nếu không muốn đổi.
-  File cũ được backup thành <code>config.yaml.bak</code> trước khi ghi.</p>
-  <textarea name="config_text" class="code" rows="28">{{ config_text }}</textarea>
-  <div class="row checks">
-    <button type="submit" class="btn btn-primary">💾 Lưu cấu hình</button>
-    <button type="button" class="btn btn-warn" onclick="testDiscord()">🔔 Test Discord webhook</button>
+  <p class="muted">{{ t('config.mask_note', mask='********', bak='config.yaml.bak') }}</p>
+  <textarea name="config_text" class="code" rows="28" spellcheck="false">{{ config_text }}</textarea>
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">{{ icon('save') }} {{ t('config.save') }}</button>
+    <button type="button" class="btn btn-ghost" id="btn-discord">{{ icon('bell') }} {{ t('config.test_discord') }}</button>
   </div>
   <span id="discord-result" class="muted"></span>
 </form>
-
-<script>
-function testDiscord() {
-  fetch('/config/test-discord', {method:'POST'})
-    .then(r => r.json())
-    .then(d => {
-      document.getElementById('discord-result').textContent =
-        d.success ? 'Discord: SUCCESS' : 'Discord: FAILED (xem translation.log)';
-    })
-    .catch(e => alert('Lỗi: ' + e));
-}
-</script>
 {% endblock %}
