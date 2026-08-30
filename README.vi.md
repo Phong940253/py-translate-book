@@ -19,9 +19,15 @@ English version: see [README.md](README.md).
   OpenAI-compatible** (Groq, DeepSeek, OpenRouter, Ollama, …) chỉ cần khai báo
   `type: openai_compatible` trong config.
 - **Ghi đè model mỗi job**: ô `Model` tuỳ chọn trên form tạo job (để trống = mặc
-  định engine), gợi ý model từ danh sách `models:` trong config.
+  định engine). Dropdown **lấy danh sách model trực tiếp từ provider** (kèm ô
+  nhập "model tuỳ chỉnh" + nút làm mới); nếu provider offline thì dùng lại danh
+  sách `models:` trong config.
 - **Trang API Keys** (`/config/keys`): dán/sửa key từng provider qua form (kèm
-  base URL + model) — không cần sửa `config.yaml` bằng tay.
+  base URL + model) — không cần sửa `config.yaml` bằng tay. Trang còn quản lý
+  danh sách `models:` (textarea, 1 dòng/model) với nút **"Lấy danh sách từ nguồn"**,
+  và cho phép **thêm / xoá** provider OpenAI-compatible ngay trên giao diện.
+- **Trang Cài đặt** (`/config/settings`): chỉnh các thông số dịch / minh họa /
+  consistency / Discord bằng form (GUI) — API key vẫn nằm riêng ở trang API Keys.
 - **Checkpoint / resume**: dịch dở có thể tiếp tục từ chương cuối cùng thành công.
 - **Consistency**: trích quy tắc dịch (cách xưng hô, tên riêng) để nhất quán xuyên chương.
 - **Illustration** (tùy chọn): sinh ảnh minh họa vào `images/generated`.
@@ -168,10 +174,11 @@ Mở **http://127.0.0.1:5000**.
 | Trang | Chức năng |
 |-------|-----------|
 | `/` | Dashboard: jobs gần đây + thư viện EPUB (nhóm theo tựa sách, badge trạng thái) |
-| `/jobs/new` | Tạo job (engine + model tuỳ chọn, input/output, chapter range, lang, …) |
+| `/jobs/new` | Tạo job (engine + model tuỳ chọn, input/output, chapter range, lang, …). Dropdown Model hiện model *live* của provider, kèm ô **nhập model tuỳ chỉnh** + nút làm mới; fallback = `models:` trong config. |
 | `/jobs/<id>` | Theo dõi log realtime (SSE) + thanh progress + nút Dừng |
 | `/books` | Thư viện gom nhóm: nguồn + các bản dịch cùng tựa, badge ✅/⏳/❓/📖, lọc `?filter=done|partial|assumed|untranslated`, preview chương |
-| `/config/keys` | **API Keys**: form nhập/sửa key từng provider + base URL + model |
+| `/config/keys` | **API Keys**: key + base URL + model mặc định; danh sách `models:` (1 dòng/model) với nút **Lấy từ nguồn**; **thêm/xoá** provider OpenAI-compatible |
+| `/config/settings` | **Cài đặt (GUI)**: dịch / minh họa / consistency / Discord dạng form (YAML nâng cao vẫn ở `/config`) |
 | `/config` | Sửa `config.yaml` (API key bị che, backup `.bak`), test Discord |
 | `/illustrations` | Gallery ảnh minh họa đã sinh |
 
@@ -190,6 +197,7 @@ translator/
                          (checkpoint/resume, illustration, discord, stats, progress_cb)
   epub_utils.py          đọc/ghi EPUB, duyệt chapter, inject manifest
   html_utils.py          split/assemble HTML, normalize <br>
+  model_lister.py        lấy danh sách model live (OpenAI-compatible / Gemini / Ollama / WebAI)
   illustration.py        sinh ảnh minh họa
   discord_notifier.py    gửi Discord webhook
   engines/                TranslationEngine: openai / gemini / webai / compatible (+ base)
@@ -198,9 +206,10 @@ webui/
   jobs.py                JobRegistry + Job (trạng thái, log, progress; lưu webui/jobs/)
   core_runner.py         chạy run_translation trong thread, forward log/event -> SSE
   config_store.py        đọc/ghi config.yaml an toàn (mask key + backup)
+  config_schema.py       metadata form GUI /config/settings (không có trường secret)
   books.py               liệt kê EPUB, preview chương, phân loại trạng thái dịch
                          (checkpoint/job/đuôi tên) và gom nhóm nguồn + bản dịch
-  templates/  static/    giao diện (gồm keys.html — form API Keys)
+  templates/  static/    giao diện (gồm keys.html — form API Keys, settings.html — GUI)
 tests/                   unittest offline (không gọi AI)
 requirements.txt         dependency
 config.example.yaml      mẫu cấu hình

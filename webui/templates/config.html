@@ -3,6 +3,7 @@
 {% block title %}{{ t('config.title') }}{% endblock %}
 {% block content %}
 <h1 class="page-title">{{ t('config.heading') }}</h1>
+<p class="muted"><a href="{{ url_for('settings_view') }}">{{ icon('gear', 'icon-sm') }} {{ t('config.gui_settings') }}</a></p>
 {% if error %}
   <div class="card error-msg">{{ t('config.save_error') }} {{ error }}</div>
 {% endif %}

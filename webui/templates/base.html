@@ -38,7 +38,7 @@
       <a href="{{ url_for('job_new') }}" class="{{ 'active' if request.endpoint == 'job_new' }}">{{ icon('plus') }} {{ t('nav.job_new') }}</a>
       <a href="{{ url_for('books') }}" class="{{ 'active' if request.endpoint == 'books' }}">{{ icon('books') }} {{ t('nav.library') }}</a>
       <a href="{{ url_for('keys_view') }}" class="{{ 'active' if request.endpoint == 'keys_view' }}">{{ icon('key') }} {{ t('nav.keys') }}</a>
-      <a href="{{ url_for('config_view') }}" class="{{ 'active' if request.endpoint == 'config_view' }}">{{ icon('gear') }} {{ t('nav.config') }}</a>
+      <a href="{{ url_for('settings_view') }}" class="{{ 'active' if request.endpoint in ('settings_view', 'config_view') }}">{{ icon('gear') }} {{ t('nav.config') }}</a>
       <a href="{{ url_for('illustrations') }}" class="{{ 'active' if request.endpoint == 'illustrations' }}">{{ icon('image') }} {{ t('nav.images') }}</a>
     </nav>
     <div class="topbar-tools">

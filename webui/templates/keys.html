@@ -2,7 +2,7 @@
 {% from "_icons.html" import icon %}
 {% block title %}{{ t('keys.title') }}{% endblock %}
 {% block content %}
-<h1 class="page-title">{{ t('keys.heading') }}</h1>
+<h1 class="page-title">{{ icon('key') }} {{ t('keys.heading') }}</h1>
 
 {% if saved %}
 <div class="card ok-msg">{{ icon('check') }} {{ t('keys.saved') }}</div>
@@ -23,6 +23,10 @@
           {{ t('keys.no_key') }}
         {% endif %}
       </span>
+      {% if p.removable %}
+      <button type="submit" form="frm-remove-provider" class="btn btn-ghost btn-sm btn-danger js-confirm-remove"
+              data-remove-name="{{ p.name }}">{{ icon('x', 'icon-sm') }} {{ t('keys.remove_provider') }}</button>
+      {% endif %}
     </div>
 
     <div class="row">
@@ -55,12 +59,126 @@
       </div>
     </div>
     {% endif %}
+
+    <details class="models-box" {% if p.has_models %}open{% endif %}>
+      <summary>{{ t('keys.models_hint') }}</summary>
+      <div class="models-box-body">
+        <textarea id="models-{{ p.name }}" name="models_{{ p.name }}" rows="4"
+                  spellcheck="false" placeholder="{{ t('keys.models_ph') }}">{{ p.models_text }}</textarea>
+        <div class="row-actions">
+          <button type="button" class="btn btn-ghost btn-sm" data-fetch-models="{{ p.name }}">
+            {{ icon('refresh', 'icon-sm') }} {{ t('keys.fetch') }}
+          </button>
+          <label class="muted small clear-models">
+            <input type="checkbox" name="clear_models_{{ p.name }}" value="1"> {{ t('keys.clear_models') }}
+          </label>
+          <span class="model-status muted small"></span>
+        </div>
+      </div>
+    </details>
   </div>
   {% endfor %}
 
   <div class="form-actions">
     <button type="submit" class="btn btn-primary">{{ icon('save') }} {{ t('keys.save') }}</button>
+    <a class="btn btn-ghost" href="{{ url_for('settings_view') }}">{{ icon('gear', 'icon-sm') }} {{ t('config.gui_settings') }}</a>
     <a class="btn btn-ghost" href="{{ url_for('config_view') }}">{{ t('keys.advanced') }}</a>
   </div>
 </form>
+
+<div class="card">
+  <h2 class="card-title">{{ icon('plus') }} {{ t('keys.add_provider_heading') }}</h2>
+  <p class="muted small">{{ t('keys.add_provider_help') }}</p>
+  {% if add_error %}
+  <div class="hint">{{ icon('warn', 'icon-sm') }} {{ add_error }}</div>
+  {% endif %}
+  <form method="post" action="{{ url_for('add_provider') }}" class="form">
+    <div class="row2">
+      <div>
+        <label for="np-name">{{ t('keys.add_provider_name') }}</label>
+        <input id="np-name" name="name" required pattern="[A-Za-z0-9_-]+"
+               title="{{ t('keys.add_provider_name_hint') }}">
+      </div>
+      <div>
+        <label for="np-base">{{ t('keys.base_url') }}</label>
+        <input id="np-base" name="base_url" required placeholder="https://api.example.com/v1">
+      </div>
+    </div>
+    <div class="row2">
+      <div>
+        <label for="np-key">{{ t('keys.api_key') }}</label>
+        <input id="np-key" name="api_key" type="password" autocomplete="off">
+      </div>
+      <div>
+        <label for="np-model">{{ t('keys.model') }}</label>
+        <input id="np-model" name="model" placeholder="({{ t('keys.keep_blank') }})">
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">{{ icon('plus') }} {{ t('keys.add_provider_submit') }}</button>
+    </div>
+  </form>
+</div>
+
+{# Standalone form for the per-card "Remove provider" buttons (avoids nested
+   forms). Buttons elsewhere use form="frm-remove-provider"; JS fills the name. #}
+<form id="frm-remove-provider" method="post" action="{{ url_for('remove_provider') }}" hidden>
+  <input type="hidden" name="name" id="remove-provider-name" value="">
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Fetch all models from a provider into its textarea (merge, no duplicates).
+  var FETCH_URL = {{ url_for('api_provider_models')|tojson }};
+  var FETCH_I18N = {
+    loading: {{ t('keys.fetch_loading')|tojson }},
+    added: {{ t('keys.fetch_added')|tojson }},
+    nochange: {{ t('keys.fetch_nochange')|tojson }},
+    fail: {{ t('keys.fetch_fail')|tojson }}
+  };
+
+  document.querySelectorAll('[data-fetch-models]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var engine = btn.getAttribute('data-fetch-models');
+      var ta = document.getElementById('models-' + engine);
+      var status = btn.parentNode.querySelector('.model-status');
+      if (!ta) return;
+      status.textContent = FETCH_I18N.loading;
+      fetch(FETCH_URL + '?engine=' + encodeURIComponent(engine))
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var models = (data && data.models) || [];
+          var existing = ta.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+          var seen = {};
+          existing.forEach(function (m) { seen[m] = true; });
+          var added = 0;
+          models.forEach(function (m) {
+            if (!seen[m]) { existing.push(m); seen[m] = true; added++; }
+          });
+          ta.value = existing.join('\n');
+          status.textContent = added ? FETCH_I18N.added.replace('{n}', added) : FETCH_I18N.nochange;
+        })
+        .catch(function () { status.textContent = FETCH_I18N.fail; });
+    });
+  });
+
+  // Remove-provider confirm without inline handlers. The button lives inside
+  // the main form but submits the hidden #frm-remove-provider; e.submitter is
+  // that button, and we copy its data-remove-name into the form's name field.
+  var REMOVE_MSG = {{ t('keys.remove_confirm')|tojson }};
+  var frmRemove = document.getElementById('frm-remove-provider');
+  var inpRemoveName = document.getElementById('remove-provider-name');
+  if (frmRemove && inpRemoveName) {
+    frmRemove.addEventListener('submit', function (e) {
+      var btn = e.submitter;
+      var name = btn ? (btn.getAttribute('data-remove-name') || '') : '';
+      if (!name || !window.confirm(REMOVE_MSG.replace('{name}', name))) {
+        e.preventDefault();
+        return;
+      }
+      inpRemoveName.value = name;
+    });
+  }
+</script>
 {% endblock %}

@@ -17,8 +17,21 @@
   {% endif %}
   <div class="row">
     <label for="inp-model">{{ t('job.new.model') }}</label>
-    <input id="inp-model" name="model" list="model-suggestions" placeholder="{{ t('job.new.model_ph') }}">
-    <datalist id="model-suggestions"></datalist>
+    <div class="field-stack">
+      <div class="model-picker">
+        <select id="inp-model" name="model" data-engine-url="{{ url_for('api_provider_models') }}">
+          <option value="">{{ t('job.new.model_auto') }}</option>
+        </select>
+        <input id="inp-model-custom" name="model" type="text" hidden disabled
+               placeholder="{{ t('job.new.model_custom_ph') }}">
+        <button type="button" id="btn-model-refresh" class="btn btn-ghost btn-sm"
+                title="{{ t('job.new.model_refresh') }}">{{ icon('refresh') }}</button>
+      </div>
+      <div class="model-picker-controls">
+        <button type="button" id="btn-model-custom" class="btn btn-ghost btn-sm">{{ t('job.new.model_custom_link') }}</button>
+        <span id="model-status" class="muted small"></span>
+      </div>
+    </div>
   </div>
 
   <div class="row">
@@ -80,31 +93,120 @@
 
 {% block scripts %}
 <script>
-  // Model suggestions per engine, injected as JSON from the server (i18n-safe).
+  // Static fallback per engine (config `models:`), used when the live fetch
+  // from the provider fails or the provider is offline.
   var MODEL_SUGGESTIONS = {{ model_suggestions | tojson }};
   var inpEngine = document.getElementById('inp-engine');
   var inpModel = document.getElementById('inp-model');
-  var dl = document.getElementById('model-suggestions');
+  var inpModelCustom = document.getElementById('inp-model-custom');
+  var btnRefresh = document.getElementById('btn-model-refresh');
+  var btnCustom = document.getElementById('btn-model-custom');
+  var statusEl = document.getElementById('model-status');
+  var currentEngine = '';
+  var I18N = {
+    loading: {{ t('job.new.model_loading')|tojson }},
+    live: {{ t('job.new.model_live')|tojson }},
+    config: {{ t('job.new.model_config')|tojson }},
+    fail: {{ t('job.new.model_fail')|tojson }},
+    none: {{ t('job.new.model_none')|tojson }},
+    custom: {{ t('job.new.model_custom_link')|tojson }},
+    back: {{ t('job.new.model_custom_back')|tojson }}
+  };
 
-  function refreshModelList() {
-    if (!inpEngine || !dl) return;
-    var engine = inpEngine.value;
-    var models = (MODEL_SUGGESTIONS && MODEL_SUGGESTIONS[engine]) || [];
-    dl.innerHTML = '';
-    models.forEach(function (m) {
-      var opt = document.createElement('option');
-      opt.value = m;
-      dl.appendChild(opt);
-    });
-    // Keep the currently typed model unless it's now unsupported.
-    if (inpModel.value && models.indexOf(inpModel.value) === -1) {
-      // leave the value — it may be a valid model not listed yet.
+  function setStatus(msg) {
+    if (statusEl) { statusEl.textContent = msg || ''; }
+  }
+
+  // Toggle between the <select> (name="model") and the custom text input
+  // (also name="model"). Only one is ever enabled, so the form submits the
+  // value of whichever mode is active.
+  function useCustom(on) {
+    if (!inpModel || !inpModelCustom || !btnCustom) return;
+    if (on) {
+      inpModel.disabled = true;
+      inpModel.hidden = true;
+      inpModelCustom.hidden = false;
+      inpModelCustom.disabled = false;
+      inpModelCustom.focus();
+      btnCustom.textContent = I18N.back;
+    } else {
+      inpModel.disabled = false;
+      inpModel.hidden = false;
+      inpModelCustom.hidden = true;
+      inpModelCustom.disabled = true;
+      inpModelCustom.value = '';
+      btnCustom.textContent = I18N.custom;
     }
   }
 
-  if (inpEngine) {
-    inpEngine.addEventListener('change', refreshModelList);
-    refreshModelList();
+  function fallbackModels(engine) {
+    return (MODEL_SUGGESTIONS && MODEL_SUGGESTIONS[engine]) || [];
   }
+
+  function fillModels(models, source, statusOverride) {
+    if (!inpModel) return;
+    var cur = inpModel.value;
+    while (inpModel.options.length > 1) inpModel.remove(1);
+    models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      inpModel.appendChild(opt);
+    });
+    // Keep the previously chosen model if it is still offered.
+    if (cur) {
+      var found = Array.prototype.some.call(inpModel.options, function (o) { return o.value === cur; });
+      inpModel.value = found ? cur : '';
+    }
+    var msg = statusOverride || '';
+    if (!msg) {
+      if (source === 'live' && models.length) msg = I18N.live.replace('{n}', models.length);
+      else if (models.length) msg = I18N.config;
+      else msg = I18N.none;
+    }
+    setStatus(msg);
+  }
+
+  function loadModels(engine) {
+    if (!inpModel) return;
+    currentEngine = engine;
+    var url = inpModel.getAttribute('data-engine-url');
+    var fb = fallbackModels(engine);
+    if (!url) { fillModels(fb, 'config'); return; }
+    setStatus(I18N.loading);
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 6000);
+    var sep = url.indexOf('?') === -1 ? '?' : '&';
+    fetch(url + sep + 'engine=' + encodeURIComponent(engine), { signal: ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        clearTimeout(timer);
+        if (currentEngine !== engine) return;
+        var models = (data && data.models) || [];
+        var source = (data && data.source) === 'live' ? 'live' : 'config';
+        if (!models.length) fillModels(fb, 'config', I18N.none);
+        else fillModels(models, source);
+      })
+      .catch(function () {
+        clearTimeout(timer);
+        if (currentEngine !== engine) return;
+        fillModels(fb, 'config', I18N.fail);
+      });
+  }
+
+  if (inpEngine) {
+    inpEngine.addEventListener('change', function () { loadModels(inpEngine.value); });
+  }
+  if (btnRefresh) {
+    btnRefresh.addEventListener('click', function () { loadModels(inpEngine ? inpEngine.value : ''); });
+  }
+  if (btnCustom) {
+    btnCustom.addEventListener('click', function () { useCustom(inpModel ? !inpModel.disabled : false); });
+  }
+  if (inpModel) {
+    inpModel.addEventListener('change', function () { if (inpModel.value) useCustom(false); });
+  }
+
+  loadModels(inpEngine ? inpEngine.value : '');
 </script>
 {% endblock %}

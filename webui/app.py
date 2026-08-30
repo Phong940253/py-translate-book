@@ -8,6 +8,7 @@ import copy
 import io
 import json
 import os
+import re
 import sys
 import time
 
@@ -28,6 +29,7 @@ from flask import (
 )
 
 import webui.core_runner as core_runner
+import webui.config_schema as config_schema
 from webui.jobs import JobRegistry
 from webui.config_store import load_config, mask_config, save_config_text, save_config_dict
 from webui.books import (
@@ -42,13 +44,36 @@ from translator.job import (
     list_supported_engines,
     list_engine_models,
 )
+from translator.model_lister import fetch_models
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 
+# Sections users cannot overwrite with the "add provider" form (built-in
+# engines + non-engine config groups).
+RESERVED_CONFIG_SECTIONS = {
+    "openai", "gemini", "webai",
+    "translation", "illustration", "consistency", "discord",
+}
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 registry = JobRegistry()
+
+
+@app.after_request
+def _no_cache(resp):
+    """Never let the browser serve HTML pages or JSON API responses from cache.
+
+    Without an explicit policy the browser may heuristic-cache a page and serve
+    a stale copy on F5 (soft reload); navigating to another tab then back
+    triggers a fresh navigation and re-reads the server, which is exactly the
+    "stale on F5" symptom. Static assets are left alone (they may be cached).
+    """
+    if resp.mimetype in ("text/html", "application/json"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.context_processor
@@ -441,15 +466,134 @@ def keys_view():
             model_val = (p.get(f"model_{name}") or "").strip()
             if model_val:
                 sec["model"] = model_val
+            # Model suggestions list (1 line / model). A blank textarea keeps
+            # the existing list; ticking "clear" wipes it explicitly.
+            models_raw = p.get(f"models_{name}")
+            if p.get(f"clear_models_{name}"):
+                sec["models"] = []
+            elif models_raw is not None and models_raw.strip():
+                sec["models"] = [
+                    ln.strip() for ln in models_raw.splitlines() if ln.strip()
+                ]
             new_cfg[name] = sec
         save_config_dict(new_cfg)
         return redirect(url_for("keys_view", saved=1))
 
-    providers = [_engine_info(cfg, e) for e in engines]
+    providers = []
+    for e in engines:
+        info = _engine_info(cfg, e)
+        sec = cfg.get(e) if isinstance(cfg, dict) else None
+        sec = sec if isinstance(sec, dict) else {}
+        raw_models = sec.get("models")
+        info["models_text"] = (
+            "\n".join(str(m) for m in raw_models)
+            if isinstance(raw_models, list)
+            else ""
+        )
+        info["has_models"] = isinstance(raw_models, list) and bool(raw_models)
+        info["removable"] = info["type"] == "openai_compatible"
+        providers.append(info)
     return render_template(
         "keys.html",
         providers=providers,
         model_suggestions=_model_suggestions(cfg),
+        saved=bool(request.args.get("saved")),
+        add_error=request.args.get("add_error"),
+    )
+
+
+@app.route("/config/keys/add-provider", methods=["POST"])
+def add_provider():
+    """Create a new ``type: openai_compatible`` provider section."""
+    loc = i18n.resolve_locale(request)
+    name = (request.form.get("name") or "").strip()
+    base_url = (request.form.get("base_url") or "").strip()
+    api_key = (request.form.get("api_key") or "").strip()
+    model = (request.form.get("model") or "").strip()
+    cfg = load_config()
+
+    def local(key: str, **fmt) -> str:
+        msg = i18n.t(loc, key)
+        for k, v in fmt.items():
+            msg = msg.replace("{" + k + "}", str(v))
+        return msg
+
+    error = None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        error = local("keys.add_error_name")
+    elif name in RESERVED_CONFIG_SECTIONS:
+        error = local("keys.add_error_reserved", name=name)
+    elif name in cfg:
+        error = local("keys.add_error_exists", name=name)
+    elif not base_url:
+        error = local("keys.add_error_url")
+    if error:
+        return redirect(url_for("keys_view", add_error=error))
+
+    new_sec = {
+        "type": "openai_compatible",
+        "base_url": base_url,
+        "timeout_seconds": 240,
+    }
+    if api_key:
+        new_sec["api_key"] = api_key
+    if model:
+        new_sec["model"] = model
+    cfg[name] = new_sec
+    save_config_dict(cfg)
+    return redirect(url_for("keys_view", saved=1))
+
+
+@app.route("/config/keys/remove-provider", methods=["POST"])
+def remove_provider():
+    """Remove a user-created OpenAI-compatible provider (never built-ins)."""
+    name = (request.form.get("name") or "").strip()
+    cfg = load_config()
+    sec = cfg.get(name)
+    if name in RESERVED_CONFIG_SECTIONS or not (
+        isinstance(sec, dict) and sec.get("type") == "openai_compatible"
+    ):
+        return "cannot remove built-in or unknown provider", 400
+    cfg.pop(name, None)
+    save_config_dict(cfg)
+    return redirect(url_for("keys_view", saved=1))
+
+
+@app.route("/api/provider-models")
+def api_provider_models():
+    """Live model list for one provider (used by the job form dropdown and
+    the API Keys page fetch button). Never raises: unknown engine -> 400."""
+    engine = request.args.get("engine", "")
+    config = load_config()
+    if engine not in list_supported_engines(config):
+        return jsonify({"error": "unknown engine"}), 400
+    return jsonify(fetch_models(config, engine))
+
+
+@app.route("/config/settings", methods=["GET", "POST"])
+def settings_view():
+    """Form-based (GUI) config editor for the non-secret settings. API keys
+    stay on the API Keys page — the schema has no api_key fields."""
+    loc = i18n.resolve_locale(request)
+    if request.method == "POST":
+        cfg = load_config()
+        new_cfg, errors = config_schema.apply_form(
+            copy.deepcopy(cfg), request.form, loc
+        )
+        if errors:
+            return render_template(
+                "settings.html",
+                groups=config_schema.collect_groups(new_cfg),
+                errors=errors,
+                saved=False,
+            )
+        save_config_dict(new_cfg)
+        return redirect(url_for("settings_view", saved=1))
+    cfg = load_config()
+    return render_template(
+        "settings.html",
+        groups=config_schema.collect_groups(cfg),
+        errors=None,
         saved=bool(request.args.get("saved")),
     )
 

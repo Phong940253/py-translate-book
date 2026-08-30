@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -158,9 +159,29 @@ class TestWebUI(unittest.TestCase):
         dn_mod.DiscordNotifier.send_translation_completed = self._orig_discord
 
     def test_pages_load(self):
-        for path in ("/", "/jobs/new", "/config", "/books", "/illustrations"):
+        for path in ("/", "/jobs/new", "/config", "/config/settings", "/books", "/illustrations"):
             r = self.client.get(path)
             self.assertEqual(r.status_code, 200, path)
+
+    def test_html_and_api_pages_are_never_cached(self):
+        """F5 (soft reload) must always re-read data from the server, so every
+        HTML page and JSON API response carries Cache-Control: no-store."""
+        for path in ("/config/settings", "/jobs/new", "/config/keys"):
+            r = self.client.get(path)
+            self.assertEqual(r.status_code, 200, path)
+            self.assertEqual(
+                r.headers.get("Cache-Control"),
+                "no-store",
+                f"{path} must be marked no-store",
+            )
+        with mock.patch.object(
+            webui_app,
+            "fetch_models",
+            return_value={"engine": "openai", "models": [], "source": "config", "error": "offline test"},
+        ):
+            r = self.client.get("/api/provider-models?engine=openai")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store")
 
     def test_book_cover_route(self):
         # Cover bytes are served for an EPUB under PROJECT_ROOT; a path outside
@@ -1086,18 +1107,291 @@ class TestWebUI(unittest.TestCase):
         cfg = cs.load_config(tmp_cfg)
         self.assertEqual(cfg["mistral"]["api_key"], "mi-new-key")
 
-    def test_job_new_shows_model_datalist_and_missing_key_hint(self):
-        """job_new page embeds model suggestions per engine and flags engines
-        that are missing a required key."""
+    def test_job_new_shows_model_dropdown_and_missing_key_hint(self):
+        """job_new page renders a live model <select> (with config fallback
+        embedded for the JS), a custom-model input and flags engines that are
+        missing a required key."""
         r = self.client.get("/jobs/new")
         self.assertEqual(r.status_code, 200)
         page = r.get_data(as_text=True)
-        # datalist id + the Model field exist
-        self.assertIn('id="model-suggestions"', page)
+        # Real dropdown + custom model input + refresh button + fetch endpoint.
+        self.assertIn('<select id="inp-model"', page)
         self.assertIn('name="model"', page)
+        self.assertIn("data-engine-url", page)
+        self.assertIn("/api/provider-models", page)
+        self.assertIn('id="inp-model-custom"', page)
+        self.assertIn('id="btn-model-refresh"', page)
+        # Static fallback per engine is embedded for the JS.
+        self.assertIn("MODEL_SUGGESTIONS", page)
         # Missing-key engines are listed (deepseek/openrouter have no key in the
         # real config; groq/openai do).
         self.assertIn("deepseek", page)
+
+    def test_provider_models_api(self):
+        """GET /api/provider-models?engine=... proxies fetch_models; unknown
+        engines get a 400."""
+        with mock.patch.object(
+            webui_app,
+            "fetch_models",
+            return_value={"engine": "groq", "models": ["a", "b"], "source": "live", "error": None},
+        ) as fake:
+            r = self.client.get("/api/provider-models?engine=groq")
+            self.assertEqual(fake.call_count, 1)
+        self.assertEqual(r.status_code, 200)
+        payload = r.get_json()
+        self.assertEqual(payload["models"], ["a", "b"])
+        self.assertEqual(payload["source"], "live")
+
+        r2 = self.client.get("/api/provider-models?engine=nope")
+        self.assertEqual(r2.status_code, 400)
+        self.assertIn("error", r2.get_json())
+
+    def test_keys_models_textarea_flow(self):
+        """API Keys: the models textarea saves into config `models:`, a blank
+        textarea keeps the existing list, and the clear checkbox wipes it."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old", "models": ["gpt-5.4-mini"]},
+                    "gemini": {"api_key": "ai-old"},
+                    "webai": {"base_url": "http://localhost:6969"},
+                },
+                f,
+                allow_unicode=True,
+            )
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        # The page renders a textarea per provider with the current models.
+        page = self.client.get("/config/keys").get_data(as_text=True)
+        self.assertIn("name=\"models_openai\"", page)
+        self.assertIn("gpt-5.4-mini", page)
+        self.assertIn("data-fetch-models=\"openai\"", page)
+
+        # Non-blank textarea -> replaces the list.
+        rv = self.client.post(
+            "/config/keys", data={"models_openai": "gpt-5.5\ngpt-5.4-mini"}
+        )
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["openai"]["models"], ["gpt-5.5", "gpt-5.4-mini"])
+
+        # Blank + no clear -> keeps existing.
+        self.client.post("/config/keys", data={"models_openai": ""})
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["openai"]["models"], ["gpt-5.5", "gpt-5.4-mini"])
+
+        # Clear checkbox -> wipes the list.
+        self.client.post("/config/keys", data={"models_openai": "", "clear_models_openai": "1"})
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["openai"]["models"], [])
+
+    def test_add_provider_route(self):
+        """POST /config/keys/add-provider creates an openai_compatible section
+        and rejects reserved / duplicate / malformed names."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old"},
+                    "gemini": {"api_key": "ai-old"},
+                    "webai": {"base_url": "http://localhost:6969"},
+                },
+                f,
+                allow_unicode=True,
+            )
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        rv = self.client.post(
+            "/config/keys/add-provider",
+            data={
+                "name": "mistral",
+                "base_url": "https://api.mistral.ai/v1",
+                "api_key": "mi-1",
+                "model": "mistral-large",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["mistral"]["type"], "openai_compatible")
+        self.assertEqual(cfg["mistral"]["base_url"], "https://api.mistral.ai/v1")
+        self.assertEqual(cfg["mistral"]["api_key"], "mi-1")
+        self.assertEqual(cfg["mistral"]["model"], "mistral-large")
+
+        # Reserved section name rejected (openai stays untouched).
+        rv = self.client.post(
+            "/config/keys/add-provider", data={"name": "openai", "base_url": "http://x"}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("add_error", rv.headers["Location"])
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["openai"]["api_key"], "sk-old")
+
+        # Duplicate name rejected (config unchanged).
+        rv = self.client.post(
+            "/config/keys/add-provider",
+            data={"name": "mistral", "base_url": "http://other.example/v1"},
+        )
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["mistral"]["base_url"], "https://api.mistral.ai/v1")
+
+        # Invalid name and missing base_url rejected.
+        rv = self.client.post(
+            "/config/keys/add-provider", data={"name": "bad name!", "base_url": "http://x"}
+        )
+        self.assertEqual(rv.status_code, 302)
+        rv = self.client.post(
+            "/config/keys/add-provider", data={"name": "nourl", "base_url": ""}
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertNotIn("nourl", cs.load_config(tmp_cfg))
+
+    def test_remove_provider_route(self):
+        """POST /config/keys/remove-provider removes only user-created
+        openai_compatible sections."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old"},
+                    "gemini": {"api_key": "ai-old"},
+                    "webai": {"base_url": "http://localhost:6969"},
+                    "mistral": {
+                        "type": "openai_compatible",
+                        "base_url": "https://api.mistral.ai/v1",
+                        "api_key": "",
+                    },
+                },
+                f,
+                allow_unicode=True,
+            )
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        rv = self.client.post("/config/keys/remove-provider", data={"name": "mistral"})
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertNotIn("mistral", cfg)
+        self.assertIn("openai", cfg)
+
+        # Built-ins and unknown names are protected.
+        rv = self.client.post("/config/keys/remove-provider", data={"name": "openai"})
+        self.assertEqual(rv.status_code, 400)
+        rv = self.client.post("/config/keys/remove-provider", data={"name": "ghost"})
+        self.assertEqual(rv.status_code, 400)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertIn("openai", cfg)
+
+    def test_settings_page_get(self):
+        """GET /config/settings renders the GUI form grouped by section and
+        never exposes api_key inputs."""
+        r = self.client.get("/config/settings")
+        self.assertEqual(r.status_code, 200)
+        page = r.get_data(as_text=True)
+        self.assertIn('name="translation.fallback_max_chunk_size"', page)
+        self.assertIn('name="discord.enabled"', page)
+        self.assertIn('name="translation.illustration.style_prompt"', page)
+        # API keys are deliberately not editable from this page.
+        self.assertNotIn('name="openai.api_key"', page)
+        self.assertNotIn('name="gemini.api_key"', page)
+
+    def test_settings_page_post(self):
+        """POST /config/settings writes typed values, applies checkbox
+        semantics, and preserves unrelated sections as-is."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {
+                    "openai": {"api_key": "sk-old"},
+                    "translation": {"fallback_max_chunk_size": 6000},
+                },
+                f,
+                allow_unicode=True,
+            )
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        rv = self.client.post(
+            "/config/settings",
+            data={
+                "translation.fallback_max_chunk_size": "8000",
+                "translation.html_structure_similarity_threshold": "0.8",
+                "translation.custom_prompt": "Dịch chuẩn",
+                "translation.illustration.enabled": "1",
+                "translation.illustration.width": "1024",
+                "translation.consistency.enabled": "",  # unchecked -> False
+                "discord.enabled": "1",
+                "discord.webhook_url": "https://discord.com/api/webhooks/1/x",
+                "discord.mention_user_id": "123",
+            },
+        )
+        self.assertEqual(rv.status_code, 302)
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["translation"]["fallback_max_chunk_size"], 8000)
+        self.assertAlmostEqual(cfg["translation"]["html_structure_similarity_threshold"], 0.8)
+        self.assertEqual(cfg["translation"]["custom_prompt"], "Dịch chuẩn")
+        self.assertIs(cfg["translation"]["illustration"]["enabled"], True)
+        self.assertEqual(cfg["translation"]["illustration"]["width"], 1024)
+        self.assertIs(cfg["translation"]["consistency"]["enabled"], False)
+        self.assertIs(cfg["discord"]["enabled"], True)
+        self.assertEqual(cfg["discord"]["webhook_url"], "https://discord.com/api/webhooks/1/x")
+        self.assertEqual(cfg["discord"]["mention_user_id"], "123")
+        # Untouched sections/keys are preserved.
+        self.assertEqual(cfg["openai"]["api_key"], "sk-old")
+
+    def test_settings_page_post_invalid_number(self):
+        """A non-numeric value re-renders the page with an error and does not
+        save anything."""
+        import yaml
+
+        from webui import config_store as cs
+
+        tmp_cfg = os.path.join(self.tmp, "config.yaml")
+        with open(tmp_cfg, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {"translation": {"max_tries": 1}},
+                f,
+                allow_unicode=True,
+            )
+        orig_path = cs.DEFAULT_CONFIG_PATH
+        cs.DEFAULT_CONFIG_PATH = tmp_cfg
+        self.addCleanup(setattr, cs, "DEFAULT_CONFIG_PATH", orig_path)
+
+        rv = self.client.post(
+            "/config/settings",
+            data={"translation.fallback_max_chunk_size": "abc"},
+        )
+        self.assertEqual(rv.status_code, 200)
+        page = rv.get_data(as_text=True)
+        self.assertIn("settings.invalid_body", page)  # localized body rendered
+        self.assertIn("fallback_max_chunk_size", page)
+        # Nothing was written (max_tries untouched, no new key).
+        cfg = cs.load_config(tmp_cfg)
+        self.assertEqual(cfg["translation"]["max_tries"], 1)
+        self.assertNotIn("fallback_max_chunk_size", cfg["translation"])
 
 
 if __name__ == "__main__":

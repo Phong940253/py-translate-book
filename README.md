@@ -18,9 +18,17 @@ editing `config.yaml`, and browsing illustrations.
   **OpenAI-compatible provider** (Groq, DeepSeek, OpenRouter, Ollama, …) added
   purely via config (`type: openai_compatible`).
 - **Per-job model override**: optional `Model` field on the create-job form
-  (blank = engine default), model suggestions from config `models:`.
+  (blank = engine default). The dropdown **fetches the live model list from the
+  provider** (with a "custom model" input and a refresh button); if the
+  provider is offline it falls back to the static config `models:` list.
 - **API Keys page** (`/config/keys`): paste/update each provider's key through
-  a form, with base URL + model — no manual `config.yaml` editing.
+  a form, with base URL + model — no manual `config.yaml` editing. It also
+  manages the `models:` suggestion list (textarea, one per line) with a
+  **"Fetch from provider"** button, and lets you **add / remove**
+  OpenAI-compatible providers from the UI.
+- **Settings page** (`/config/settings`): form-based (GUI) editor for the
+  translation / illustration / consistency / Discord settings — API keys stay
+  on the API Keys page.
 - **Checkpoint / resume**: an interrupted job can continue from the last completed chapter.
 - **Consistency**: extracts translation rules (honorifics, character names) to stay
   consistent across chapters.
@@ -171,10 +179,11 @@ Open **http://127.0.0.1:5000**.
 | Page | Purpose |
 |------|---------|
 | `/` | Dashboard: recent jobs + EPUB library |
-| `/jobs/new` | Create a job (engine + optional model, input/output, chapter range, languages, …) |
+| `/jobs/new` | Create a job (engine + optional model, input/output, chapter range, languages, …). The Model dropdown lists the provider's live models, with a **custom-model input** and a refresh button; fallback = config `models:`. |
 | `/jobs/<id>` | Realtime log (SSE) + progress bar + Stop button |
 | `/books` | List EPUBs, chapter counts, checkpoint status, chapter preview |
-| `/config/keys` | **API Keys**: form to add/update each provider's key + base URL + model |
+| `/config/keys` | **API Keys**: keys + base URL + default model; `models:` list (one per line) with **Fetch from provider**; **add/remove** OpenAI-compatible providers |
+| `/config/settings` | **Settings (GUI)**: translation / illustration / consistency / Discord as a form (advanced YAML stays on `/config`) |
 | `/config` | Advanced: edit raw `config.yaml` (keys masked, `.bak` backup), test Discord |
 | `/illustrations` | Gallery of generated illustrations |
 
@@ -193,6 +202,7 @@ translator/
                          (checkpoint/resume, illustration, discord, stats, progress_cb)
   epub_utils.py          read/write EPUB, iterate chapters, inject manifest
   html_utils.py          split/assemble HTML, normalize <br>
+  model_lister.py        live model fetch (OpenAI-compatible / Gemini / Ollama / WebAI)
   illustration.py        generate illustrations
   discord_notifier.py    send Discord webhook
   engines/                TranslationEngine: openai / gemini / webai / compatible (+ base)
@@ -201,8 +211,9 @@ webui/
   jobs.py                JobRegistry + Job (state, log, progress; persisted in webui/jobs/)
   core_runner.py         runs run_translation in a thread, forwards log/events -> SSE
   config_store.py        safe read/write of config.yaml (mask keys + backup)
+  config_schema.py       metadata for the /config/settings GUI form (non-secret fields)
   books.py               list EPUBs, preview chapters
-  templates/  static/    UI (incl. keys.html — API Keys form)
+  templates/  static/    UI (incl. keys.html — API Keys form, settings.html — GUI editor)
 tests/                   offline unittest (no AI calls)
 requirements.txt         dependencies
 config.example.yaml      config template

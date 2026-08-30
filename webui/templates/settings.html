@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ t('settings.title') }}{% endblock %}
+{% block content %}
+<h1 class="page-title">{{ icon('gear') }} {{ t('settings.heading') }}</h1>
+
+{% if saved %}
+<div class="card ok-msg">{{ icon('check') }} {{ t('settings.saved') }}</div>
+{% endif %}
+
+{% if errors %}
+<div class="card error-msg">
+  <strong>{{ t('settings.invalid_body') }}</strong>
+  <ul>
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<form method="post" class="form">
+  {% for group in groups %}
+  <div class="card">
+    <h2 class="card-title">{{ t(group.label) }}</h2>
+    {% for f in group.fields %}
+    <div class="row">
+      <label for="f-{{ f.path|replace('.', '-') }}">{{ t(f.label) }}</label>
+      <div class="field-stack">
+        {% if f.kind == 'bool' %}
+          <input type="checkbox" id="f-{{ f.path|replace('.', '-') }}" name="{{ f.path }}"
+                 value="1" {{ 'checked' if f.value }}>
+        {% elif f.kind == 'text' %}
+          <textarea id="f-{{ f.path|replace('.', '-') }}" name="{{ f.path }}"
+                    rows="{{ f.extra.get('rows', 3) }}" spellcheck="false">{{ f.value }}</textarea>
+        {% elif f.kind == 'int' %}
+          <input type="number" id="f-{{ f.path|replace('.', '-') }}" name="{{ f.path }}"
+                 value="{{ f.value }}" step="1"
+                 min="{{ f.extra.get('min', '') }}" max="{{ f.extra.get('max', '') }}">
+        {% elif f.kind == 'float' %}
+          <input type="number" id="f-{{ f.path|replace('.', '-') }}" name="{{ f.path }}"
+                 value="{{ f.value }}" step="{{ f.extra.get('step', 'any') }}"
+                 min="{{ f.extra.get('min', '') }}" max="{{ f.extra.get('max', '') }}">
+        {% else %}
+          <input type="text" id="f-{{ f.path|replace('.', '-') }}" name="{{ f.path }}" value="{{ f.value }}">
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">{{ icon('save') }} {{ t('settings.save') }}</button>
+    <a class="btn btn-ghost" href="{{ url_for('config_view') }}">{{ t('settings.advanced_yaml') }}</a>
+    <a class="btn btn-ghost" href="{{ url_for('keys_view') }}">{{ t('keys.advanced') }}</a>
+  </div>
+</form>
+{% endblock %}

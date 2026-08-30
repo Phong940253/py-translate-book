@@ -232,7 +232,7 @@ html[data-theme="light"] #theme-toggle .ic-sun  { display: none; }
   gap: var(--sp-3); margin-bottom: var(--sp-3);
 }
 .form .row > label { color: var(--text-2); font-weight: 550; }
-.form .row input, .form .row select { width: 100%; }
+.form .row input, .form .row select, .form .row textarea { width: 100%; }
 .form .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); margin-bottom: var(--sp-3); }
 .form .row2 > div { display: flex; flex-direction: column; gap: var(--sp-1); }
 .form .row2 label { color: var(--text-2); font-weight: 550; font-size: var(--text-sm); }
@@ -255,6 +255,21 @@ html[data-theme="light"] #theme-toggle .ic-sun  { display: none; }
 .field-stack { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .field-stack input { width: 100%; }
 .field-stack small { font-size: var(--text-xs); }
+
+/* Model picker (job form): live dropdown + refresh + optional custom input */
+.model-picker { display: flex; gap: 8px; align-items: flex-start; }
+.model-picker select { flex: 1 1 auto; min-width: 0; }
+.model-picker input[type="text"] { flex: 1 1 auto; }
+.model-picker-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* API Keys — models textarea (details/summary) */
+.models-box { margin-top: var(--sp-3); }
+.models-box summary { cursor: pointer; color: var(--text-2); font-size: var(--text-sm); }
+.models-box .models-box-body { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-2); }
+.models-box textarea { width: 100%; }
+.row-actions { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.row-actions .model-status { margin-left: auto; }
+.clear-models { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
 input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   font-family: inherit; font-size: var(--text-base); color: var(--text);
