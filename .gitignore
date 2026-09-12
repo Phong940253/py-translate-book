@@ -43,6 +43,7 @@ config.yml
 output/
 translated/
 cache/
+data/
 
 # =====================
 # Editor / OS

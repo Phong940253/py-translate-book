@@ -5,6 +5,7 @@
 # --- Core: EPUB read/write + HTML parsing ---
 EbookLib>=0.18
 beautifulsoup4>=4.12
+requests>=2.0
 
 # --- Translation engines ---
 openai>=1.40
