@@ -126,9 +126,10 @@ def fetch_chapter(session, url, timeout=20):
         if text.strip().lower() in _JUNK_PARAS:
             continue
         paras.append(text)
-    # ixdzs repeats the chapter title as the first <p> on most pages
-    if paras and page_title and _norm(paras[0]) == _norm(page_title):
-        paras = paras[1:]
+    # ixdzs repeats the chapter title as leading <p> (sometimes twice)
+    if page_title:
+        while paras and _norm(paras[0]) == _norm(page_title):
+            paras = paras[1:]
     if not paras:
         raise RuntimeError(f"empty chapter body: {url}")
     return page_title, paras

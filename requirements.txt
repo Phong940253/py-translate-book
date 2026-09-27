@@ -7,6 +7,10 @@ EbookLib>=0.18
 beautifulsoup4>=4.12
 requests>=2.0
 
+# --- Crawler source "shu69" (69shuba is behind Cloudflare) ---
+# Drives a real Chrome window; pulls in selenium. ixdzs source needs neither.
+undetected-chromedriver>=3.5
+
 # --- Translation engines ---
 openai>=1.40
 google-generativeai>=0.8,<0.9
