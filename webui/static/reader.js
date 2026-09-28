@@ -2195,6 +2195,10 @@
 
   function playBlob(entry, token) {
     if (token !== speak.token) return;
+    // pause raced the synthesis: never start while paused — speakResume()
+    // re-runs speakStep(), which finds this entry in the cache and plays it
+    // exactly once (a play here + a resume would replay the paragraph).
+    if (!speak.on || speak.paused) return;
     var url = URL.createObjectURL(entry.blob);
     if (speak.audio) {
       speak.audio.pause();
@@ -2207,6 +2211,9 @@
     audio.playbackRate = ttsCfg.rate;
     audio.ontimeupdate = onSpeakTime;
     audio.onended = function () {
+      if (audio.__rdEnded) return;          // 'ended' must advance once only
+      audio.__rdEnded = 1;
+      if (speak.audio !== audio) return;    // stale object: a newer blob owns the queue
       try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
       speakNext();
     };
@@ -2248,7 +2255,7 @@
 
     var idx = speak.i;
     audioFor(state.ch, idx).then(function (entry) {
-      if (token !== speak.token) return;
+      if (token !== speak.token || !speak.on || speak.paused) return;
       if (!entry || !entry.blob) { speak.i++; speakStep(); return; }
       ttsStatus(i18n('read.tts_playing'));
       playBlob(entry, token);
@@ -2297,12 +2304,16 @@
     var play = el('rd-tts-play'), pause = el('rd-tts-pause');
     if (play) play.hidden = true;
     if (pause) pause.hidden = false;
-    if (speak.audio && speak.audio.paused && speak.audio.src) {
+    var a = speak.audio;
+    if (a && a.src && !a.ended) {        // this item's audio, mid-play
       ttsStatus(i18n('read.tts_playing'));
-      speak.audio.play().catch(function () { speakStep(); });
-    } else {
-      speakStep();
+      if (a.paused) a.play().catch(function () { speakStep(); });
+      return;
     }
+    // no audio, or the PREVIOUS item's ended clip — replaying that object
+    // would speak the finished paragraph again; let speakStep() fetch the
+    // current item instead (cache/inflight: it plays exactly once).
+    speakStep();
   }
 
   function speakStop(updateNote) {

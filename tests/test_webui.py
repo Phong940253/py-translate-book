@@ -827,6 +827,30 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(" ".join(parts).replace(" .", "."), long_text)
         self.assertEqual(reader.split_for_tts("   "), [])
 
+    def test_split_for_tts_keeps_sentences_whole(self):
+        from webui import reader
+        # commas must NOT cut a sentence that fits — clause-level stubs
+        # ("chối phắt:") are what makes the model repeat phrases
+        text = "Nghe thấy câu này, Tào Sảng cười, chối phắt: “Làm sao có thể chứ?”"
+        self.assertEqual(reader.split_for_tts(text), [text])
+        # sub-min stubs merge into one piece instead of staying 1-2 words
+        self.assertEqual(reader.split_for_tts("Ừ. Đúng vậy. Không nói gì."),
+                         ["Ừ. Đúng vậy. Không nói gì."])
+        # a lone stub has nothing to borrow from — it stays as-is
+        self.assertEqual(reader.split_for_tts("Ừ."), ["Ừ."])
+
+    def test_split_for_tts_clauses_only_when_sentence_overflows(self):
+        from webui import reader
+        clause = "một hai ba bốn năm sáu bảy tám chín mười mười một"
+        text = ", ".join([clause] * 5) + "."
+        self.assertGreater(len(text), reader._CHUNK_CHARS)
+        parts = reader.split_for_tts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= reader._CHUNK_CHARS for p in parts))
+        # clause pieces keep their trailing comma, joined they rebuild the text
+        self.assertTrue(parts[0].endswith(","))
+        self.assertEqual(" ".join(parts), reader._collapse(text))
+
     def test_split_for_tts_seg_offsets_slice_the_collapsed_text(self):
         from webui import reader
         cases = [
