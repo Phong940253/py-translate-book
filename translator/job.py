@@ -262,6 +262,7 @@ def run_translation(
     progress_cb: Optional[Callable[[str, dict], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     sleep_pc_after_done: bool = False,
+    global_rules_path: Optional[str] = None,
 ) -> dict:
     """Run a full translation job. Returns the Translator stats dict.
 
@@ -396,6 +397,10 @@ def run_translation(
         model=model,
     )
 
+    # Determine global rules path: store next to the output EPUB
+    if not global_rules_path:
+        global_rules_path = os.path.splitext(output)[0] + ".rules.json"
+
     translator = Translator(
         engine_obj,
         split_tag=split_tag,
@@ -404,6 +409,7 @@ def run_translation(
         fallback_max_chunk_size=fallback_max_chunk_size,
         max_tries=max_tries,
         html_structure_min_similarity=html_structure_similarity_threshold,
+        global_rules_path=global_rules_path,
     )
 
     _base_cb = cb

@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
 from .logging_utils import log_text, log_consistency_event
+from .global_rules import GlobalRulesManager
 
 DEFAULT_MAX_TRIES = 30
 REQUEST_TIMEOUT = 2
@@ -20,6 +21,33 @@ FALLBACK_MAX_CHUNK_SIZE = 3500
 DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY = 0.90
 HTML_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>|<![^>]*>|<\?[^>]*\?>")
 DEFAULT_MANUAL_REVIEW_FILE = "manual_translation_queue.jsonl"
+
+# Guard against model outputs that echo the source instead of translating.
+# A verbatim (or near-verbatim) echo keeps every HTML tag intact, so the
+# structural guards above accept it -- these thresholds catch it instead.
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+# Only chunks with substantial source CJK are subject to the residue check...
+UNTRANSLATED_CJK_MIN_SOURCE_CHARS = 20
+# ...and a small residue is tolerated (proper nouns the model kept on purpose).
+UNTRANSLATED_CJK_MAX_REMAIN_CHARS = 10
+UNTRANSLATED_CJK_MAX_REMAIN_RATIO = 0.05
+# Language-agnostic echo check (also catches EN->VI echoes of English text).
+UNTRANSLATED_ECHO_MIN_VISIBLE_CHARS = 50
+UNTRANSLATED_ECHO_MAX_SIMILARITY = 0.97
+# Untranslated failures retry indefinitely (user choice: never accept an
+# echo into the output), but every Nth consecutive failure is recorded for
+# manual review so stuck chunks stay visible instead of burning silently.
+UNTRANSLATED_MANUAL_QUEUE_EVERY = 50
+
+
+class _UntranslatedOutput(ValueError):
+    """Model echoed the source instead of translating.
+
+    Unlike structural failures this error bypasses ``max_tries`` and retries
+    indefinitely (until success or an explicit stop), so an echo can never
+    slip into the output by exhausting the retry budget.
+    """
 
 # Tags whose boundaries are allowed to change between source and translated
 # output (paragraphs and page-anchor markers). Their presence/count is not
@@ -176,6 +204,7 @@ class Translator:
         fallback_max_chunk_size: int = FALLBACK_MAX_CHUNK_SIZE,
         max_tries: int | None = DEFAULT_MAX_TRIES,
         html_structure_min_similarity: float = DEFAULT_HTML_STRUCTURE_MIN_SIMILARITY,
+        global_rules_path: str | None = None,
     ):
         self.engine = engine
         self.split_tag = split_tag
@@ -214,6 +243,14 @@ class Translator:
             200, int(consistency_config.get("rules_max_chars", 1200))
         )
         self.cache_chapter_rules = bool(consistency_config.get("cache_chapter_rules", True))
+
+        # Global cross-chapter rules manager (persists character dictionary
+        # and addressing rules across the entire book).
+        self.global_rules: GlobalRulesManager | None = None
+        if global_rules_path:
+            self.global_rules = GlobalRulesManager(global_rules_path)
+            self.global_rules.load()
+
         self.stats = {
             "chapters_processed": 0,
             "chunks_total": 0,
@@ -268,7 +305,11 @@ class Translator:
         logging.info(f"Chapter split into {len(chunks)} chunks (before fallback split)")
         self.stats["chapters_processed"] += 1
         self.stats["chunks_total"] += len(chunks)
-        chapter_rules = self._analyze_chapter_consistency(content) if self.consistency_enabled else ""
+        chapter_rules = (
+            self._analyze_chapter_consistency(content, chapter_number)
+            if self.consistency_enabled
+            else ""
+        )
         if chapter_rules:
             log_consistency_event("CHAPTER_RULES_READY", f"{len(chapter_rules)} chars")
 
@@ -389,7 +430,7 @@ class Translator:
             self.stats["chunks_total"] += len(chunks)
 
             chapter_rules = (
-                self._analyze_chapter_consistency(content)
+                self._analyze_chapter_consistency(content, chapter_number)
                 if self.consistency_enabled
                 else ""
             )
@@ -567,6 +608,8 @@ class Translator:
 
         attempt = 1
         specific_http500_abort_count = 0
+        untranslated_streak = 0
+        last_untranslated = False
         result = None
         dt_ms = None
         last_error = None
@@ -574,11 +617,15 @@ class Translator:
             if should_stop and should_stop():
                 raise _TranslationStopped
             try:
-                text_to_translate = (
-                    prepared_input
-                    if attempt == 1
-                    else self._build_retry_input(prepared_input)
-                )
+                if attempt == 1:
+                    text_to_translate = prepared_input
+                else:
+                    text_to_translate = self._build_retry_input(
+                        prepared_input,
+                        reason="untranslated" if last_untranslated else "structure",
+                        to_lang=getattr(self.engine, "to_lang", "") or "",
+                    )
+                last_untranslated = False
                 if (
                     attempt == 1
                     and self.consistency_enabled
@@ -607,6 +654,10 @@ class Translator:
                     raise ValueError("Model output lost HTML tags")
                 if self._has_html_structure_mismatch(text, result):
                     raise ValueError("Model output changed HTML structure")
+                if self._has_untranslated_content(text, result):
+                    raise _UntranslatedOutput(
+                        "Model output left source text untranslated"
+                    )
 
                 log_text("AI_RESPONSE", result)
                 self.stats["chunks_translated"] += 1
@@ -628,6 +679,7 @@ class Translator:
                     f"Chunk failed (attempt {attempt}/{max_tries_label}): {e}"
                 )
                 last_error = str(e)
+                last_untranslated = isinstance(e, _UntranslatedOutput)
                 # Surface the failed attempt on the live monitor (so a structural
                 # mismatch like a dropped koboSpan id is visible before give-up).
                 self.stats["current_chunk"] = {
@@ -643,6 +695,38 @@ class Translator:
                 }
                 if progress_callback is not None:
                     progress_callback(chunk_index, total_chunks, chapter_number)
+
+                if last_untranslated:
+                    # An echo must never slip into the output by exhausting the
+                    # retry budget: keep retrying until it translates or the
+                    # user stops the job. Record a manual-review task every Nth
+                    # consecutive failure so stuck chunks stay visible instead
+                    # of burning API calls silently.
+                    untranslated_streak += 1
+                    if untranslated_streak % UNTRANSLATED_MANUAL_QUEUE_EVERY == 0:
+                        self._record_manual_translation_task(
+                            source_text=text,
+                            prepared_prompt=prepared_input,
+                            last_attempt_prompt=text_to_translate,
+                            error_message=(
+                                f"{last_error} "
+                                f"({untranslated_streak} consecutive untranslated attempts; still retrying)"
+                            ),
+                            attempt=attempt,
+                            chapter_number=chapter_number,
+                            chapter_file_name=chapter_file_name,
+                            chapter_title=chapter_title,
+                            chunk_index=chunk_index,
+                            total_chunks=total_chunks,
+                            chunk_path=chunk_path,
+                        )
+                        logging.warning(
+                            "Chunk still untranslated after %s attempts; "
+                            "queued for manual review, keep retrying",
+                            untranslated_streak,
+                        )
+                else:
+                    untranslated_streak = 0
 
                 if self._is_google_silent_abort_http500_error(e):
                     specific_http500_abort_count += 1
@@ -666,7 +750,11 @@ class Translator:
                         )
                         break
 
-                if self.max_tries is not None and attempt >= self.max_tries:
+                if (
+                    not last_untranslated
+                    and self.max_tries is not None
+                    and attempt >= self.max_tries
+                ):
                     break
 
                 if should_stop and should_stop():
@@ -747,7 +835,14 @@ class Translator:
         s["api_time_avg_ms"] = (s.get("api_time_total_ms", 0.0) / calls) if calls else 0.0
         return s
 
-    def _analyze_chapter_consistency(self, content: str) -> str:
+    def _analyze_chapter_consistency(
+        self, content: str, chapter_number: int | None = None
+    ) -> str:
+        """Analyze chapter for addressing rules and merge into global state.
+
+        Returns the merged global rules text (for prompt injection).
+        If global_rules is disabled, returns chapter-local rules only.
+        """
         if not self.consistency_enabled:
             return ""
 
@@ -760,9 +855,21 @@ class Translator:
             log_consistency_event("RULES_CACHE_HIT", chapter_hash[:12])
             return self._chapter_rules_cache[chapter_hash]
 
+        # Build context: include existing global rules so the LLM knows
+        # what has already been established for prior chapters.
+        existing_context = ""
+        if self.global_rules and self.global_rules.character_count > 0:
+            existing_context = (
+                "\n\nEXISTING GLOBAL RULES (from previous chapters — "
+                "keep these and only ADD new information):\n"
+                + self.global_rules.to_prompt_text()
+            )
+
         excerpt = content[: self.analysis_max_chars]
         try:
-            rules = self.engine.analyze_chapter_consistency(excerpt) or ""
+            rules = self.engine.analyze_chapter_consistency(
+                excerpt + existing_context
+            ) or ""
             rules = rules.strip()
             if len(rules) > self.rules_max_chars:
                 rules = rules[: self.rules_max_chars].rstrip()
@@ -770,6 +877,18 @@ class Translator:
                 log_text("CHAPTER_RULES", rules)
                 if self.cache_chapter_rules:
                     self._chapter_rules_cache[chapter_hash] = rules
+
+                # Merge into global rules (cross-chapter memory)
+                if self.global_rules:
+                    self.global_rules.merge_from_analysis(rules, chapter_number)
+                    self.global_rules.save()
+                    log_consistency_event(
+                        "GLOBAL_RULES_MERGED",
+                        f"chapter={chapter_number} chars={self.global_rules.character_count}",
+                    )
+                    # Return the accumulated global rules, not just this chapter's
+                    return self.global_rules.to_prompt_text()
+
             return rules
         except Exception as error:
             logging.warning(f"Chapter analysis failed, fallback to normal translation: {error}")
@@ -860,7 +979,20 @@ class Translator:
         return f"ctx::{digest}"
 
     @staticmethod
-    def _build_retry_input(text: str) -> str:
+    def _build_retry_input(text: str, reason: str = "structure", to_lang: str = "") -> str:
+        if reason == "untranslated":
+            lang = to_lang or "the target language"
+            retry_prefix = (
+                "Previous output REJECTED: it copied the source instead of translating. "
+                f"Translate EVERY visible sentence into {lang}. Do NOT repeat any source "
+                "sentence verbatim. The final output must be written entirely in "
+                f"{lang} with no sentences left in the source language "
+                "(when translating from Chinese: zero Chinese characters may remain). "
+                "Keep all HTML tags, attributes, attribute values, entities, URLs, and code-like tokens unchanged. "
+                "Output translated content only with original HTML preserved.\n\n"
+                "Input:\n"
+            )
+            return f"{retry_prefix}{text}"
         retry_prefix = (
             "Retry translation strictly. Translate ONLY visible text nodes. "
             "Keep all HTML tags, attributes, attribute values, entities, URLs, and code-like tokens unchanged. "
@@ -912,8 +1044,8 @@ class Translator:
         val = source_has_tag and not output_has_tag
         if val:
             logging.warning("HTML tag missing in output")
-            logging.warning("Source text with tags:\n%s", source_text)
-            logging.warning("Output text:\n%s", output_text)
+            logging.warning("Source text with tags:\n%.500s...", source_text)
+            logging.warning("Output text:\n%.500s...", output_text)
         return val
     
 
@@ -940,8 +1072,8 @@ class Translator:
                 sorted(_structural_tags(source_tags)),
                 sorted(_structural_tags(output_tags)),
             )
-            logging.warning("Source text with tags:\n%s", source_text)
-            logging.warning("Output text with tags:\n%s", output_text)
+            logging.warning("Source text with tags:\n%.500s...", source_text)
+            logging.warning("Output text with tags:\n%.500s...", output_text)
             return True
 
         # 2) Gross content loss: model returned almost nothing.
@@ -953,8 +1085,8 @@ class Translator:
                 source_text_len,
                 output_text_len,
             )
-            logging.warning("Source text with tags:\n%s", source_text)
-            logging.warning("Output text with tags:\n%s", output_text)
+            logging.warning("Source text with tags:\n%.500s...", source_text)
+            logging.warning("Output text with tags:\n%.500s...", output_text)
             return True
 
         # 3) Tag-sequence similarity ignoring paragraph boundaries.
@@ -971,8 +1103,8 @@ class Translator:
                 similarity,
                 self.html_structure_min_similarity,
             )
-            logging.warning("Source text with tags:\n%s", source_text)
-            logging.warning("Output text with tags:\n%s", output_text)
+            logging.warning("Source text with tags:\n%.500s...", source_text)
+            logging.warning("Output text with tags:\n%.500s...", output_text)
         else:
             logging.debug(
                 "HTML tag similarity accepted | similarity=%.4f | threshold=%.4f",
@@ -980,6 +1112,57 @@ class Translator:
                 self.html_structure_min_similarity,
             )
         return mismatch
+
+    @staticmethod
+    def _has_untranslated_content(source_text: str, output_text: str) -> bool:
+        """True when the model echoed the source instead of translating it.
+
+        Tags are stripped before comparison (attribute values legitimately stay
+        untouched), then two layers apply:
+
+        1. CJK residue: the source held substantial Chinese but the output
+           still carries more than a tolerated residue (proper nouns etc.).
+        2. Near-verbatim echo (language-agnostic): long visible texts that are
+           almost identical -- also catches e.g. EN->VI echoes of English.
+           Pure number/punctuation chunks are exempt (translating them
+           legitimately returns the same text).
+        """
+        if not source_text or not output_text:
+            return False
+        src_vis = HTML_TAG_PATTERN.sub("", source_text or "").strip()
+        out_vis = HTML_TAG_PATTERN.sub("", output_text or "").strip()
+        if not src_vis or not out_vis:
+            return False
+
+        src_cjk = len(_CJK_RE.findall(src_vis))
+        if src_cjk >= UNTRANSLATED_CJK_MIN_SOURCE_CHARS:
+            out_cjk = len(_CJK_RE.findall(out_vis))
+            if (
+                out_cjk > UNTRANSLATED_CJK_MAX_REMAIN_CHARS
+                and out_cjk > UNTRANSLATED_CJK_MAX_REMAIN_RATIO * src_cjk
+            ):
+                logging.warning(
+                    "Untranslated Chinese remains | source_cjk=%s | output_cjk=%s",
+                    src_cjk,
+                    out_cjk,
+                )
+                logging.warning("Source text with tags:\n%.500s...", source_text)
+                logging.warning("Output text:\n%.500s...", output_text)
+                return True
+
+        if len(src_vis) >= UNTRANSLATED_ECHO_MIN_VISIBLE_CHARS and (
+            _LETTER_RE.search(src_vis) or _CJK_RE.search(src_vis)
+        ):
+            similarity = SequenceMatcher(None, src_vis, out_vis).ratio()
+            if similarity >= UNTRANSLATED_ECHO_MAX_SIMILARITY:
+                logging.warning(
+                    "Output echoes source (untranslated) | similarity=%.4f",
+                    similarity,
+                )
+                logging.warning("Source text with tags:\n%.500s...", source_text)
+                logging.warning("Output text:\n%.500s...", output_text)
+                return True
+        return False
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:

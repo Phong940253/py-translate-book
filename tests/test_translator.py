@@ -5,11 +5,16 @@ Covers:
   TC-2..5: _has_html_structure_mismatch tolerates paragraph merges but still
            rejects dropped structural tags and gross content loss.
   TC-9   : _split_oversized_chunk never splits an HTML tag in half.
+  TC-10..: _has_untranslated_content rejects model echoes (verbatim or with
+           trivial edits) while tolerating proper-noun residue and
+           number-only chunks; untranslated failures retry past max_tries
+           (stoppable via should_stop) with periodic manual-queue records.
 """
 import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -305,6 +310,134 @@ class TestMonitoring(unittest.TestCase):
         self.assertGreaterEqual(cc["index"], 1)
         self.assertTrue(cc["source"])
         self.assertIn("DICH_", cc["translated"])
+
+
+class TestUntranslatedGuard(unittest.TestCase):
+    """Model echoes (verbatim or with trivial edits) must be rejected and
+    retried; tolerated residue (proper nouns) and number-only chunks must not
+    false-positive."""
+
+    ZH_SRC = (
+        "<p>顾天明和苏慕容破天荒地提早回了家看着满桌子的菜什么山珍海味"
+        "鲍鱼龙虾应有尽有顾言嘴角一抽地向自己爸妈问道今天是什么日子</p>"
+    )
+
+    def setUp(self):
+        self.t = Translator(FakeEngine(), consistency_config={})
+
+    def test_verbatim_echo_rejected(self):
+        self.assertTrue(self.t._has_untranslated_content(self.ZH_SRC, self.ZH_SRC))
+
+    def test_trivial_edit_echo_rejected(self):
+        # The reported case: echo with a couple of words changed.
+        out = self.ZH_SRC.replace("顾言嘴角一抽", "顾言笑了笑").replace(
+            "今天是什么日子", "今天是什么好日子啊")
+        self.assertTrue(self.t._has_untranslated_content(self.ZH_SRC, out))
+
+    def test_faithful_translation_accepted(self):
+        out = ("<p>Cố Thiên Minh và Tô Mộ Dung hiếm hoi về nhà sớm, nhìn mâm cơm "
+               "đầy sơn hào hải vị, Cố Ngôn giật khóe miệng hỏi cha mẹ hôm nay là ngày gì</p>")
+        self.assertFalse(self.t._has_untranslated_content(self.ZH_SRC, out))
+
+    def test_small_proper_noun_residue_tolerated(self):
+        src = "<p>Chào buổi sáng mọi người hôm nay chúng ta họp ở đây nhé bạn</p>"
+        out = "<p>Chào buổi sáng 顾言 hôm nay chúng ta họp ở đây nhé bạn</p>"
+        self.assertFalse(self.t._has_untranslated_content(src, out))
+
+    def test_numbers_only_echo_accepted(self):
+        src = "<p>123 !!! 456</p>"
+        self.assertFalse(self.t._has_untranslated_content(src, src))
+
+    def test_english_echo_rejected_language_agnostic(self):
+        src = ("<p>Hello world, this is a long test sentence for echo detection, "
+               "yes indeed my friend</p>")
+        self.assertTrue(self.t._has_untranslated_content(src, src))
+        out = ("<p>Xin chào thế giới, đây là câu kiểm tra dài để phát hiện echo, "
+               "đúng vậy bạn tôi</p>")
+        self.assertFalse(self.t._has_untranslated_content(src, out))
+
+    def test_retry_prompt_mentions_rejection_and_target_lang(self):
+        prompt = Translator._build_retry_input("chunk", reason="untranslated", to_lang="VI")
+        self.assertIn("REJECTED", prompt)
+        self.assertIn("VI", prompt)
+        self.assertIn("chunk", prompt)
+        # default reason keeps the legacy structure-focused prefix
+        legacy = Translator._build_retry_input("chunk")
+        self.assertNotIn("REJECTED", legacy)
+        self.assertIn("chunk", legacy)
+
+
+class EchoThenGoodEngine(TranslationEngine):
+    """Echoes the input chunk unchanged for the first `echo_times` calls, then
+    returns a CJK-free Vietnamese replacement preserving tags."""
+
+    def __init__(self, echo_times=1):
+        super().__init__(from_lang="ZH", to_lang="VI")
+        self.calls = 0
+        self.echo_times = echo_times
+        self.last_inputs = []
+
+    def supports_batch(self):
+        return False
+
+    def translate(self, text):
+        self.calls += 1
+        self.last_inputs.append(text)
+        chunk = text.split("Input:\n", 1)[1] if "Input:\n" in text else text
+        if self.calls <= self.echo_times:
+            return chunk
+        return re.sub(r"(?<=>)[^<>]+(?=<)", "Bản dịch tiếng Việt ở đây", chunk)
+
+
+class TestUntranslatedRetryLoop(unittest.TestCase):
+    ZH_SOUP = (
+        "<html><body><p>顾天明和苏慕容破天荒地提早回了家看着满桌子的菜"
+        "什么山珍海味鲍鱼龙虾应有尽有顾言嘴角一抽地向自己爸妈问道</p>"
+        "</body></html>"
+    )
+
+    def test_echo_retried_then_accepted(self):
+        eng = EchoThenGoodEngine(echo_times=1)
+        t = Translator(eng, max_tries=3, consistency_config={})
+        with mock.patch("time.sleep"):
+            out = t.translate_html(BeautifulSoup(self.ZH_SOUP, "html.parser"),
+                                   chapter_number=1)
+        self.assertEqual(eng.calls, 2)
+        self.assertIn("Bản dịch tiếng Việt", out)
+        self.assertNotRegex(out, r"[\u4e00-\u9fff]")
+        # the retry used the untranslated-specific prompt
+        self.assertIn("REJECTED", eng.last_inputs[1])
+
+    def test_untranslated_bypasses_max_tries_but_stoppable(self):
+        eng = EchoThenGoodEngine(echo_times=10 ** 9)  # never translates
+        t = Translator(eng, max_tries=3, consistency_config={})
+        with mock.patch("time.sleep"):
+            with self.assertRaises(_TranslationStopped):
+                t.translate_html(
+                    BeautifulSoup(self.ZH_SOUP, "html.parser"),
+                    chapter_number=1,
+                    should_stop=lambda: eng.calls >= 5,
+                )
+        # 5 attempts despite max_tries=3: untranslated never gives up on its own
+        self.assertEqual(eng.calls, 5)
+
+    def test_manual_queue_recorded_periodically_while_stuck(self):
+        import translator.translator as tr_mod
+
+        eng = EchoThenGoodEngine(echo_times=10 ** 9)
+        t = Translator(eng, max_tries=3, consistency_config={})
+        with mock.patch("time.sleep"), \
+                mock.patch.object(t, "_record_manual_translation_task") as rec, \
+                mock.patch.object(tr_mod, "UNTRANSLATED_MANUAL_QUEUE_EVERY", 3):
+            with self.assertRaises(_TranslationStopped):
+                t.translate_html(
+                    BeautifulSoup(self.ZH_SOUP, "html.parser"),
+                    chapter_number=1,
+                    should_stop=lambda: eng.calls >= 7,
+                )
+        # streaks 3 and 6 hit the periodic record; the loop keeps retrying
+        self.assertEqual(rec.call_count, 2)
+        self.assertEqual(eng.calls, 7)
 
 
 if __name__ == "__main__":
