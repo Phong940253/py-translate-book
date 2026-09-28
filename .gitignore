@@ -81,3 +81,15 @@ mitmproxy*
 # =====================
 package.json
 package-lock.json
+
+# =====================
+# OpenCode local config (contains API keys - never commit)
+# =====================
+opencode.json
+.opencode/
+
+# =====================
+# Migration backups / pristine copies of generated EPUB
+# =====================
+*.orig
+*.rules.json.bak-*
