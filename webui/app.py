@@ -755,14 +755,19 @@ def api_tts():
         return jsonify({"error": "voice must be a string"}), 400
     reader.ENGINE.ensure_warm()
     try:
-        wav = reader.ENGINE.synthesize(text, voice)
+        wav, segs = reader.ENGINE.synthesize(text, voice)
     except RuntimeError as e:
         return jsonify({"error": str(e), "state": reader.ENGINE.state}), 503
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:  # noqa: BLE001 — synthesis failure → readable JSON
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
-    return send_file(io.BytesIO(wav), mimetype="audio/wav")
+    resp = send_file(io.BytesIO(wav), mimetype="audio/wav")
+    try:  # sentence timing for the reader's sentence-level highlight
+        resp.headers["X-TTS-Segs"] = json.dumps(segs)
+    except (TypeError, ValueError):  # pragma: no cover — never fail the audio
+        pass
+    return resp
 
 
 # --------------------------------------------------------------------------

@@ -411,6 +411,7 @@
     if (settings.mode === 'page') layoutPages(false);
     buildItems(doc);
     bindFrame(doc);
+    clearSent();   // sentence marks from the previous document died with it
 
     // restore reading position (TTS > saved CFI > legacy item > top)
     if (speak.on) {
@@ -1864,7 +1865,8 @@
 
   /* --------------------------------------------------------------- TTS */
   var tts = { state: 'unknown', voices: [], def: null, poll: 0, tries: 0 };
-  var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, audio: null, cache: {}, inflight: {} };
+  var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, audio: null, cache: {}, inflight: {},
+    segs: null, sent: null, sentIdx: -1 };
 
   function ttsStatus(text, cls) {
     var n = el('rd-tts-status');
@@ -1930,7 +1932,12 @@
           throw new Error((data && data.error) || ('HTTP ' + res.status));
         });
       }
-      return res.blob();
+      var rawHdr = res.headers.get('X-TTS-Segs') || '';
+      return res.blob().then(function (blob) {
+        var segs = null;
+        if (rawHdr) { try { segs = JSON.parse(rawHdr); } catch (e) { segs = null; } }
+        return { blob: blob, segs: (segs && segs.length) ? segs : null };
+      });
     });
   }
 
@@ -1950,15 +1957,15 @@
     var p = chapterItems(ch).then(function (items) {
       var it = items[i];
       if (!it || it.type !== 'p') return null;
-      return ttsPost(it.text).then(function (blob) {
+      return ttsPost(it.text).then(function (entry) {
         var keys = Object.keys(speak.cache);
-        if (keys.length > 6) delete speak.cache[keys[0]];
-        speak.cache[k] = blob;
-        return blob;
+        if (keys.length > 12) delete speak.cache[keys[0]];
+        speak.cache[k] = entry;
+        return entry;
       });
-    }).then(function (blob) {
+    }).then(function (entry) {
       delete speak.inflight[k];
-      return blob;
+      return entry;
     }, function (e) {
       delete speak.inflight[k];
       throw e;
@@ -1982,16 +1989,51 @@
     if (n) n.textContent = text || '';
   }
 
-  function playBlob(blob, token) {
+  /* Sentence-level highlight: the server times each synthesized piece
+     (X-TTS-Segs → [[start_c, end_c, t_seconds], …] over the collapsed item
+     text = nf.text); wrap the piece covering the playhead in .rd-sent. */
+  function clearSent() {
+    if (speak.sent && speak.sent.length) unwrapMarks(speak.sent);
+    speak.sent = null;
+    speak.sentIdx = -1;
+  }
+
+  function highlightSeg(seg) {
+    clearSent();
+    var it = state.items[speak.i];
+    if (!seg || !it || it.type !== 'p' || !it.node) return;
+    var nf = normFull(it.node);
+    var a = Math.max(0, Math.min(seg[0], nf.text.length));
+    var b = Math.max(a, Math.min(seg[1], nf.text.length));
+    if (b - a < 1) return;
+    speak.sent = wrapRange(nf, a, b, 'rd-sent');
+  }
+
+  function onSpeakTime() {
+    var audio = speak.audio, segs = speak.segs;
+    if (!audio || !segs || !segs.length) return;
+    var t = audio.currentTime, idx = 0;
+    for (var i = 0; i < segs.length; i++) {
+      if (t + 0.001 >= segs[i][2]) idx = i; else break;
+    }
+    if (idx === speak.sentIdx) return;
+    speak.sentIdx = idx;
+    highlightSeg(segs[idx]);
+  }
+
+  function playBlob(entry, token) {
     if (token !== speak.token) return;
-    var url = URL.createObjectURL(blob);
+    var url = URL.createObjectURL(entry.blob);
     if (speak.audio) {
       speak.audio.pause();
       try { URL.revokeObjectURL(speak.audio.src); } catch (e) { /* already revoked */ }
     }
     var audio = new Audio(url);
     speak.audio = audio;
+    speak.segs = entry.segs || null;
+    speak.sentIdx = -1;
     audio.playbackRate = ttsCfg.rate;
+    audio.ontimeupdate = onSpeakTime;
     audio.onended = function () {
       try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
       speakNext();
@@ -2028,15 +2070,16 @@
     speak.ch = state.ch;
     setCurrent(speak.i, { scroll: true });
     markSpeaking();
+    clearSent();
     speakNote(fmt('read.tts_speaking', { ch: state.ch, i: speak.i + 1, total: state.items.length }));
     ttsStatus(i18n('read.tts_synthesizing'));
 
     var idx = speak.i;
-    audioFor(state.ch, idx).then(function (blob) {
+    audioFor(state.ch, idx).then(function (entry) {
       if (token !== speak.token) return;
-      if (!blob) { speak.i++; speakStep(); return; }
+      if (!entry || !entry.blob) { speak.i++; speakStep(); return; }
       ttsStatus(i18n('read.tts_playing'));
-      playBlob(blob, token);
+      playBlob(entry, token);
       prefetchCurrent(idx);
     }).catch(function (e) {
       if (token !== speak.token) return;
@@ -2099,6 +2142,8 @@
       try { URL.revokeObjectURL(speak.audio.src); } catch (e) { /* already revoked */ }
       speak.audio = null;
     }
+    speak.segs = null;
+    clearSent();
     var play = el('rd-tts-play'), pause = el('rd-tts-pause'), stop = el('rd-tts-stop');
     if (play) play.hidden = false;
     if (pause) pause.hidden = true;
@@ -2455,9 +2500,9 @@
     if (test) test.addEventListener('click', function () {
       if (!tts.voices.length) { warmVoices(); return; }
       ttsStatus(i18n('read.tts_synthesizing'));
-      ttsPost(i18n('read.test_text')).then(function (blob) {
+      ttsPost(i18n('read.test_text')).then(function (r) {
         ttsStatus(i18n('read.tts_playing'));
-        var audio = new Audio(URL.createObjectURL(blob));
+        var audio = new Audio(URL.createObjectURL(r.blob));
         audio.playbackRate = ttsCfg.rate;
         audio.onended = function () { ttsStatus(fmt('read.tts_ready_n', { n: tts.voices.length })); };
         audio.play();

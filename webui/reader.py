@@ -349,6 +349,9 @@ a{color:inherit}
   box-shadow:0 0 0 1px rgb(255 170 40 / .45)}
 .rd-qhit.rd-qcur{background:rgb(255 160 40 / .75);
   box-shadow:0 0 0 2px rgb(255 140 20)}
+/* current TTS sentence — follows the playhead during read-aloud */
+.rd-sent{background:rgb(111 140 255 / .38);border-radius:3px;
+  box-shadow:0 0 0 1px rgb(111 140 255 / .45)}
 .rd-hl{border-radius:3px;padding:1px 0;box-decoration-break:clone;
   -webkit-box-decoration-break:clone}
 .rd-hl-yellow{background:rgb(255 214 91 / .55)}
@@ -1155,34 +1158,65 @@ def ann_validate(ann, *, total: int) -> dict:
 _CHUNK_CHARS = 180
 MAX_TEXT = 6000
 _SAMPLE_RATE = 48_000
+_GAP_SECS = 0.12           # silence between synthesized pieces (must match _to_wav)
+_CACHE_MAX_ENTRIES = 64
+_CACHE_MAX_BYTES = 64 * 1024 * 1024   # cap the synthesis LRU at 64 MB
 
 _SPLIT_RX = re.compile(r"(?<=[.!?…:])\s+|(?<=[。！？；])|(?<=[,;])\s+")
 
 
-def split_for_tts(text: str, limit: int = _CHUNK_CHARS):
-    """Split into synthesis-sized pieces, breaking on sentence/punctuation."""
+def split_for_tts_seg(text: str, limit: int = _CHUNK_CHARS):
+    """[(piece, start, end)] — synthesis pieces with offsets into the
+    collapsed text (trim-adjusted), same cut algorithm as split_for_tts.
+
+    Positions come from finditer spans: re.split would discard the matched
+    separators and shift every later offset."""
     text = _collapse(text)
     if not text:
         return []
-    parts = []
-    for piece in _SPLIT_RX.split(text):
-        piece = piece.strip()
-        while len(piece) > limit:
-            cut = piece.rfind(" ", 0, limit)
-            if cut < limit // 2:
-                cut = limit
-            parts.append(piece[:cut].strip())
-            piece = piece[cut:].strip()
-        if piece:
-            parts.append(piece)
-    return [p for p in parts if p]
+    spans, pos = [], 0
+    for m in _SPLIT_RX.finditer(text):
+        spans.append((pos, m.start()))
+        pos = m.end()
+    spans.append((pos, len(text)))
+
+    out = []
+    for s0, s1 in spans:
+        raw = text[s0:s1]
+        work = raw.strip()
+        if work:
+            base = s0 + (len(raw) - len(raw.lstrip()))
+            w, W = 0, len(work)
+            while True:
+                if W - w <= limit:
+                    sub = work[w:]
+                    lead = len(sub) - len(sub.lstrip())
+                    sub = sub.strip()
+                    if sub:
+                        out.append((sub, base + w + lead, base + w + lead + len(sub)))
+                    break
+                cut = work.rfind(" ", w, w + limit)
+                if cut < w + limit // 2:
+                    cut = w + limit
+                sub = work[w:cut]
+                lead = len(sub) - len(sub.lstrip())
+                sub = sub.strip()
+                if sub:
+                    out.append((sub, base + w + lead, base + w + lead + len(sub)))
+                w = cut
+    return out
+
+
+def split_for_tts(text: str, limit: int = _CHUNK_CHARS):
+    """Split into synthesis-sized pieces, breaking on sentence/punctuation."""
+    return [p for p, _, _ in split_for_tts_seg(text, limit)]
 
 
 def _to_wav(chunks, sample_rate: int) -> bytes:
     """Concatenate float32 waveforms (+ short gaps) into 16-bit mono WAV bytes."""
     import numpy as np
 
-    gap = np.zeros(int(0.12 * sample_rate), dtype=np.float32)
+    gap = np.zeros(int(_GAP_SECS * sample_rate), dtype=np.float32)
     joined = []
     for i, wav in enumerate(chunks):
         if i:
@@ -1207,6 +1241,9 @@ class TTSEngine:
     def __init__(self):
         self._lock = threading.Lock()      # one synthesis at a time
         self._state_lock = threading.Lock()
+        self._cache = OrderedDict()             # (voice, text) → (wav, segs, bytes)
+        self._cache_lock = threading.Lock()
+        self._cache_bytes = 0
         self._thread = None
         self._tts = None
         self.state = "idle"                # idle | loading | ready | error
@@ -1273,8 +1310,33 @@ class TTSEngine:
             }
 
     # -- synthesis ---------------------------------------------------------
+    def _cache_get(self, key):
+        with self._cache_lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)
+                return hit[0], hit[1]
+            return None
+
+    def _cache_put(self, key, wav, segs):
+        size = len(wav)
+        if size > _CACHE_MAX_BYTES // 4:   # one giant item must not evict all
+            return
+        with self._cache_lock:
+            self._cache[key] = (wav, segs, size)
+            self._cache.move_to_end(key)
+            self._cache_bytes += size
+            while self._cache and (
+                len(self._cache) > _CACHE_MAX_ENTRIES
+                or self._cache_bytes > _CACHE_MAX_BYTES
+            ):
+                _k, dropped = self._cache.popitem(last=False)
+                self._cache_bytes -= dropped[2]
+
     def synthesize(self, text: str, voice=None):
-        """Return WAV bytes for ``text`` (raises RuntimeError when not ready)."""
+        """Return ``(wav_bytes, segs)`` — segs maps audio time onto the
+        collapsed text as ``[[start_c, end_c, t_seconds], …]`` for
+        sentence-level highlighting. Raises RuntimeError when not ready."""
         text = _collapse(text)[:MAX_TEXT]
         if not text:
             raise ValueError("empty text")
@@ -1289,11 +1351,27 @@ class TTSEngine:
 
         if voice not in known:  # unknown/None preset → fall back to the default
             voice = default
+        voice = voice or default
 
-        parts = split_for_tts(text)
+        hit = self._cache_get((voice, text))
+        if hit is not None:
+            return hit
+
+        pieces = split_for_tts_seg(text)
         with self._lock:
-            wavs = [tts.infer(part, voice=voice or default) for part in parts]
-        return _to_wav(wavs, getattr(tts, "sample_rate", _SAMPLE_RATE))
+            wavs = [tts.infer(part, voice=voice) for part, _s, _e in pieces]
+        sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
+        wav = _to_wav(wavs, int(sr))
+
+        import numpy as np
+
+        segs, t = [], 0.0
+        for (_p, s, e), chunk in zip(pieces, wavs):
+            segs.append([s, e, round(t, 3)])
+            t += float(np.asarray(chunk).size) / sr + _GAP_SECS
+
+        self._cache_put((voice, text), wav, segs)
+        return wav, segs
 
 
 ENGINE = TTSEngine()

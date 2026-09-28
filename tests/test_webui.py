@@ -7,6 +7,7 @@ let the background runner finish, and assert the output EPUB is produced.
 
 import os
 import base64
+import json
 import re
 import shutil
 import sys
@@ -797,13 +798,16 @@ class TestWebUI(unittest.TestCase):
     def test_tts_returns_wav_when_engine_ready(self):
         from webui import reader
         wav = b"RIFF0000WAVEfake"
+        segs = [[0, 9, 0.0], [10, 18, 1.25]]
         with mock.patch.object(reader.ENGINE, "ensure_warm"), \
-                mock.patch.object(reader.ENGINE, "synthesize", return_value=wav) as syn:
+                mock.patch.object(reader.ENGINE, "synthesize", return_value=(wav, segs)) as syn:
             r = self.client.post("/api/tts", json={"text": "Xin chào", "voice": "v1"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.mimetype, "audio/wav")
         self.assertEqual(r.get_data(), wav)
         syn.assert_called_once_with("Xin chào", "v1")
+        # sentence timing rides along for the client's sentence highlight
+        self.assertEqual(json.loads(r.headers["X-TTS-Segs"]), segs)
 
     def test_tts_503_when_engine_not_ready(self):
         from webui import reader
@@ -822,6 +826,28 @@ class TestWebUI(unittest.TestCase):
         self.assertTrue(all(len(p) <= reader._CHUNK_CHARS for p in parts))
         self.assertEqual(" ".join(parts).replace(" .", "."), long_text)
         self.assertEqual(reader.split_for_tts("   "), [])
+
+    def test_split_for_tts_seg_offsets_slice_the_collapsed_text(self):
+        from webui import reader
+        cases = [
+            "Một câu ngắn. Câu thứ hai! Câu thứ ba?",
+            ("Một câu dài. " * 60).strip(),
+            "  khoảng   trắng   giữa  các   từ  ",
+            "x" * (reader._CHUNK_CHARS * 2 + 37),   # forced mid-piece cuts
+            "clause one, clause two; clause three.",
+        ]
+        for text in cases:
+            collapsed = reader._collapse(text)
+            segs = reader.split_for_tts_seg(text)
+            pieces = reader.split_for_tts(text)
+            self.assertEqual([p for p, _s, _e in segs], pieces, text[:40])
+            last_end = 0
+            for piece, s, e in segs:
+                self.assertEqual(collapsed[s:e], piece, (text[:40], s, e))
+                self.assertGreaterEqual(s, last_end)
+                self.assertGreater(e, s)
+                last_end = e
+        self.assertEqual(reader.split_for_tts_seg("   "), [])
 
     def test_tts_engine_synthesizes_with_a_stub_model(self):
         from webui import reader
@@ -843,12 +869,24 @@ class TestWebUI(unittest.TestCase):
         eng.default_voice = "Hải Đăng"
         eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
 
-        wav = eng.synthesize("Một hai ba.", voice="khong-ton-tai")
+        wav, segs = eng.synthesize("Một hai ba.", voice="khong-ton-tai")
         self.assertTrue(wav.startswith(b"RIFF"))
         self.assertEqual(stub.calls[-1][1], "Hải Đăng")  # unknown voice → default
+        # segs: [start, end, t] rows over the collapsed text, time ascending
+        self.assertEqual(len(segs), 1)
+        s, e, t = segs[0]
+        self.assertEqual(("Một hai ba."[s:e]), "Một hai ba.")
+        self.assertEqual(t, 0.0)
 
-        eng.synthesize("Một.", voice="Hải Đăng")
+        wav2, _ = eng.synthesize("Một.", voice="Hải Đăng")
         self.assertEqual(stub.calls[-1][1], "Hải Đăng")
+
+        # synthesis LRU: an identical repeat must not hit the model again
+        calls_before = len(stub.calls)
+        wav3, segs3 = eng.synthesize("Một hai ba.", voice="khong-ton-tai")
+        self.assertEqual(len(stub.calls), calls_before)
+        self.assertEqual(wav3, wav)
+        self.assertEqual(segs3, segs)
 
         # Defensive clamp: an over-long request must not reach the model whole.
         eng.synthesize("x" * (reader.MAX_TEXT + 500), voice="Hải Đăng")
