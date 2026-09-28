@@ -13,6 +13,8 @@ window.APP.reader = {
   chapterUrl: {{ url_for('api_reader_chapter')|tojson }},
   imageUrl: {{ url_for('api_reader_image')|tojson }},
   stateUrl: {{ url_for('api_reader_state')|tojson }},
+  searchUrl: {{ url_for('api_reader_search')|tojson }},
+  annUrl: {{ url_for('api_reader_annotations')|tojson }},
   ttsUrl: {{ url_for('api_tts')|tojson }},
   voicesUrl: {{ url_for('api_tts_voices')|tojson }}
 };
@@ -38,6 +40,8 @@ window.APP.reader = {
       <button id="rd-open-toc" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('books') }}<span class="rd-label">{{ t('read.toc') }}</span></button>
       <button id="rd-open-font" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">Aa<span class="rd-label">{{ t('read.font') }}</span></button>
       <button id="rd-open-tts" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('play') }}<span class="rd-label">{{ t('read.aloud') }}</span></button>
+      <button id="rd-open-search" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('search') }}<span class="rd-label">{{ t('read.search') }}</span></button>
+      <button id="rd-open-ann" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('note') }}<span class="rd-label">{{ t('read.ann') }}</span></button>
       <div class="seg" role="group" aria-label="{{ t('read.mode') }}">
         <button type="button" class="btn btn-ghost btn-sm rd-mode" data-mode="scroll" aria-pressed="true">{{ t('read.mode_scroll') }}</button>
         <button type="button" class="btn btn-ghost btn-sm rd-mode" data-mode="page" aria-pressed="false">{{ t('read.mode_page') }}</button>
@@ -152,6 +156,36 @@ window.APP.reader = {
     </div>
   </div>
 
+  <div id="rd-panel-search" class="rd-panel" hidden>
+    <div class="rd-panel-title">{{ t('read.search') }}</div>
+    <div class="rd-fields">
+      <div class="rd-field rd-searchbar">
+        <input id="rd-search-q" class="rd-input" type="search" autocomplete="off"
+               spellcheck="false" placeholder="{{ t('read.search_ph') }}"
+               aria-label="{{ t('read.search') }}">
+        <div class="seg" role="group" aria-label="{{ t('read.search_scope') }}">
+          <button type="button" class="btn btn-ghost btn-sm rd-scope" data-scope="chapter" aria-pressed="false">{{ t('read.search_chapter') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm rd-scope" data-scope="book" aria-pressed="true">{{ t('read.search_book') }}</button>
+        </div>
+        <button id="rd-search-go" type="button" class="btn btn-primary btn-sm">{{ t('read.find') }}</button>
+      </div>
+      <div id="rd-search-status" class="muted small" role="status"></div>
+      <div id="rd-search-results" class="rd-results"></div>
+      <div class="rd-field" id="rd-search-nav" hidden>
+        <button id="rd-q-prev" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.prev_p') }}">‹</button>
+        <span id="rd-q-idx" class="muted small"></span>
+        <button id="rd-q-next" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.next_p') }}">›</button>
+        <button id="rd-q-clear" type="button" class="btn btn-ghost btn-sm">{{ t('read.close') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rd-panel-ann" class="rd-panel" hidden>
+    <div class="rd-panel-title">{{ t('read.ann') }} <span id="rd-ann-count" class="muted small"></span></div>
+    <div id="rd-ann-status" class="muted small" role="status"></div>
+    <div id="rd-ann-list" class="rd-results"></div>
+  </div>
+
   <div class="rd-stage" id="rd-stage" data-theme="dark">
     <iframe id="rd-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer"
             title="{{ t('read.title') }}"></iframe>
@@ -175,6 +209,14 @@ window.APP.reader = {
       <button id="rd-fn-close" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.close') }}">✕</button>
     </div>
     <div class="rd-fn-body" id="rd-fn-body"></div>
+  </div>
+
+  <div id="rd-selpop" class="rd-selpop" hidden role="toolbar" aria-label="{{ t('read.sel_aria') }}">
+    <button type="button" class="rd-dot rd-dot-yellow" data-color="yellow" title="{{ t('read.ann') }}" aria-label="yellow"></button>
+    <button type="button" class="rd-dot rd-dot-green" data-color="green" title="{{ t('read.ann') }}" aria-label="green"></button>
+    <button type="button" class="rd-dot rd-dot-blue" data-color="blue" title="{{ t('read.ann') }}" aria-label="blue"></button>
+    <button type="button" class="rd-dot rd-dot-pink" data-color="pink" title="{{ t('read.ann') }}" aria-label="pink"></button>
+    <button id="rd-sel-note" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.ann_note_ph') }}" title="{{ t('read.ann_note_ph') }}">✎</button>
   </div>
 </div>
 {% endblock %}

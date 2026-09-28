@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import uuid
 
 # Allow running as a bare script (python webui/app.py): ensure the project root
 # is importable so `from webui.xxx import ...` resolves regardless of CWD.
@@ -511,7 +512,11 @@ def _reader_doc():
 
     Usage: ``doc, err = _reader_doc(); if err: return err``.
     """
-    path = request.args.get("path", "")
+    return _reader_doc_for(request.args.get("path", ""))
+
+
+def _reader_doc_for(path: str):
+    """Same as ``_reader_doc`` but for a path already read from args/body."""
     if not path or not path.startswith(PROJECT_ROOT) or not os.path.isfile(path):
         return None, (jsonify({"error": "invalid path"}), 400)
     try:
@@ -652,6 +657,83 @@ def api_reader_state():
     except OSError as e:
         return jsonify({"error": f"cannot write state: {e}"}), 500
     return jsonify({"ok": True})
+
+
+@app.route("/api/reader/search")
+def api_reader_search():
+    """Full-book text search (plain scan over the spine, cached per book)."""
+    doc, err = _reader_doc()
+    if err:
+        return err
+    q = request.args.get("q", "")
+    try:
+        max_hits = int(request.args.get("max", "200"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "max must be an integer"}), 400
+    try:
+        return jsonify(reader.search_book(doc, q, max_hits=max_hits))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/reader/annotations", methods=["GET", "POST", "PUT", "DELETE"])
+def api_reader_annotations():
+    """Highlights/notes CRUD on the sidecar ``<book>.ann.json``."""
+    if request.method == "GET":
+        path = _reader_path()
+        return jsonify({"anns": reader.load_anns(path)})
+
+    if request.method == "DELETE":
+        path = _validate_epub_path(request.args.get("path", ""))
+        ann_id = request.args.get("id", "")
+        with reader._ANN_LOCK:
+            anns = reader.load_anns(path)
+            kept = [a for a in anns if a.get("id") != ann_id]
+            if len(kept) == len(anns):
+                return jsonify({"error": "unknown id"}), 404
+            try:
+                reader.save_anns(path, kept)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            except OSError as e:
+                return jsonify({"error": f"cannot write annotations: {e}"}), 500
+        return jsonify({"ok": True})
+
+    payload = request.get_json(silent=True) or {}
+    path = _validate_epub_path(str(payload.get("path", "")))
+    doc, err = _reader_doc_for(path)
+    if err:
+        return err
+    try:
+        ann = reader.ann_validate(payload.get("ann"), total=len(doc.chapters))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    now = int(time.time())
+    with reader._ANN_LOCK:
+        anns = reader.load_anns(path)
+        if request.method == "POST":
+            ann["id"] = uuid.uuid4().hex[:12]
+            ann["created"] = ann["updated"] = now
+            anns.append(ann)
+            status = 201
+        else:  # PUT — replace by id, keep the original creation time
+            idx = next(
+                (i for i, a in enumerate(anns) if a.get("id") == ann.get("id")), -1
+            )
+            if idx < 0:
+                return jsonify({"error": "unknown id"}), 404
+            ann["created"] = anns[idx].get("created", now)
+            ann["updated"] = now
+            anns[idx] = ann
+            status = 200
+        try:
+            reader.save_anns(path, anns)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except OSError as e:
+            return jsonify({"error": f"cannot write annotations: {e}"}), 500
+    return jsonify(ann), status
 
 
 @app.route("/api/tts/voices")

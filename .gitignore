@@ -70,6 +70,7 @@ Thumbs.db
 manual_translation_queue.jsonl
 webui/jobs/
 *.reader.json
+*.ann.json
 
 # =====================
 # Local proxy certs (mitmproxy)

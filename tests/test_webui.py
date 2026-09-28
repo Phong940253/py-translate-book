@@ -404,6 +404,31 @@ class TestWebUI(unittest.TestCase):
         from webui import reader
         return mock.patch.object(reader.ENGINE, "ensure_warm")
 
+    def _reader_multi_epub(self, name="_test_reader_multi.epub"):
+        """3 chapters with known words — exercises cross-chapter search."""
+        path = os.path.join(PROJECT_ROOT, name)
+        book = epub.EpubBook()
+        book.set_identifier("webui-search")
+        book.set_title("Search Test")
+        book.set_language("en")
+        texts = [
+            "The apple is red. An apple a day.",
+            "banana split and more banana",
+            "cherry  pie with APPLE sauce",
+        ]
+        names = []
+        for i, text in enumerate(texts, start=1):
+            ch = epub.EpubHtml(title=f"Ch{i}", file_name=f"c{i}.xhtml", lang="en")
+            ch.content = f"<html><body><p>{text}</p></body></html>".encode()
+            book.add_item(ch)
+            names.append(ch.file_name)
+        book.spine = ["nav"] + names
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        epub.write_epub(path, book, {})
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
     def test_read_page_renders_with_reader_bootstrap(self):
         path = self._reader_epub()
         with self._warm_noop():
@@ -422,6 +447,129 @@ class TestWebUI(unittest.TestCase):
         self.assertIn('sandbox="allow-same-origin"', body)
         self.assertIn("rd-toc-tree", body)
         self.assertIn("rd-set-margin", body)   # appearance controls
+        # P2: search + annotations bootstrap
+        self.assertIn("searchUrl", body)
+        self.assertIn("annUrl", body)
+        self.assertIn("rd-panel-search", body)
+        self.assertIn("rd-panel-ann", body)
+        self.assertIn("rd-selpop", body)
+
+    def test_reader_search_scans_all_chapters(self):
+        path = self._reader_multi_epub("_test_reader_search.epub")
+
+        r = self.client.get("/api/reader/search?path=" + path + "&q=apple")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["total"], 3)  # 2 in ch1 + 1 in ch3 (APPLE)
+        self.assertFalse(data["truncated"])
+        rows = {row["n"]: row for row in data["chapters"]}
+        self.assertEqual(set(rows), {1, 3})
+        self.assertEqual(rows[1]["count"], 2)
+        self.assertEqual(rows[3]["count"], 1)
+        self.assertIn("apple", rows[1]["hits"][0]["snip"])
+
+        # case-insensitive
+        r = self.client.get("/api/reader/search?path=" + path + "&q=BANANA")
+        self.assertEqual(r.get_json()["chapters"][0]["n"], 2)
+
+        # max cap truncates the scan at the first hits
+        r = self.client.get("/api/reader/search?path=" + path + "&q=apple&max=2")
+        data = r.get_json()
+        self.assertEqual(data["total"], 2)
+        self.assertTrue(data["truncated"])
+        self.assertEqual([row["n"] for row in data["chapters"]], [1])
+
+        # no hits
+        r = self.client.get("/api/reader/search?path=" + path + "&q=zzzz")
+        self.assertEqual(r.get_json()["total"], 0)
+        self.assertEqual(r.get_json()["chapters"], [])
+
+        # validation: empty/oversized query, bad max, foreign path
+        r = self.client.get("/api/reader/search?path=" + path + "&q=")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.get("/api/reader/search?path=" + path + "&q=" + "x" * 201)
+        self.assertEqual(r.status_code, 400)
+        r = self.client.get("/api/reader/search?path=" + path + "&q=apple&max=nope")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.get("/api/reader/search?path=/etc/x.epub&q=apple")
+        self.assertEqual(r.status_code, 400)
+
+    def test_reader_annotations_crud(self):
+        path = self._reader_epub("_test_reader_ann.epub")
+        sidecar = os.path.splitext(path)[0] + ".ann.json"
+        self.addCleanup(lambda: os.path.exists(sidecar) and os.remove(sidecar))
+
+        # empty before anything was saved
+        r = self.client.get("/api/reader/annotations?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {"anns": []})
+
+        # create
+        r = self.client.post(
+            "/api/reader/annotations",
+            json={
+                "path": path,
+                "ann": {
+                    "ch": 1, "item": 0, "quote": "Hello world",
+                    "pre": "", "post": "", "color": "blue", "note": "first",
+                },
+            },
+        )
+        self.assertEqual(r.status_code, 201)
+        ann = r.get_json()
+        self.assertTrue(ann["id"])
+        self.assertIn("created", ann)
+        self.assertIn("updated", ann)
+        self.assertEqual(ann["color"], "blue")
+        self.assertTrue(os.path.exists(sidecar))
+
+        # list
+        r = self.client.get("/api/reader/annotations?path=" + path)
+        self.assertEqual(len(r.get_json()["anns"]), 1)
+
+        # update keeps created
+        ann["note"] = "edited"
+        ann["color"] = "pink"
+        r = self.client.put("/api/reader/annotations", json={"path": path, "ann": ann})
+        self.assertEqual(r.status_code, 200)
+        upd = r.get_json()
+        self.assertEqual(upd["note"], "edited")
+        self.assertEqual(upd["color"], "pink")
+        self.assertEqual(upd["created"], ann["created"])
+
+        # unknown id on PUT → 404
+        r = self.client.put(
+            "/api/reader/annotations",
+            json={"path": path, "ann": dict(ann, id="nope")},
+        )
+        self.assertEqual(r.status_code, 404)
+
+        # delete → 200, second delete → 404
+        url = "/api/reader/annotations?path=" + path + "&id=" + ann["id"]
+        self.assertEqual(self.client.delete(url).status_code, 200)
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        r = self.client.get("/api/reader/annotations?path=" + path)
+        self.assertEqual(r.get_json()["anns"], [])
+
+        # validation: bad payloads → 400
+        for bad in (
+            {"ch": 1, "quote": ""},                   # empty quote
+            {"ch": 0, "quote": "x"},                  # chapter out of range
+            {"ch": 1, "quote": "x", "color": "red"},  # unknown color
+            {"ch": 1, "quote": "x" * 501},            # quote too long
+            None,                                     # not an object
+        ):
+            r = self.client.post(
+                "/api/reader/annotations", json={"path": path, "ann": bad}
+            )
+            self.assertEqual(r.status_code, 400, bad)
+
+        # foreign path refused
+        r = self.client.post(
+            "/api/reader/annotations",
+            json={"path": "/etc/x.epub", "ann": {"ch": 1, "quote": "x"}},
+        )
+        self.assertEqual(r.status_code, 400)
 
     def test_i18n_locales_have_identical_keys(self):
         from webui import i18n as i18n_mod

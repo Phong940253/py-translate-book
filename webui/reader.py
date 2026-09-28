@@ -54,6 +54,8 @@ _CACHE_LOCK = threading.Lock()
 _CACHE_MAX = 4
 # Parsed chapters kept per book (items + rendered HTML).
 _CH_CACHE_MAX = 8
+# Plain chapter texts kept per book for search (a whole novel fits easily).
+_PLAIN_MAX = 4096
 
 # Endpoints the sanitizer rewrites in-chapter URLs to. Must match app.py.
 _RES_URL = "/api/reader/res"
@@ -142,6 +144,9 @@ _TAG_RX = re.compile(r"<[^>]+>")
 _NAV_OPEN_RX = re.compile(r"<nav\b([^>]*)>", re.IGNORECASE)
 _TYPE_RX = re.compile(r"""(?:epub:)?type\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
 _SCHEME_RX = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+_SCRIPT_STYLE_RX = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
 
 
 def _collapse(text: str) -> str:
@@ -189,6 +194,12 @@ def _quick_scan(text: str):
         if not title:
             title = None
     return "doc", title, len(_collapse(stripped))
+
+
+def _plain_of(text: str) -> str:
+    """Visible text of a chapter document for search: tags out, ws collapsed."""
+    text = _SCRIPT_STYLE_RX.sub(" ", text)
+    return _collapse(html_unescape(_TAG_RX.sub(" ", text)))
 
 
 def _normalize_ref(base_dir: str, href: str):
@@ -333,6 +344,18 @@ a{color:inherit}
   background:rgb(127 145 255 / .20);box-shadow:inset 3px 0 0 #6f8cff;
   border-radius:5px}
 .rd-fnmark{background:rgb(255 200 80 / .35);border-radius:3px}
+/* search hits (transient) + saved annotation highlights */
+.rd-qhit{background:rgb(255 196 64 / .50);border-radius:3px;
+  box-shadow:0 0 0 1px rgb(255 170 40 / .45)}
+.rd-qhit.rd-qcur{background:rgb(255 160 40 / .75);
+  box-shadow:0 0 0 2px rgb(255 140 20)}
+.rd-hl{border-radius:3px;padding:1px 0;box-decoration-break:clone;
+  -webkit-box-decoration-break:clone}
+.rd-hl-yellow{background:rgb(255 214 91 / .55)}
+.rd-hl-green{background:rgb(120 220 140 / .45)}
+.rd-hl-blue{background:rgb(110 180 255 / .45)}
+.rd-hl-pink{background:rgb(255 140 200 / .45)}
+.rd-content .rd-hl[data-ann]{cursor:pointer}
 html.rd-force body,html.rd-force body *:not(svg):not(svg *):not(img){
   font-family:var(--rd-fam) !important}
 html.pg{overflow:hidden;height:100%}
@@ -597,6 +620,9 @@ class BookDoc:
         self._n_by_zip = {c["zip"]: c["n"] for c in chapters}
         self._ch: "OrderedDict[int, dict]" = OrderedDict()
         self._ch_lock = threading.Lock()
+        # Plain (searchable) chapter text, filled on demand by full-book scans.
+        self._plain: "OrderedDict[int, str]" = OrderedDict()
+        self._plain_lock = threading.Lock()
 
     def meta(self):
         return {
@@ -663,6 +689,32 @@ class BookDoc:
     def doc_html(self, n):
         n = self._check(n)
         return self._chapter_data(n)["html"]
+
+    def plain_text(self, n) -> str:
+        """Visible text of chapter ``n`` for search (regex strip, no DOM).
+
+        Cached per book — a first full-book scan fills it, later searches are
+        memory-only. Text matches the items pipeline closely: tags removed,
+        entities decoded, whitespace collapsed to single spaces.
+        """
+        n = self._check(n)
+        with self._plain_lock:
+            text = self._plain.get(n)
+            if text is not None:
+                self._plain.move_to_end(n)
+                return text
+        ch = self.chapters[n - 1]
+        try:
+            with zipfile.ZipFile(self.path) as zf:
+                raw = zf.read(ch["zip"])
+        except KeyError as e:
+            raise ValueError(f"Missing document {ch['zip']} in EPUB") from e
+        text = _plain_of(_decode(raw))
+        with self._plain_lock:
+            self._plain[n] = text
+            while len(self._plain) > _PLAIN_MAX:
+                self._plain.popitem(last=False)
+        return text
 
 
 def parse_book(path: str) -> BookDoc:
@@ -798,6 +850,68 @@ def load_book(path: str) -> BookDoc:
 
 
 # --------------------------------------------------------------------------
+# Full-book search (plain-text scan over the spine)
+# --------------------------------------------------------------------------
+
+
+def search_book(doc: BookDoc, query: str, *, max_hits: int = 200,
+                per_chapter: int = 8) -> dict:
+    """Scan every chapter for ``query`` (case-insensitive).
+
+    Returns ``{query, total, truncated, chapters: [{n, title, count, hits:
+    [{off, snip}]}]}`` — snippets carry ~40/60 chars of context with ellipses.
+    The client re-finds the match in the rendered chapter itself, so ``off`` is
+    only used for ordering.
+    """
+    query = _collapse(query)
+    if not query:
+        raise ValueError("q is required")
+    if len(query) > 200:
+        raise ValueError("q too long (max 200)")
+    needle = query.casefold()
+    max_hits = max(1, min(int(max_hits), 1000))
+    chapters = []
+    total = 0
+    truncated = False
+
+    for ch in doc.chapters:
+        text = doc.plain_text(ch["n"])
+        low = text.casefold()
+        count = 0
+        hits = []
+        start = 0
+        while True:
+            i = low.find(needle, start)
+            if i < 0:
+                break
+            count += 1
+            total += 1
+            if len(hits) < per_chapter:
+                a = max(0, i - 40)
+                b = min(len(text), i + len(query) + 60)
+                snip = (("…" if a > 0 else "") + text[a:b]
+                        + ("…" if b < len(text) else ""))
+                hits.append({"off": i, "snip": snip})
+            start = i + max(1, len(needle))
+            if total >= max_hits:
+                truncated = True
+                break
+        if count:
+            chapters.append(
+                {"n": ch["n"], "title": ch["title"], "count": count, "hits": hits}
+            )
+        if truncated:
+            break
+
+    return {
+        "query": query,
+        "total": total,
+        "truncated": truncated,
+        "chapters": chapters,
+    }
+
+
+# --------------------------------------------------------------------------
 # Resources (CSS / images / fonts) out of the zip
 # --------------------------------------------------------------------------
 
@@ -918,10 +1032,16 @@ def save_state(path: str, data: dict) -> None:
     raw = json.dumps(data, ensure_ascii=False)
     if len(raw.encode("utf-8")) > _STATE_MAX_BYTES:
         raise ValueError("reader state too large")
-    target = state_path_for(path)
-    # Unique temp name per writer: two concurrent PUTs (the debounced save
-    # racing a keepalive flush on unload) used to share one ".part" file, so
-    # the second os.replace raised FileNotFoundError -> HTTP 500.
+    _atomic_write(state_path_for(path), raw)
+
+
+def _atomic_write(target: str, raw: str) -> None:
+    """Crash-safe JSON write: unique temp file + replace with backoff retries.
+
+    Unique temp name per writer: two concurrent writers (the debounced save
+    racing a keepalive flush on unload) used to share one ".part" file, so the
+    second os.replace raised FileNotFoundError -> HTTP 500.
+    """
     fd, part = tempfile.mkstemp(
         dir=os.path.dirname(os.path.abspath(target)) or ".",
         prefix=".rdstate-",
@@ -945,6 +1065,85 @@ def save_state(path: str, data: dict) -> None:
                 os.remove(part)
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------
+# Annotations sidecar (<book>.ann.json): highlights + notes
+# --------------------------------------------------------------------------
+
+_ANN_COLORS = ("yellow", "green", "blue", "pink")
+_ANN_MAX = 2000
+_ANN_FILE_MAX = 2 * 1024 * 1024
+_QUOTE_MAX = 500
+_NOTE_MAX = 2000
+_CTX_MAX = 80
+# Read-modify-write of the annotations list is serialized process-wide: two
+# quick saves (color tweak + note edit) would otherwise drop one of them.
+_ANN_LOCK = threading.Lock()
+
+
+def ann_path_for(path: str) -> str:
+    return os.path.splitext(path)[0] + ".ann.json"
+
+
+def load_anns(path: str) -> list:
+    try:
+        with open(ann_path_for(path), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, dict):
+        data = data.get("anns")
+    return data if isinstance(data, list) else []
+
+
+def save_anns(path: str, anns: list) -> None:
+    if len(anns) > _ANN_MAX:
+        raise ValueError("too many annotations")
+    raw = json.dumps({"v": 1, "anns": anns}, ensure_ascii=False)
+    if len(raw.encode("utf-8")) > _ANN_FILE_MAX:
+        raise ValueError("annotations too large")
+    _atomic_write(ann_path_for(path), raw)
+
+
+def ann_validate(ann, *, total: int) -> dict:
+    """Normalized annotation copy (raises ValueError with a clean message)."""
+    if not isinstance(ann, dict):
+        raise ValueError("annotation object is required")
+    quote = ann.get("quote")
+    if not isinstance(quote, str) or not quote.strip():
+        raise ValueError("quote is required")
+    if len(quote) > _QUOTE_MAX:
+        raise ValueError(f"quote too long (max {_QUOTE_MAX})")
+    ch = ann.get("ch")
+    if not isinstance(ch, int) or isinstance(ch, bool) or not (1 <= ch <= total):
+        raise ValueError(f"ch must be between 1 and {total}")
+    color = ann.get("color", "yellow")
+    if color not in _ANN_COLORS:
+        raise ValueError("bad color")
+    note = ann.get("note", "")
+    if not isinstance(note, str):
+        note = ""
+    item = ann.get("item")
+    if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+        item = None
+
+    def ctx(key):
+        v = ann.get(key)
+        return v[:_CTX_MAX] if isinstance(v, str) and v else ""
+
+    out = {
+        "quote": quote.strip()[:_QUOTE_MAX],
+        "ch": ch,
+        "color": color,
+        "note": note[:_NOTE_MAX],
+        "item": item,
+        "pre": ctx("pre"),
+        "post": ctx("post"),
+    }
+    if isinstance(ann.get("id"), str) and ann["id"]:
+        out["id"] = ann["id"][:32]
+    return out
 
 
 # --------------------------------------------------------------------------

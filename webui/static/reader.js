@@ -427,6 +427,21 @@
       setCurrent(0, { scroll: false });
     }
 
+    // P2: re-apply highlights for this chapter (fresh srcdoc each load)
+    applyAnnMarks();
+    if (srch.pending) {
+      applyPendingSearch();
+    } else if (srch.q && srch.scope === 'chapter' &&
+               el('rd-panel-search') && !el('rd-panel-search').hidden) {
+      runChapterSearch(srch.q);
+    }
+    if (wantAnn) {
+      var wa = null;
+      anns.forEach(function (a) { if (a.id === wantAnn) wa = a; });
+      wantAnn = null;
+      if (wa) focusAnnMark(wa);
+    }
+
     showLoading(false);
     renderPosition();
     qsa('.rd-content img', doc).forEach(function (im) {
@@ -1041,6 +1056,7 @@
 
   function onFrameClick(ev) {
     wakeBar();
+    hideSelPop();
     var t = ev.target;
     if (!t || !t.closest) return;
     var a = t.closest ? t.closest('a[href]') : null;
@@ -1105,9 +1121,721 @@
     doc.addEventListener('wheel', onWheel, { passive: false });
     doc.addEventListener('touchstart', onTouchStart, { passive: true });
     doc.addEventListener('touchend', onTouchEnd, { passive: true });
+    doc.addEventListener('selectionchange', onSelChangeSoon);
     ['mousemove', 'keydown', 'touchstart'].forEach(function (evt) {
       doc.addEventListener(evt, wakeBar, { passive: true });
     });
+  }
+
+  /* --------------------------------------------- text match + marks */
+  var WS_RX = /\s/;
+  var ORIG_SEQ = 0;   // id generator: pieces split from one node share an id
+
+  function textNodesOf(root) {
+    var out = [], w, n;
+    if (!root) return out;
+    try { w = fdoc.createTreeWalker(root, 4 /* SHOW_TEXT */, null); }
+    catch (e) { return out; }
+    while ((n = w.nextNode())) out.push(n);
+    return out;
+  }
+
+  /* Normalized text of one text node: whitespace runs → single space, ends
+     trimmed — mirrors Python `_collapse` per node (textOf joins with " ").
+     Map entries are {node, idx, end}: the raw span of each normalized char. */
+  function normNode(node) {
+    var data = node.data || '', text = '', map = [];
+    var i = 0, L = data.length;
+    while (i < L && WS_RX.test(data.charAt(i))) i++;
+    while (i < L) {
+      if (WS_RX.test(data.charAt(i))) {
+        var run = i;
+        while (i < L && WS_RX.test(data.charAt(i))) i++;
+        if (i >= L) break;
+        text += ' '; map.push({ node: node, idx: run, end: i });
+      } else {
+        text += data.charAt(i); map.push({ node: node, idx: i, end: i + 1 }); i++;
+      }
+    }
+    return { text: text, map: map };
+  }
+
+  /* Marks split text nodes (splitText) — normalizing each piece separately
+     would drop/insert boundary whitespace ("bold " + "SPANS" → "boldSPANS")
+     and shift every later offset. Pieces split from ONE original node carry
+     the same __rdOrig id and are normalized jointly here. */
+  function normGroup(nodes) {
+    var text = '', map = [], started = false, run = null;
+    for (var k = 0; k < nodes.length; k++) {
+      var node = nodes[k], data = node.data || '', L = data.length;
+      for (var i = 0; i < L; i++) {
+        if (WS_RX.test(data.charAt(i))) {
+          if (!started) continue;                       // leading ws
+          if (!run) run = { node: node, idx: i, end: i + 1 };
+          else if (run.node === node) run.end = i + 1;  // same-node run grows
+          // run crossing into another piece keeps the start node's span
+        } else {
+          if (!started) started = true;
+          else if (run) { text += ' '; map.push(run); run = null; }  // join space
+          text += data.charAt(i); map.push({ node: node, idx: i, end: i + 1 });
+        }
+      }
+    }
+    return { text: text, map: map };   // trailing ws run stays unemitted
+  }
+
+  /* Full normalized text of an element + segment table for offset mapping.
+     One segment per "textual unit": an untouched original text node, or the
+     group of pieces a mark split from one — so text is identical whether or
+     not highlights are present. Between segments sits the single " " that
+     textOf's join (and the server's get_text) produces. */
+  function normFull(root) {
+    var groups = [];
+    textNodesOf(root).forEach(function (nd) {
+      var oid = nd.__rdOrig, last = groups[groups.length - 1];
+      if (oid != null && last && last.oid === oid) last.nodes.push(nd);
+      else groups.push({ oid: (oid == null ? null : oid), nodes: [nd] });
+    });
+    var segs = [];
+    groups.forEach(function (g) {
+      var p = (g.nodes.length > 1) ? normGroup(g.nodes) : normNode(g.nodes[0]);
+      if (p.text) segs.push(p);
+    });
+    var full = '', starts = [];
+    segs.forEach(function (p, i) {
+      starts.push(full.length + (i ? 1 : 0));
+      if (i) full += ' ';
+      full += p.text;
+    });
+    return { segs: segs, starts: starts, text: full };
+  }
+
+  /* Raw [from,to) runs per text node for the full-text span [a,b). */
+  function rangeSegments(nf, a, b) {
+    var out = [];
+    for (var i = 0; i < nf.segs.length; i++) {
+      var p = nf.segs[i], s = nf.starts[i], e = s + p.text.length;
+      var oa = Math.max(a, s), ob = Math.min(b, e);
+      if (oa >= ob) continue;
+      var run = null;
+      for (var j = oa - s; j < ob - s; j++) {
+        var en = p.map[j];
+        if (!en) continue;
+        if (run && run.node === en.node) { run.to = en.end; continue; }
+        if (run) out.push(run);
+        run = { node: en.node, from: en.idx, to: en.end };
+      }
+      if (run) out.push(run);
+    }
+    return out;
+  }
+
+  function findRanges(nf, query, all) {
+    var hay = nf.text.toLowerCase(), needle = String(query || '').toLowerCase();
+    if (!needle) return [];
+    var out = [], start = 0, cap = all ? 400 : 1;
+    while (out.length < cap) {
+      var i = hay.indexOf(needle, start);
+      if (i < 0) break;
+      out.push([i, i + needle.length]);
+      start = i + Math.max(1, needle.length);
+    }
+    return out;
+  }
+
+  /* Wrap one full-text span → one <mark> per touched text node (they may sit
+     in different parents, e.g. across an <em> boundary). Splits tag both
+     halves with the original node's __rdOrig id so normFull still treats
+     them as one textual unit. */
+  function splitTagged(node, at) {
+    if (node.__rdOrig == null) node.__rdOrig = ++ORIG_SEQ;
+    var tail = node.splitText(at);
+    tail.__rdOrig = node.__rdOrig;
+    return tail;
+  }
+
+  function wrapRange(nf, a, b, cls, attrs) {
+    var segs = rangeSegments(nf, a, b), marks = [];
+    for (var s = segs.length - 1; s >= 0; s--) {
+      var sg = segs[s], node = sg.node;
+      if (!node || !node.parentNode) continue;
+      var from = sg.from, to = Math.min(sg.to, node.data.length);
+      if (from >= to) continue;
+      if (to < node.data.length) splitTagged(node, to);
+      var mid = node;
+      if (from > 0) mid = splitTagged(node, from);
+      var mk = fdoc.createElement('mark');
+      mk.className = cls;
+      if (attrs) Object.keys(attrs).forEach(function (k) { mk.setAttribute(k, attrs[k]); });
+      mid.parentNode.insertBefore(mk, mid);
+      mk.appendChild(mid);
+      marks.push(mk);
+    }
+    return marks.reverse();
+  }
+
+  /* Mark every occurrence of `query` under `root` (case-insensitive).
+     Matches wrap last-to-first so earlier raw offsets stay valid. */
+  function markText(root, query, cls) {
+    var nf = normFull(root);
+    var ranges = findRanges(nf, query, true);
+    var out = [];
+    for (var r = ranges.length - 1; r >= 0; r--) {
+      var marks = wrapRange(nf, ranges[r][0], ranges[r][1], cls || 'rd-qhit');
+      out.push({ marks: marks, a: ranges[r][0], b: ranges[r][1] });
+    }
+    return out.reverse();
+  }
+
+  function unwrapMarks(marks) {
+    (marks || []).forEach(function (m) {
+      if (!m || !m.parentNode) return;
+      var p = m.parentNode;
+      while (m.firstChild) p.insertBefore(m.firstChild, m);
+      p.removeChild(m);
+      if (p.normalize) p.normalize();
+    });
+  }
+
+  /* ------------------------------------------------------- annotations */
+  var anns = [];
+  var selPend = null;      // selection snapshot awaiting a color/note pick
+  var selLock = 0;         // mousedown inside the popup must not self-hide
+  var wantAnn = null;      // annotation to focus after a chapter load
+
+  function annSorted() {
+    return anns.slice().sort(function (a, b) {
+      return (a.ch - b.ch) || String(a.id).localeCompare(String(b.id));
+    });
+  }
+
+  function annChapLabel(c) {
+    var meta = state.meta;
+    var ch = meta && meta.chapters && meta.chapters[c - 1];
+    if (ch) return chapterLabel(ch);
+    return String(c);
+  }
+
+  function annStatus(msg, isErr) {
+    var n = el('rd-ann-status');
+    if (!n) return;
+    n.textContent = msg || '';
+    n.className = 'muted small' + (isErr ? ' error' : '');
+  }
+
+  function smallBtn(label, title, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost btn-sm';
+    b.textContent = label;
+    if (title) { b.title = title; b.setAttribute('aria-label', title); }
+    b.addEventListener('click', fn);
+    return b;
+  }
+
+  function renderAnns() {
+    var list = el('rd-ann-list'), cnt = el('rd-ann-count');
+    if (cnt) cnt.textContent = anns.length
+      ? fmt('read.ann_count', { n: anns.length }) : '';
+    if (!list) return;
+    list.textContent = '';
+    if (!anns.length) {
+      var empty = document.createElement('div');
+      empty.className = 'muted small';
+      empty.textContent = i18n('read.ann_none');
+      list.appendChild(empty);
+      return;
+    }
+    var chap = null;
+    annSorted().forEach(function (a) {
+      if (a.ch !== chap) {
+        chap = a.ch;
+        var h = document.createElement('div');
+        h.className = 'rd-ann-chap';
+        h.textContent = annChapLabel(chap);
+        list.appendChild(h);
+      }
+      list.appendChild(annRow(a));
+    });
+  }
+
+  function annRow(a) {
+    var row = document.createElement('div');
+    row.className = 'rd-ann-row';
+    row.dataset.id = a.id;
+
+    var dot = document.createElement('span');
+    dot.className = 'rd-dot rd-dot-' + a.color + ' rd-dot-static';
+    row.appendChild(dot);
+
+    var body = document.createElement('button');
+    body.type = 'button';
+    body.className = 'rd-ann-body';
+    var q = document.createElement('span');
+    q.className = 'rd-ann-quote';
+    q.textContent = a.quote.length > 140 ? a.quote.slice(0, 140) + '…' : a.quote;
+    body.appendChild(q);
+    if (a.note) {
+      var nt = document.createElement('span');
+      nt.className = 'rd-ann-note-txt';
+      nt.textContent = a.note;
+      body.appendChild(nt);
+    }
+    body.addEventListener('click', function () { jumpToAnn(a); });
+    row.appendChild(body);
+
+    var tools = document.createElement('span');
+    tools.className = 'rd-ann-tools';
+    tools.appendChild(smallBtn('✎', i18n('read.ann_note_ph'),
+      function () { editAnnNote(row, a); }));
+    tools.appendChild(smallBtn('✕', i18n('read.close'),
+      function () { deleteAnn(a); }));
+    row.appendChild(tools);
+    return row;
+  }
+
+  function editAnnNote(row, a) {
+    var exist = row.querySelector('.rd-ann-edit textarea');
+    if (exist) { exist.focus(); return; }
+    var wrap = document.createElement('div');
+    wrap.className = 'rd-ann-edit';
+    var ta = document.createElement('textarea');
+    ta.className = 'rd-input';
+    ta.rows = 2;
+    ta.placeholder = i18n('read.ann_note_ph');
+    ta.value = a.note || '';
+    var bar = document.createElement('div');
+    bar.className = 'rd-ann-editbar';
+    bar.appendChild(smallBtn('✓', i18n('read.ann_saved'), function () {
+      persistAnn(a, { note: ta.value.slice(0, 2000) });
+    }));
+    bar.appendChild(smallBtn('✕', i18n('read.close'), function () { renderAnns(); }));
+    wrap.appendChild(ta);
+    wrap.appendChild(bar);
+    row.appendChild(wrap);
+    ta.focus();
+  }
+
+  function annRequest(method, url) {
+    return fetch(url, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, ann: arguments[2] })
+    }).then(function (res) {
+      return res.text().then(function (raw) {
+        var data = null;
+        try { data = JSON.parse(raw); } catch (e) { /* non-JSON */ }
+        if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+        return data;
+      });
+    });
+  }
+
+  function persistAnn(a, patch) {
+    return annRequest('PUT', R.annUrl, Object.assign({}, a, patch)).then(function (saved) {
+      var i = -1;
+      anns.forEach(function (x, k) { if (x.id === saved.id) i = k; });
+      if (i >= 0) anns[i] = saved; else anns.push(saved);
+      renderAnns();
+      annStatus(i18n('read.ann_saved'));
+      if (patch.color) refreshAnnMark(saved);
+      return saved;
+    }).catch(function (e) {
+      annStatus(i18n('read.ann_failed') + ' ' + (e.message || ''), true);
+      return null;
+    });
+  }
+
+  function deleteAnn(a) {
+    if (!window.confirm(i18n('read.ann_delete'))) return;
+    fetch(withQuery(R.annUrl, { id: a.id }), { method: 'DELETE' })
+      .then(function (res) {
+        if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+      })
+      .then(function () {
+        anns = anns.filter(function (x) { return x.id !== a.id; });
+        clearAnnMarks(a.id);
+        renderAnns();
+        annStatus('');
+      })
+      .catch(function (e) {
+        annStatus(i18n('read.ann_failed') + ' ' + (e.message || ''), true);
+      });
+  }
+
+  function addAnn(color, note) {
+    var p = selPend;
+    if (!p) return Promise.resolve(null);
+    var ann = {
+      ch: p.ch, item: p.item, quote: p.quote, pre: p.pre, post: p.post,
+      color: color, note: note || ''
+    };
+    return annRequest('POST', R.annUrl, ann).then(function (created) {
+      anns.push(created);
+      hideSelPop();
+      renderAnns();
+      annStatus(i18n('read.ann_saved'));
+      markQuote(created);
+      return created;
+    }).catch(function (e) {
+      annStatus(i18n('read.ann_failed') + ' ' + (e.message || ''), true);
+      return null;
+    });
+  }
+
+  function annMarks(id) {
+    if (!fdoc) return [];
+    return qsa('[data-ann="' + id + '"]', fdoc);
+  }
+
+  function clearAnnMarks(id) { unwrapMarks(annMarks(id)); }
+
+  function refreshAnnMark(a) {
+    if (!fdoc || a.ch !== state.ch) return;
+    clearAnnMarks(a.id);
+    markQuote(a);
+  }
+
+  /* Locate an annotation's quote in the chapter (stored item first, then the
+     whole chapter; stored pre/post context disambiguates repeats). */
+  function markQuote(a) {
+    if (!fdoc || a.ch !== state.ch || !state.frameReady) return false;
+    var first = (a.item != null && state.nodeOf[a.item]) || null;
+    var order = [];
+    if (first) order.push(first);
+    (state.nodeOf || []).forEach(function (nd) {
+      if (nd && nd !== first) order.push(nd);
+    });
+    for (var i = 0; i < order.length; i++) {
+      var nf = normFull(order[i]);
+      var ranges = findRanges(nf, a.quote, true);
+      if (!ranges.length) continue;
+      var pick = ranges[0];
+      if (a.pre || a.post) {
+        for (var r = 0; r < ranges.length; r++) {
+          var s = ranges[r][0], e = ranges[r][1];
+          var okPre = !a.pre ||
+            nf.text.slice(Math.max(0, s - a.pre.length), s) === a.pre;
+          var okPost = !a.post || nf.text.slice(e, e + a.post.length) === a.post;
+          if (okPre && okPost) { pick = ranges[r]; break; }
+        }
+      }
+      var marks = wrapRange(nf, pick[0], pick[1],
+        'rd-hl rd-hl-' + a.color, { 'data-ann': a.id });
+      if (marks.length) return true;
+    }
+    return false;
+  }
+
+  function applyAnnMarks() {
+    var missing = false;
+    anns.forEach(function (a) {
+      if (a.ch === state.ch && !markQuote(a)) missing = true;
+    });
+    if (missing) annStatus(i18n('read.ann_missing'));
+  }
+
+  function focusAnnMark(a) {
+    var marks = annMarks(a.id);
+    if (!marks.length) return false;
+    var mk = marks[0];
+    var it = climbToItem(mk);
+    if (it) setCurrent(it.__rdIdx, { scroll: false });
+    scrollToNode(mk);
+    return true;
+  }
+
+  function jumpToAnn(a) {
+    hideSelPop();
+    if (a.ch === state.ch) {
+      if (!focusAnnMark(a) && !markQuote(a)) {
+        annStatus(i18n('read.ann_missing'));
+      } else {
+        focusAnnMark(a);
+      }
+      return;
+    }
+    stopForNavigation();
+    flushSidecar(false);
+    wantAnn = a.id;
+    loadChapter(a.ch, { item: a.item != null ? a.item : 0, push: true });
+  }
+
+  /* ------------------------------------------------- selection popup */
+  /* Map a selection range into the normalized text (nf) of an item so the
+     quote we store is *literally a substring of nf.text*. range.toString()
+     concatenates raw node data, which diverges from textOf's per-node join
+     at no-whitespace tag boundaries ("world<em>,x" → raw "world,x" vs nf
+     "world ,x") and would then fail to be found again on restore. */
+  function edgeTextNode(node, offset, isEnd) {
+    if (!node) return null;
+    if (node.nodeType === 3) return { node: node, off: offset };
+    var kids = node.childNodes;
+    if (!kids || !kids.length) return null;
+    try {
+      if (!isEnd) {
+        var kid = kids[offset] || kids[kids.length - 1];
+        if (!kid) return null;
+        if (kid.nodeType === 3) return { node: kid, off: 0 };
+        var w = fdoc.createTreeWalker(kid, 4, null);
+        var first = w.nextNode();
+        return first ? { node: first, off: 0 } : null;
+      }
+      var kid2 = kids[Math.max(0, offset - 1)];
+      if (!kid2) return null;
+      if (kid2.nodeType === 3) return { node: kid2, off: kid2.data.length };
+      var w2 = fdoc.createTreeWalker(kid2, 4, null), last = null, t;
+      while ((t = w2.nextNode())) last = t;
+      return last ? { node: last, off: last.data.length } : null;
+    } catch (e) { return null; }
+  }
+
+  /* raw index in a segment's node → index in nf.text. The node's entries
+     form one contiguous block in the group map: every entry before the block
+     belongs to earlier pieces of the same unit and counts as well. Returns
+     -1 when the node carries no normalized text (all whitespace). */
+  function normPos(nf, node, rawOff) {
+    for (var i = 0; i < nf.segs.length; i++) {
+      var p = nf.segs[i], f0 = -1, f1 = -1;
+      for (var j = 0; j < p.map.length; j++) {
+        if (p.map[j].node !== node) continue;
+        if (f0 < 0) f0 = j;
+        f1 = j + 1;
+      }
+      if (f0 < 0) continue;
+      var cnt = f0;                       // chars of preceding pieces
+      for (var k = f0; k < f1; k++) {
+        if (p.map[k].idx < rawOff) cnt++; else break;
+      }
+      return nf.starts[i] + cnt;
+    }
+    return -1;
+  }
+
+  function quoteFromRange(nf, range) {
+    var s = edgeTextNode(range.startContainer, range.startOffset, false);
+    var e = edgeTextNode(range.endContainer, range.endOffset, true);
+    if (!s || !e) return null;
+    var a = normPos(nf, s.node, s.off);
+    var b = normPos(nf, e.node, e.off);
+    if (a < 0 || b < 0 || a >= b) return null;
+    return { a: a, b: b, quote: nf.text.slice(a, b) };
+  }
+
+  function hideSelPop() {
+    var p = el('rd-selpop');
+    if (p) p.hidden = true;
+    selPend = null;
+  }
+
+  function showSelPop(range) {
+    var pop = el('rd-selpop');
+    if (!pop || !frame) return;
+    pop.hidden = false;
+    var rect = range.getBoundingClientRect();
+    var fr = frame.getBoundingClientRect();
+    var pw = pop.offsetWidth, ph = pop.offsetHeight;
+    var x = fr.left + rect.left + rect.width / 2 - pw / 2;
+    var y = fr.top + rect.bottom + 8;
+    x = Math.max(8, Math.min(x, window.innerWidth - pw - 8));
+    if (y + ph > window.innerHeight - 8) y = fr.top + rect.top - ph - 8;
+    pop.style.left = x + 'px';
+    pop.style.top = Math.max(8, y) + 'px';
+  }
+
+  var selT = 0;
+  function onSelChangeSoon() {
+    if (selT) clearTimeout(selT);
+    selT = setTimeout(function () { selT = 0; onSelChange(); }, 90);
+  }
+
+  function onSelChange() {
+    if (selLock || !fdoc || !state.frameReady) return;
+    var so = null;
+    try { so = fdoc.getSelection(); } catch (e) { return; }
+    if (!so || so.isCollapsed || !so.rangeCount) { hideSelPop(); return; }
+    var range = so.getRangeAt(0);
+    var item = climbToItem(range.commonAncestorContainer);
+    if (!item || item.__rdIdx == null) { hideSelPop(); return; }
+    var nf = normFull(item);
+    var q = quoteFromRange(nf, range);
+    var quote = q ? q.quote : String(range.toString() || '').replace(/\s+/g, ' ').trim();
+    var lead = quote.length - quote.replace(/^\s+/, '').length;
+    quote = quote.replace(/^\s+|\s+$/g, '').slice(0, 500);
+    if (quote.length < 2) { hideSelPop(); return; }
+    var i = q ? (q.a + lead) : nf.text.indexOf(quote);
+    selPend = {
+      ch: state.ch,
+      item: item.__rdIdx,
+      quote: quote,
+      pre: i >= 0 ? nf.text.slice(Math.max(0, i - 20), i) : '',
+      post: i >= 0 ? nf.text.slice(i + quote.length, i + quote.length + 20) : ''
+    };
+    showSelPop(range);
+  }
+
+  /* ------------------------------------------------------------- search */
+  var srch = {
+    scope: 'book', q: '', matches: [], cur: -1, token: 0, pending: null, t: 0
+  };
+
+  function searchStatus(msg, cls) {
+    var n = el('rd-search-status');
+    if (!n) return;
+    n.textContent = msg || '';
+    n.className = 'muted small' + (cls ? ' ' + cls : '');
+  }
+
+  function showQNav(on) {
+    var nav = el('rd-search-nav');
+    if (nav) nav.hidden = !on;
+    renderQIdx();
+  }
+
+  function renderQIdx() {
+    var n = el('rd-q-idx');
+    if (!n) return;
+    n.textContent = (srch.cur >= 0 && srch.matches.length)
+      ? fmt('read.search_match', { i: srch.cur + 1, n: srch.matches.length }) : '';
+  }
+
+  function setScope(scope) {
+    srch.scope = scope === 'chapter' ? 'chapter' : 'book';
+    qsa('.rd-scope').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.scope === srch.scope));
+    });
+    runSearch();
+  }
+
+  function runSearch() {
+    var qi = el('rd-search-q');
+    if (qi) srch.q = qi.value;
+    clearSearch(true);
+    var q = String(srch.q || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    srch.q = q;
+    if (!q) { searchStatus(''); return; }
+    if (srch.scope === 'chapter') runChapterSearch(q);
+    else runBookSearch(q);
+  }
+
+  function clearSearch(keepInput) {
+    clearQMarks();
+    showQNav(false);
+    var res = el('rd-search-results');
+    if (res) res.textContent = '';
+    if (!keepInput) {
+      var qi = el('rd-search-q');
+      if (qi) qi.value = '';
+      srch.q = '';
+    }
+    srch.pending = null;
+  }
+
+  function clearQMarks() {
+    (srch.matches || []).forEach(function (m) { unwrapMarks(m.marks); });
+    srch.matches = [];
+    srch.cur = -1;
+  }
+
+  function runChapterSearch(q) {
+    if (!fdoc || !state.frameReady) return;
+    var root = qs('.rd-content', fdoc) || fdoc.body;
+    srch.matches = markText(root, q, 'rd-qhit');
+    if (!srch.matches.length) {
+      searchStatus(i18n('read.search_none'));
+      showQNav(false);
+      return;
+    }
+    searchStatus(fmt('read.search_results', { n: srch.matches.length }));
+    showQNav(true);
+    focusQ(0);
+  }
+
+  function focusQ(i) {
+    var m = srch.matches;
+    if (!m.length) return;
+    var prev = m[srch.cur];
+    if (prev) prev.marks.forEach(function (x) { x.classList.remove('rd-qcur'); });
+    srch.cur = ((i % m.length) + m.length) % m.length;
+    m[srch.cur].marks.forEach(function (x) { x.classList.add('rd-qcur'); });
+    var mk = m[srch.cur].marks[0];
+    if (mk) scrollToNode(mk);
+    renderQIdx();
+  }
+
+  function stepQ(d) {
+    if (!srch.matches.length) return;
+    focusQ(srch.cur + d);
+  }
+
+  function runBookSearch(q) {
+    var token = ++srch.token;
+    searchStatus(i18n('read.search_scanning'));
+    var res = el('rd-search-results');
+    if (res) res.textContent = '';
+    getJSON(withQuery(R.searchUrl, { q: q, max: 300 })).then(function (data) {
+      if (token !== srch.token) return;
+      searchStatus('');
+      renderBookResults(q, data);
+    }).catch(function (e) {
+      if (token !== srch.token) return;
+      searchStatus(i18n('read.search_none') + ' — ' + (e.message || ''), 'error');
+    });
+  }
+
+  function renderBookResults(q, data) {
+    var res = el('rd-search-results');
+    if (!res) return;
+    res.textContent = '';
+    var rows = (data && data.chapters) || [];
+    if (!rows.length) { searchStatus(i18n('read.search_none')); return; }
+    var status = fmt('read.search_results', { n: data.total });
+    if (data.truncated) status += ' · ' + fmt('read.search_trunc', { n: data.total });
+    searchStatus(status);
+    rows.forEach(function (row) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'rd-res';
+      var head = document.createElement('span');
+      head.className = 'rd-res-head';
+      head.textContent = chapterLabel(row);
+      var cnt = document.createElement('span');
+      cnt.className = 'rd-res-count';
+      cnt.textContent = row.count;
+      head.appendChild(cnt);
+      b.appendChild(head);
+      var snip = document.createElement('span');
+      snip.className = 'rd-res-snip';
+      snip.textContent = (row.hits && row.hits[0] && row.hits[0].snip) || '';
+      b.appendChild(snip);
+      b.addEventListener('click', function () { openSearchChapter(q, row); });
+      res.appendChild(b);
+    });
+  }
+
+  function openSearchChapter(q, row) {
+    stopForNavigation();
+    flushSidecar(false);
+    srch.pending = { q: q, n: row.n };
+    if (state.ch === row.n) applyPendingSearch();
+    else loadChapter(row.n, { push: true });
+  }
+
+  /* Mark the pending search hits once the target chapter is in the DOM. */
+  function applyPendingSearch() {
+    var p = srch.pending;
+    if (!p || !fdoc || !state.frameReady) return;
+    srch.pending = null;
+    var root = qs('.rd-content', fdoc) || fdoc.body;
+    srch.matches = markText(root, p.q, 'rd-qhit');
+    if (!srch.matches.length) {
+      searchStatus(i18n('read.search_none'));
+      showQNav(false);
+      return;
+    }
+    searchStatus(fmt('read.search_results', { n: srch.matches.length }));
+    showQNav(true);
+    focusQ(0);
   }
 
   /* ------------------------------------------------------------ panels */
@@ -1116,7 +1844,7 @@
     if (!rd) return;
     var open = rd.dataset.panel === name ? '' : (name || '');
     rd.dataset.panel = open;
-    ['toc', 'font', 'tts'].forEach(function (n) {
+    ['toc', 'font', 'tts', 'search', 'ann'].forEach(function (n) {
       var panel = el('rd-panel-' + n);
       var btn = el('rd-open-' + n);
       var show = n === open;
@@ -1125,6 +1853,11 @@
     });
     if (open === 'tts') warmVoices();
     if (open === 'toc') markToc();
+    if (open === 'search') {
+      var qi = el('rd-search-q');
+      if (qi) { qi.value = srch.q || ''; qi.focus(); qi.select(); }
+    }
+    if (open === 'ann') renderAnns();
     resizeStage();
     requestAnimationFrame(resizeStage);
   }
@@ -1448,6 +2181,8 @@
     var k = ev.key;
 
     if (k === 'Escape' || k === 'Esc') {
+      var pop = el('rd-selpop');
+      if (pop && !pop.hidden) { hideSelPop(); return; }
       var fn = el('rd-fn');
       if (fn && !fn.hidden) { closeFootnote(); return; }
       if (document.fullscreenElement || document.webkitFullscreenElement) { toggleFullscreen(); return; }
@@ -1495,6 +2230,8 @@
       case 't': case 'T': togglePanel('toc'); return;
       case 'f': case 'F': togglePanel('font'); return;
       case 'r': case 'R': togglePanel('tts'); return;
+      case 's': case 'S': togglePanel('search'); return;
+      case 'n': case 'N': togglePanel('ann'); return;
       default: return;
     }
   }
@@ -1537,12 +2274,76 @@
   /* ------------------------------------------------------------- wiring */
   function bindStatic() {
     // panels
-    ['toc', 'font', 'tts'].forEach(function (n) {
+    ['toc', 'font', 'tts', 'search', 'ann'].forEach(function (n) {
       var btn = el('rd-open-' + n);
       if (btn) btn.addEventListener('click', function () { togglePanel(n); });
     });
     var fnClose = el('rd-fn-close');
     if (fnClose) fnClose.addEventListener('click', closeFootnote);
+
+    // selection popup → create annotation
+    var pop = el('rd-selpop');
+    if (pop) {
+      pop.addEventListener('mousedown', function () { selLock = 1; });
+      pop.addEventListener('touchstart', function () { selLock = 1; }, { passive: true });
+      pop.addEventListener('mouseup', function () {
+        setTimeout(function () { selLock = 0; }, 140);
+      });
+      pop.addEventListener('touchend', function () {
+        setTimeout(function () { selLock = 0; }, 140);
+      });
+      qsa('.rd-dot[data-color]', pop).forEach(function (b) {
+        b.addEventListener('click', function () { addAnn(b.dataset.color, ''); });
+      });
+      var selNote = el('rd-sel-note');
+      if (selNote) selNote.addEventListener('click', function () {
+        addAnn('yellow', '').then(function (created) {
+          if (!created) return;
+          togglePanel('ann');
+          var row = qs('.rd-ann-row[data-id="' + created.id + '"]');
+          if (row) editAnnNote(row, created);
+        });
+      });
+    }
+    // click anywhere else in the parent document dismisses the popup
+    document.addEventListener('mousedown', function (ev) {
+      var p = el('rd-selpop');
+      if (!p || p.hidden) return;
+      if (p.contains(ev.target)) return;
+      hideSelPop();
+    });
+
+    // search panel
+    var searchQ = el('rd-search-q');
+    if (searchQ) {
+      searchQ.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); runSearch(); return; }
+        if (ev.key === 'ArrowDown' && srch.matches.length) {
+          ev.preventDefault(); stepQ(1); return;
+        }
+        if (ev.key === 'ArrowUp' && srch.matches.length) {
+          ev.preventDefault(); stepQ(-1); return;
+        }
+      });
+      searchQ.addEventListener('input', function () {
+        srch.q = this.value;
+        if (srch.scope !== 'chapter') return;
+        if (srch.t) clearTimeout(srch.t);
+        srch.t = setTimeout(function () { srch.t = 0; runSearch(); }, 220);
+      });
+    }
+    var searchGo = el('rd-search-go');
+    if (searchGo) searchGo.addEventListener('click', runSearch);
+    qsa('.rd-scope').forEach(function (b) {
+      b.addEventListener('click', function () { setScope(b.dataset.scope); });
+    });
+    var qPrev = el('rd-q-prev'), qNext = el('rd-q-next'), qClear = el('rd-q-clear');
+    if (qPrev) qPrev.addEventListener('click', function () { stepQ(-1); });
+    if (qNext) qNext.addEventListener('click', function () { stepQ(1); });
+    if (qClear) qClear.addEventListener('click', function () {
+      clearSearch(false);
+      searchStatus('');
+    });
 
     // chapter nav
     var prevCh = el('rd-prev-ch'), nextCh = el('rd-next-ch'), sel = el('rd-chapter');
@@ -1756,11 +2557,13 @@
     Promise.all([
       getJSON(bookUrl(R.metaUrl)),
       getJSON(bookUrl(R.stateUrl)).catch(function () { return null; }),
-      getJSON(bookUrl(R.tocUrl)).catch(function () { return null; })
+      getJSON(bookUrl(R.tocUrl)).catch(function () { return null; }),
+      getJSON(bookUrl(R.annUrl)).catch(function () { return null; })
     ]).then(function (r) {
       var meta = r[0], remote = r[1], toc = r[2];
       state.meta = meta;
       state.toc = toc;
+      anns = (r[3] && r[3].anns) || [];
       if (remote && remote.settings) {
         settings = Object.assign({}, settings, remote.settings);
         if (settings.family === 'custom') settings.family = 'serif';
@@ -1769,6 +2572,7 @@
       applySettings();
       buildSelect();
       buildToc();
+      renderAnns();
       var pos = (remote && remote.pos) || localPos || { ch: 1 };
       bootPos = pos;
       sessionPos[pos.ch || 1] = pos;
