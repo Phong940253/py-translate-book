@@ -412,6 +412,7 @@
     buildItems(doc);
     bindFrame(doc);
     clearSent();   // sentence marks from the previous document died with it
+    markChapterVisited(state.ch);
 
     // restore reading position (TTS > saved CFI > legacy item > top)
     if (speak.on) {
@@ -1863,7 +1864,7 @@
       if (pb) { try { pb.focus(); } catch (e) { /* inert */ } }
     }
     if (open === 'tts') warmVoices();
-    if (open === 'toc') markToc();
+    if (open === 'toc') { markToc(); renderStats(); }
     if (open === 'search') {
       var qi = el('rd-search-q');
       if (qi) { qi.value = srch.q || ''; qi.focus(); qi.select(); }
@@ -1871,6 +1872,75 @@
     if (open === 'ann') renderAnns();
     resizeStage();
     requestAnimationFrame(resizeStage);
+  }
+
+  /* ------------------------------------------------------- reading stats */
+  /* Per-book minutes + visited chapters, kept in localStorage (client-only).
+     A 15s tick counts while the page is visible OR TTS is speaking, so
+     screen-off listening still accumulates. */
+  var stats = null;
+
+  function statsKey() { return 'rdStats:' + (R.path || ''); }
+
+  function loadStats() {
+    if (stats) return stats;
+    stats = { total: 0, days: {}, chapters: {} };
+    var ls = null;
+    try { ls = window.localStorage; } catch (e) { /* no storage */ }
+    if (!ls) return stats;
+    try {
+      var p = JSON.parse(ls.getItem(statsKey()) || 'null');
+      if (p && typeof p === 'object') {
+        stats.total = Number(p.total) || 0;
+        stats.days = (p.days && typeof p.days === 'object') ? p.days : {};
+        stats.chapters = (p.chapters && typeof p.chapters === 'object') ? p.chapters : {};
+      }
+    } catch (e) { /* corrupt → fresh */ }
+    return stats;
+  }
+
+  function saveStats() {
+    var ls = null;
+    try { ls = window.localStorage; } catch (e) { /* no storage */ }
+    if (!ls) return;
+    try { ls.setItem(statsKey(), JSON.stringify(stats)); } catch (e) { /* quota */ }
+  }
+
+  function todayKey() {
+    var d = new Date();
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) +
+      '-' + ('0' + d.getDate()).slice(-2);
+  }
+
+  function statsTick() {
+    if (document.visibilityState === 'hidden' && !(speak.on && !speak.paused)) return;
+    var s = loadStats();
+    s.total += 15;
+    var k = todayKey();
+    s.days[k] = (Number(s.days[k]) || 0) + 15;
+    var ks = Object.keys(s.days).sort();
+    while (ks.length > 60) { delete s.days[ks.shift()]; }
+    saveStats();
+    var rd = el('rd');
+    if (rd && rd.dataset.panel === 'toc') renderStats();
+  }
+
+  function markChapterVisited(n) {
+    var s = loadStats();
+    if (s.chapters[n]) return;
+    s.chapters[n] = 1;
+    saveStats();
+  }
+
+  function renderStats() {
+    var n = el('rd-toc-stats');
+    if (!n) return;
+    var s = loadStats();
+    n.textContent = fmt('read.stats', {
+      today: Math.round((Number(s.days[todayKey()]) || 0) / 60),
+      total: Math.round(s.total / 60),
+      chapters: Object.keys(s.chapters).length
+    });
   }
 
   /* --------------------------------------------------------------- TTS */
@@ -2564,6 +2634,7 @@
 
     // parent-level input
     document.addEventListener('keydown', onKeydown);
+    setInterval(statsTick, 15000);   // reading-time counter (visibility/TTS aware)
     document.addEventListener('mousemove', wakeBar, { passive: true });
     window.addEventListener('resize', resizeSoon);
     window.addEventListener('scroll', resizeSoon, { passive: true });
