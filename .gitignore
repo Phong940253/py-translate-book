@@ -69,6 +69,7 @@ Thumbs.db
 *.illustration.jsonl
 manual_translation_queue.jsonl
 webui/jobs/
+*.reader.json
 
 # =====================
 # Local proxy certs (mitmproxy)

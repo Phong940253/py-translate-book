@@ -115,7 +115,12 @@ code {
   font-weight: 700; font-size: var(--text-md); letter-spacing: -0.01em; white-space: nowrap;
 }
 .brand .icon { color: var(--accent); }
-.topnav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; }
+.topnav {
+  display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0;
+  /* safety: never let the nowrap links paint outside their box */
+  overflow-x: auto; scrollbar-width: none;
+}
+.topnav::-webkit-scrollbar { display: none; }
 .topnav a {
   color: var(--text-2); display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 12px; border-radius: var(--r-sm); font-weight: 550;
@@ -125,6 +130,9 @@ code {
 .topnav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .topnav a.active { color: var(--text); background: var(--surface-2); font-weight: 650; }
 .topbar-tools { display: flex; align-items: center; gap: var(--sp-2); }
+/* open hamburger menu must paint above page chrome (e.g. reader .rd-bar z30,
+   footnote popup z60) — the topbar's own stacking context caps the panel at 20 */
+body.nav-open .topbar { z-index: 70; }
 
 .lang-switch { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
 .lang-btn {
@@ -455,13 +463,56 @@ textarea.code {
   .lib-group { grid-template-columns: 72px 1fr; gap: var(--sp-3); }
   .ver-actions { width: 100%; }
 }
+/* hamburger: hidden on desktop, shown once the inline nav stops fitting */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  padding: 7px 9px;
+  cursor: pointer;
+}
+.nav-toggle:hover { background: var(--surface-2); }
+.nav-toggle[aria-expanded="true"] { background: var(--surface-2); color: var(--accent); }
+
+/* nav links stop fitting beside brand+tools → hamburger + dropdown panel.
+   NOTE: base `.topnav { flex: 1 }` sets flex-basis: 0%, which defeated the old
+   `width: 100%` rule — the nav stayed in row 1 squeezed to ~0 and its nowrap
+   links spilled outside the viewport. */
+@media (max-width: 1000px) {
+  .topbar { flex-wrap: wrap; }
+  .nav-toggle { display: inline-flex; }
+  .topnav {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: var(--sp-2);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 14px 28px rgb(0 0 0 / 0.3);
+    max-height: calc(100vh - 56px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    z-index: 50;
+  }
+  .topnav.is-open { display: flex; }
+  .topnav a { flex: 0 0 auto; padding: 12px 14px; font-size: var(--text-base); }
+  .topbar-tools { margin-left: auto; }
+}
+/* tiny phones: brand text would push the tools row past the edge */
+@media (max-width: 440px) {
+  .brand span { display: none; }
+}
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; padding: var(--sp-2) var(--sp-3); gap: var(--sp-2); }
   .brand { font-size: var(--text-base); }
-  .topnav { order: 10; width: 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
-  .topnav::-webkit-scrollbar { display: none; }
-  .topnav a { flex: 0 0 auto; }
-  .topbar-tools { margin-left: auto; }
   main { padding: var(--sp-4) var(--sp-3); }
   .book-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
   .book-grid.compact { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }

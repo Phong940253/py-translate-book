@@ -414,6 +414,26 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("reader.js", body)
         self.assertIn("reader.css", body)
         self.assertIn("rd-panel-tts", body)
+        # P1: iframe document endpoints + sandboxed frame + nested TOC tree
+        self.assertIn("tocUrl", body)
+        self.assertIn("docUrl", body)
+        self.assertIn("stateUrl", body)
+        self.assertIn('id="rd-frame"', body)
+        self.assertIn('sandbox="allow-same-origin"', body)
+        self.assertIn("rd-toc-tree", body)
+        self.assertIn("rd-set-margin", body)   # appearance controls
+
+    def test_i18n_locales_have_identical_keys(self):
+        from webui import i18n as i18n_mod
+
+        vi = set(i18n_mod.TRANSLATIONS["vi"])
+        en = set(i18n_mod.TRANSLATIONS["en"])
+        self.assertEqual(vi, en)
+        # the keys the reader template/js rely on must exist
+        for key in ("read.mode_scroll", "read.mode_page", "read.fullscreen",
+                    "read.footnote", "read.page_of", "read.eta",
+                    "read.time_hm", "read.landmarks", "read.override_font"):
+            self.assertIn(key, vi)
 
     def test_read_page_rejects_bad_path(self):
         r = self.client.get("/read?path=/etc/passwd")
@@ -457,6 +477,147 @@ class TestWebUI(unittest.TestCase):
         r = self.client.get("/api/reader/meta?path=" + os.path.join("C:\\", "nope.epub"))
         self.assertEqual(r.status_code, 400)
         self.assertTrue(r.is_json)
+
+    # ------------------------------------------------- reader iframe documents
+    def _reader_rich_epub(self, name="_test_reader_rich.epub"):
+        """2 chapters + image + internal/external/footnote links + CSS."""
+        from ebooklib import epub as _epub
+
+        path = os.path.join(PROJECT_ROOT, name)
+        book = _epub.EpubBook()
+        book.set_identifier("webui-rich")
+        book.set_title("Rich Reader")
+        book.set_language("vi")
+        book.add_item(_epub.EpubItem(
+            uid="css", file_name="Styles/main.css", media_type="text/css",
+            content=b'body{color:#222}.x{background:url(../Images/p.png)}'))
+        img = _epub.EpubImage()
+        img.id, img.file_name, img.media_type, img.content = (
+            "p", "Images/p.png", "image/png", _PNG)
+        book.add_item(img)
+
+        ch1 = _epub.EpubHtml(title="Ch1", file_name="ch1.xhtml", lang="vi")
+        ch1.content = (
+            '<html><head><title>Ch1 head</title></head><body>'
+            '<h2>Chuong 1</h2>'
+            '<p onclick="evil()" style="color:red">Doan '
+            '<a href="ch2.xhtml#sec">link noi</a> '
+            '<a href="https://vi.wikipedia.org/wiki/Truyen">ngoai</a> '
+            '<a href="javascript:evil()">js</a>.</p>'
+            '<p><img src="../Images/p.png" alt="anh"/></p>'
+            '<p>Foot: <a href="#foot1">chú thich</a>.</p>'
+            '<aside epub:type="footnote" id="foot1"><p>Noi dung foot.</p></aside>'
+            '<table><tr><td>o1</td></tr></table>'
+            '<script>bad()</script><iframe src="http://evil"></iframe>'
+            '</body></html>'
+        )
+        ch2 = _epub.EpubHtml(title="Ch2", file_name="ch2.xhtml", lang="vi")
+        ch2.content = ('<html><body><h2>Chuong 2</h2>'
+                       '<p id="sec">Muc 2 voi <img src="../Images/p.png"/>.</p>'
+                       '</body></html>')
+        book.add_item(ch1)
+        book.add_item(ch2)
+        book.spine = ["nav", ch1, ch2]
+        book.toc = [_epub.Link("ch1.xhtml", "Chuong 1", "c1"),
+                    _epub.Link("ch2.xhtml", "Chuong 2", "c2")]
+        book.add_item(_epub.EpubNcx())
+        book.add_item(_epub.EpubNav())
+        _epub.write_epub(path, book, {})
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_reader_toc_endpoint_maps_nav_to_chapters(self):
+        path = self._reader_rich_epub("_test_reader_toc.epub")
+        r = self.client.get("/api/reader/toc?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertIn("toc", data)
+        self.assertIn("landmarks", data)
+        self.assertIn("pages", data)
+        # nav doc itself is not a chapter; its links map to chapter numbers
+        self.assertEqual([t["n"] for t in data["toc"]], [1, 2])
+        self.assertEqual(data["toc"][0]["children"], [])
+
+    def test_reader_doc_serves_sanitized_chapter_html(self):
+        path = self._reader_rich_epub("_test_reader_doc.epub")
+        r = self.client.get("/api/reader/doc?path=" + path + "&n=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/html")
+        self.assertIn("default-src 'none'", r.headers.get("Content-Security-Policy", ""))
+        body = r.get_data(as_text=True)
+
+        self.assertIn('class="rd-content"', body)          # layout wrapper
+        self.assertIn("Content-Security-Policy", body)      # CSP meta too
+        self.assertNotIn("<script", body.lower())
+        self.assertNotIn("onclick", body.lower())
+        self.assertNotIn("<iframe", body.lower())
+        self.assertNotIn("javascript:", body.lower())
+        # internal link → chapter document URL, external kept, table normalized
+        flat = body.replace("&amp;", "&")
+        self.assertIn("/api/reader/doc?path=", flat)
+        self.assertIn("n=2#sec", flat)
+        self.assertIn("https://vi.wikipedia.org/wiki/Truyen", body)
+        self.assertIn("<tbody>", body)
+        self.assertIn('<aside epub:type="footnote"', body)
+        # image + book CSS point at the resource endpoint
+        self.assertIn("/api/reader/res?path=", flat)
+        self.assertIn("ref=Images/p.png", flat)
+
+        # the chapter's own <head><title> is replaced, never shown as a paragraph
+        self.assertNotIn("Ch1 head", body)
+
+        # bad chapter → HTML error page, not JSON (it renders in the iframe)
+        bad = self.client.get("/api/reader/doc?path=" + path + "&n=42")
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(bad.mimetype, "text/html")
+
+    def test_reader_res_serves_assets_and_refuses_documents(self):
+        path = self._reader_rich_epub("_test_reader_res.epub")
+
+        r = self.client.get("/api/reader/res?path=" + path + "&ref=Images/p.png")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "image/png")
+
+        r = self.client.get("/api/reader/res?path=" + path + "&ref=Styles/main.css")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/css")
+        css = r.get_data(as_text=True)
+        self.assertIn("/api/reader/res?ref=EPUB/Images/p.png", css)  # url() rewritten
+
+        # chapters, traversal and unknown files never come out raw
+        for ref in ("ch1.xhtml", "../secrets.png", "nope.png", "ch1.xhtml%00.png"):
+            r = self.client.get("/api/reader/res?path=" + path + "&ref=" + ref)
+            self.assertEqual(r.status_code, 404, ref)
+
+        r = self.client.get("/api/reader/res?path=/etc/x.epub&ref=Images/p.png")
+        self.assertEqual(r.status_code, 400)
+
+    def test_reader_state_roundtrip(self):
+        from webui import reader as _reader
+
+        path = self._reader_epub("_test_reader_state.epub")
+        side = _reader.state_path_for(path)
+        self.addCleanup(lambda: os.path.exists(side) and os.remove(side))
+
+        state = {"pos": {"ch": 1, "path": "/4/1", "ratio": 0.25},
+                 "settings": {"size": 21, "mode": "page"}}
+        r = self.client.put("/api/reader/state", json={"path": path, "state": state})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+
+        r = self.client.get("/api/reader/state?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), state)
+
+        self.assertEqual(
+            self.client.put("/api/reader/state", json={"path": path}).status_code, 400)
+        self.assertEqual(
+            self.client.put("/api/reader/state",
+                            json={"path": "/etc/x.epub", "state": {}}).status_code, 400)
+        # broken/absent sidecar reads as an empty object
+        os.remove(side)
+        r = self.client.get("/api/reader/state?path=" + path)
+        self.assertEqual(r.get_json(), {})
 
     def test_tts_voices_reports_engine_state(self):
         from webui import reader

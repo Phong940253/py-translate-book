@@ -34,8 +34,12 @@
 </head>
 <body>
   <header class="topbar">
+    <button type="button" id="nav-toggle" class="nav-toggle" aria-expanded="false"
+            aria-controls="topnav" aria-label="{{ t('nav.menu') }}" title="{{ t('nav.menu') }}">
+      {%- from "_icons.html" import icon %}{{ icon('menu') }}
+    </button>
     <div class="brand">{% from "_icons.html" import icon %}{{ icon('books') }}<span>Translate Book Manager</span></div>
-    <nav class="topnav" aria-label="Main">
+    <nav class="topnav" id="topnav" aria-label="Main">
       <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">{{ icon('dashboard') }} {{ t('nav.dashboard') }}</a>
       <a href="{{ url_for('job_new') }}" class="{{ 'active' if request.endpoint == 'job_new' }}">{{ icon('plus') }} {{ t('nav.job_new') }}</a>
       <a href="{{ url_for('books') }}" class="{{ 'active' if request.endpoint == 'books' }}">{{ icon('books') }} {{ t('nav.library') }}</a>

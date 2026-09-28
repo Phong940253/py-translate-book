@@ -492,14 +492,18 @@ def book_cover():
 # --------------------------------------------------------------------------
 
 
-def _reader_path() -> str:
-    """Validated absolute EPUB path from ``?path=`` (400 on anything else)."""
-    path = request.args.get("path", "")
+def _validate_epub_path(path: str) -> str:
+    """Absolute EPUB path inside the project root (400 on anything else)."""
     if not path or not path.startswith(PROJECT_ROOT) or not os.path.isfile(path):
         abort(400, description="invalid path")
     if not path.lower().endswith(".epub"):
         abort(400, description="not an epub")
     return path
+
+
+def _reader_path() -> str:
+    """Validated absolute EPUB path from ``?path=`` (400 on anything else)."""
+    return _validate_epub_path(request.args.get("path", ""))
 
 
 def _reader_doc():
@@ -558,6 +562,96 @@ def api_reader_image():
     if not data:
         abort(404)
     return send_file(io.BytesIO(data), mimetype=mime, max_age=86400)
+
+
+def _doc_error_page(message: str, status: int):
+    """HTML error body — /api/reader/doc is loaded inside the reader iframe."""
+    from markupsafe import escape
+
+    return Response(
+        f"<!DOCTYPE html><html><body><p>{escape(message)}</p></body></html>",
+        status=status,
+        mimetype="text/html",
+        headers={"Content-Security-Policy": reader.CHAPTER_CSP},
+    )
+
+
+@app.route("/api/reader/toc")
+def api_reader_toc():
+    """Nested TOC (EPUB3 nav / EPUB2 ncx) + landmarks + page-list."""
+    doc, err = _reader_doc()
+    if err:
+        return err
+    return jsonify(doc.toc_payload())
+
+
+@app.route("/api/reader/doc")
+def api_reader_doc():
+    """Sanitized chapter document for the reader's sandboxed iframe."""
+    doc, err = _reader_doc()
+    if err:
+        resp, code = err
+        data = resp.get_json() or {}
+        return _doc_error_page(data.get("error", "error"), code)
+    try:
+        n = int(request.args.get("n", "1"))
+    except (TypeError, ValueError):
+        return _doc_error_page("n must be an integer", 400)
+    try:
+        page = doc.doc_html(n)
+    except ValueError as e:
+        return _doc_error_page(str(e), 400)
+    except Exception as e:  # noqa: BLE001 — broken chapter → readable page
+        return _doc_error_page(f"{type(e).__name__}: {e}", 422)
+    return Response(
+        page,
+        mimetype="text/html",
+        headers={
+            "Content-Security-Policy": reader.CHAPTER_CSP,
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.route("/api/reader/res")
+def api_reader_res():
+    """CSS / image / font straight out of the EPUB zip (chapters are refused)."""
+    path = _reader_path()
+    ref = request.args.get("ref", "")
+    try:
+        data, mime = reader.read_resource(path, ref)
+    except ValueError:
+        data, mime = None, None
+    if not data:
+        abort(404)
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if mime == "image/svg+xml":
+        # SVG opened as a document could run scripts; force a no-op CSP.
+        headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+    resp = send_file(io.BytesIO(data), mimetype=mime, max_age=86400)
+    resp.headers.update(headers)
+    return resp
+
+
+@app.route("/api/reader/state", methods=["GET", "PUT"])
+def api_reader_state():
+    """Per-book reading state (position + settings) sidecar <book>.reader.json."""
+    if request.method == "GET":
+        path = _reader_path()
+        return jsonify(reader.load_state(path))
+    payload = request.get_json(silent=True) or {}
+    state = payload.get("state")
+    if not isinstance(state, dict):
+        return jsonify({"error": "state object is required"}), 400
+    path = _validate_epub_path(str(payload.get("path", "")))
+    try:
+        reader.save_state(path, state)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"cannot write state: {e}"}), 500
+    return jsonify({"ok": True})
 
 
 @app.route("/api/tts/voices")
@@ -826,5 +920,10 @@ def health():
 
 
 if __name__ == "__main__":
-    print("Web UI running at http://127.0.0.1:5000  (local only)")
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False, threaded=True)
+    # LAN access: bind all interfaces by default so phones/tablets on the same
+    # network can open http://<lan-ip>:5000. Set WEBUI_HOST=127.0.0.1 to lock
+    # the UI to this machine only.
+    host = os.environ.get("WEBUI_HOST", "0.0.0.0")
+    scope = "local only" if host in ("127.0.0.1", "localhost") else "LAN reachable"
+    print(f"Web UI running at http://127.0.0.1:5000  ({scope})")
+    app.run(host=host, port=5000, debug=False, use_reloader=False, threaded=True)

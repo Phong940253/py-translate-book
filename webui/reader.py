@@ -1,10 +1,17 @@
-"""EPUB reader backend: chapter/paragraph extraction + the local TTS engine.
+"""EPUB reader backend: lazy book/chapter loading, sanitized XHTML for the
+reader iframe, and the local TTS engine.
 
 Serves the ``/read`` page:
 
-* ``load_book`` parses an EPUB once into plain chapters/items (paragraph-level
-  granularity so the UI can highlight and jump per paragraph) and caches the
-  result keyed on ``(path, mtime)`` — nav then costs nothing.
+* ``load_book`` reads only ``container.xml`` + the OPF plus a cheap regex scan
+  per spine document (title, emptiness, character count) — a 1000-chapter book
+  opens in ~0.15 s instead of parsing every document up front. Chapter XHTML is
+  parsed on demand (nh3 → BeautifulSoup) and cached (LRU).
+* ``BookDoc.doc_html`` returns a self-contained document for the chapter:
+  URLs rewritten to ``/api/reader/res`` / ``/api/reader/doc``, dangerous markup
+  removed by nh3 (html5ever semantics → the browser builds the same DOM), a
+  strict CSP and an injected style sheet. The client loads it in a sandboxed
+  same-origin iframe and keeps DOM access for highlighting and CFI positions.
 * ``TTSEngine`` wraps VieNeu-TTS (local, CPU/ONNX). It is loaded lazily in a
   background thread so the first page load never blocks, and synthesis is
   serialized behind a lock (one request at a time; the reader prefetches the
@@ -12,102 +19,394 @@ Serves the ``/read`` page:
 """
 
 import io
+import json
 import os
 import re
+import tempfile
 import threading
 import time
 import urllib.parse
+import warnings
 import wave
 import zipfile
+from collections import OrderedDict
+from html import unescape as html_unescape
 
+import nh3
 from bs4 import BeautifulSoup, Tag
+from bs4 import XMLParsedAsHTMLWarning
 
-from translator.epub_utils import iter_chapters, load_soup
+# The NCX/XHTML navigation files are XML; html.parser handles them fine (we only
+# read structure) but warns loudly. lxml itself is available for the OPF.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
-# Items the reader treats as "blocks": they get their own <p> in the DOM, can be
-# clicked/jumped to, and are spoken as one TTS unit.
+# Items the reader treats as "blocks": they get their own element in the DOM,
+# can be clicked/jumped to, and are spoken as one TTS unit.
 _BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "blockquote", "pre", "li"}
-_SKIP_TAGS = {"script", "style", "noscript", "nav", "head"}
+# nh3 flattens <head> into the top level, so head-ish tags must be skipped
+# explicitly or the chapter <title> shows up as a readable paragraph.
+_SKIP_TAGS = {"script", "style", "noscript", "nav", "head", "title", "meta", "link"}
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp")
 
 # Cache: at most a few books parsed at once (a novel is a few MB of text).
 _CACHE: dict = {}
 _CACHE_LOCK = threading.Lock()
 _CACHE_MAX = 4
+# Parsed chapters kept per book (items + rendered HTML).
+_CH_CACHE_MAX = 8
+
+# Endpoints the sanitizer rewrites in-chapter URLs to. Must match app.py.
+_RES_URL = "/api/reader/res"
+_DOC_URL = "/api/reader/doc"
+
+# Served inside the chapter page AND as a response header: the iframe runs
+# sandboxed without allow-scripts, this blocks external requests on top of that.
+CHAPTER_CSP = (
+    "default-src 'none'; img-src 'self' data: blob:; font-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; script-src 'none'; connect-src 'none'; "
+    "media-src 'self' blob:; object-src 'none'; frame-src 'none'; "
+    "form-action 'none'; base-uri 'none'"
+)
+
+# nh3 allowlist. Anything missing is unwrapped (text kept) except
+# clean_content_tags below, whose *content* is dropped as well.
+_ALLOWED_TAGS = {
+    # document (re-wrapped by us after sanitizing)
+    "html", "head", "body", "title", "style", "link",
+    # text
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "span", "br", "hr",
+    "blockquote", "pre", "code", "kbd", "samp", "var", "cite", "q", "dfn",
+    "abbr", "b", "i", "u", "s", "strong", "em", "small", "mark", "sub", "sup",
+    # lists
+    "ul", "ol", "li", "dl", "dt", "dd",
+    # tables
+    "table", "caption", "colgroup", "col", "thead", "tbody", "tfoot", "tr",
+    "td", "th",
+    # links / media
+    "a", "img", "picture", "source", "audio", "video", "track",
+    # sections
+    "article", "aside", "section", "header", "footer", "main", "nav",
+    "details", "summary", "figure", "figcaption",
+    # ruby
+    "ruby", "rt", "rp", "rtc",
+    # mathml (subset)
+    "math", "mi", "mn", "mo", "ms", "mtext", "mfrac", "msqrt", "mroot",
+    "msub", "msup", "msubsup", "munder", "mover", "mtable", "mtr", "mtd",
+    "mstyle", "mspace", "mphantom", "menclose", "maction", "annotation",
+    "annotation-xml",
+    # svg (subset — case is restored by the browser's foreign-content rules)
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline",
+    "polygon", "defs", "use", "symbol", "marker", "lineargradient",
+    "radialgradient", "stop", "clippath", "mask", "pattern", "text", "tspan",
+    "foreignobject", "switch", "desc", "view",
+}
+_ALLOWED_ATTRS = frozenset({
+    "class", "id", "style", "title", "lang", "xml:lang", "dir", "role",
+    "href", "src", "srcset", "alt", "width", "height", "loading", "decoding",
+    "colspan", "rowspan", "span", "start", "type", "rel", "media", "sizes",
+    "charset", "xmlns", "xlink:href", "viewbox", "preserveaspectratio", "fill",
+    "stroke", "stroke-width", "transform", "d", "opacity", "points", "cx",
+    "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "offset",
+    "stop-color", "stop-opacity", "text-anchor", "font-size", "font-family",
+    "aria-label", "aria-hidden", "open", "datetime", "cite", "abbr",
+    "controls", "loop", "muted", "preload", "value", "label", "headers",
+    "scope", "align", "valign", "bgcolor", "border", "summary",
+})
+_URL_ATTRS = {"href", "src", "poster", "xlink:href"}
+_DROPPED_ATTRS = {
+    "srcdoc", "formaction", "action", "ping", "http-equiv", "integrity",
+    "crossorigin", "onclickvalue",
+}
+_CSS_URL_RX = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.IGNORECASE)
+_CSS_IMPORT_RX = re.compile(r"""@import\s+(['"])([^'"]+)\1""", re.IGNORECASE)
+
+_MIME = {
+    ".css": "text/css",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+
+# Cheap per-document scan (regex, no DOM): title / emptiness / char count.
+_H_RX = re.compile(r"<h[1-4][^>]*>(.*?)</h[1-4]>", re.IGNORECASE | re.DOTALL)
+_TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_TAG_RX = re.compile(r"<[^>]+>")
+_NAV_OPEN_RX = re.compile(r"<nav\b([^>]*)>", re.IGNORECASE)
+_TYPE_RX = re.compile(r"""(?:epub:)?type\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+_SCHEME_RX = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
 
 
 def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-class BookDoc:
-    """Parsed EPUB: flat chapter list with paragraph-level items.
+def _decode(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("gb18030")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", "replace")
 
-    ``root`` is the OPF's folder inside the zip (``OEBPS``): ebooklib strips
-    that prefix from ``item.get_name()``, so reading a file back out of the zip
-    needs it again.
+
+def _quick_scan(text: str):
+    """Classify a spine document without building a DOM.
+
+    Returns ``(kind, title, chars)`` where kind is ``"nav"`` (the table of
+    contents page), ``"empty"`` (nothing readable) or ``"doc"``.
+    Mirrors the old ``_is_nav_doc`` + "no items" checks so chapter numbering
+    stays identical to the previous full-parse implementation.
     """
+    m = _NAV_OPEN_RX.search(text)
+    if m:
+        tm = _TYPE_RX.search(m.group(1))
+        kind = tm.group(1).lower() if tm else ""
+        if (not kind) or ("toc" in kind) or ("landmarks" in kind) or (
+            "page-list" in kind
+        ):
+            return "nav", None, 0
 
-    def __init__(self, path, title, author, language, chapters, root=""):
-        self.path = path
-        self.title = title
-        self.author = author
-        self.language = language
-        self.chapters = chapters  # [{"n", "title", "items": [{type, text|src}]}]
-        self.root = root          # zip folder holding the OPF ("" = zip root)
+    stripped = _TAG_RX.sub(" ", text)
+    has_text = bool(stripped.strip())
+    low = text.lower()
+    has_media = ("<img" in low) or ("<image" in low) or ("<svg" in low)
+    if not (has_text or has_media):
+        return "empty", None, 0
 
-    def meta(self):
-        return {
-            "path": self.path,
-            "title": self.title,
-            "author": self.author,
-            "language": self.language,
-            "total": len(self.chapters),
-            "chapters": [{"n": c["n"], "title": c["title"]} for c in self.chapters],
-        }
-
-    def chapter(self, n):
-        if not isinstance(n, int) or not (1 <= n <= len(self.chapters)):
-            raise ValueError(f"Chapter {n} out of range (1..{len(self.chapters)})")
-        ch = self.chapters[n - 1]
-        return {
-            "n": ch["n"],
-            "title": ch["title"],
-            "items": ch["items"],
-            "prev": n - 1 if n > 1 else None,
-            "next": n + 1 if n < len(self.chapters) else None,
-            "total": len(self.chapters),
-        }
+    title = None
+    m = _H_RX.search(text) or _TITLE_RX.search(text)
+    if m:
+        title = _collapse(html_unescape(_TAG_RX.sub(" ", m.group(1))))
+        if not title:
+            title = None
+    return "doc", title, len(_collapse(stripped))
 
 
-def _chapter_title(soup, index: int) -> str:
-    for tag in ("h1", "h2", "h3", "h4"):
-        el = soup.find(tag)
-        if el:
-            text = _collapse(el.get_text(" ", strip=True))
-            if text:
-                return text
-    if soup.title:
-        text = _collapse(soup.title.get_text(" ", strip=True))
-        if text:
-            return text
-    return f"Chương {index}"
+def _normalize_ref(base_dir: str, href: str):
+    """Resolve ``href`` against ``base_dir`` → ``(zip_path, fragment)``.
 
-
-def _resolve_href(base_file: str, href: str) -> str:
-    """Resolve ``href`` against the chapter's zip path (``EPUB/chap_001.xhtml``)."""
-    href = (href or "").split("#")[0].split("?")[0]
+    Returns ``("", "")`` for empty or scheme-qualified (external) hrefs.
+    """
+    href = (href or "").strip()
     if not href:
-        return ""
-    base_dir = os.path.dirname(base_file).replace("\\", "/")
-    return urllib.parse.urljoin(base_dir + "/", href)
+        return "", ""
+    if _SCHEME_RX.match(href):
+        return "", ""
+    if href.startswith("#"):
+        return "", href[1:]
+    file_part, _, frag = href.partition("#")
+    file_part = file_part.split("?", 1)[0]
+    if not file_part:
+        return "", frag
+    joined = urllib.parse.urljoin(
+        "http://b/" + base_dir.strip("/") + "/", file_part
+    )
+    path = urllib.parse.unquote(joined[len("http://b/"):])
+    return path.replace("\\", "/"), frag
 
 
-def _collect_images(node, base_file: str, items):
+# --------------------------------------------------------------------------
+# Sanitizing (nh3) + URL rewriting
+# --------------------------------------------------------------------------
+
+
+def _sanitize(text: str, book_path: str, cur_n: int, base_dir: str, n_by_zip):
+    """nh3-clean a chapter and rewrite every URL to a same-origin endpoint.
+
+    nh3 (html5ever) normalizes markup exactly like the browser will, so the
+    DOM the client builds from this output matches what we extracted.
+    """
+    book_q = urllib.parse.quote(book_path, safe="")
+    res_prefix = _RES_URL + "?path=" + book_q + "&ref="
+    doc_prefix = _DOC_URL + "?path=" + book_q + "&n="
+
+    def rewrite(tag, name, value):
+        n = name.lower()
+        if n.startswith("on") or n in _DROPPED_ATTRS:
+            return None
+        if n == "srcset":
+            return _rewrite_srcset(value)
+        if n in _URL_ATTRS:
+            return _rewrite_url(tag, value)
+        return value
+
+    def _rewrite_url(tag, value):
+        v = (value or "").strip()
+        if not v:
+            return None
+        low = v.lower()
+        if v.startswith("#"):
+            return v  # same-document reference (footnotes, svg use ids)
+        sm = _SCHEME_RX.match(v)
+        if sm:
+            scheme = sm.group(1).lower()
+            if scheme in ("http", "https", "mailto"):
+                return v  # external: the client intercepts <a>, CSP blocks the rest
+            if scheme == "data":
+                if low.startswith("data:image/") and tag in (
+                    "img", "image", "source", "video", "audio"
+                ):
+                    return v
+                return None
+            return None  # javascript:, vbscript:, file:, ...
+        ref, frag = _normalize_ref(base_dir, v)
+        if not ref:
+            return ("#" + frag) if frag else None
+        if tag == "a":
+            cn = (n_by_zip or {}).get(ref)
+            if cn is None:
+                return None  # non-spine target: dead link instead of raw XHTML
+            if cn == cur_n:
+                return "#" + frag
+            return doc_prefix + str(cn) + (("#" + frag) if frag else "")
+        return res_prefix + urllib.parse.quote(ref, safe="/")
+
+    def _rewrite_srcset(value):
+        if "data:" in value:
+            return value  # data URLs contain commas; leave them alone
+        out = []
+        for cand in re.split(r"\s*,\s*", value.strip()):
+            if not cand:
+                continue
+            parts = cand.split(None, 1)
+            url = _rewrite_url("img", parts[0])
+            if url is None:
+                continue
+            out.append(url + ((" " + parts[1]) if len(parts) > 1 else ""))
+        return ", ".join(out) or None
+
+    return nh3.clean(
+        text,
+        tags=_ALLOWED_TAGS,
+        attributes={t: _ALLOWED_ATTRS for t in _ALLOWED_TAGS},
+        attribute_filter=rewrite,
+        generic_attribute_prefixes={"epub:", "data-", "aria-"},
+        url_schemes={"http", "https", "mailto", "data"},
+        strip_comments=True,
+        link_rel=None,
+        clean_content_tags={
+            "script", "noscript", "iframe", "frame", "frameset", "object",
+            "embed", "applet",
+        },
+    )
+
+
+# In-page stylesheet: themes/appearance are driven by CSS variables the parent
+# sets on <html> of the iframe document; pagination toggles html.pg.
+_INJECT_CSS = """
+:root{--rd-fg:#1b1e22;--rd-bg:#fff;--rd-size:18px;--rd-lh:1.75;
+--rd-fam:Georgia,'Times New Roman',serif;--rd-w:760px;--rd-ls:0px;
+--rd-padx:16px;--rd-pad-y:24px;--rd-align:left;--rd-ow:normal;
+--rd-pgw:640px;--rd-pggap:32px}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--rd-bg);color:var(--rd-fg)}
+body{font-family:var(--rd-fam);font-size:var(--rd-size);line-height:var(--rd-lh);
+letter-spacing:var(--rd-ls);text-align:var(--rd-align);overflow-wrap:var(--rd-ow);
+-webkit-text-size-adjust:100%}
+.rd-content{max-width:var(--rd-w);margin:0 auto;padding:20px var(--rd-padx) 72px}
+.rd-content>:first-child{margin-top:0}
+h1,h2,h3,h4,h5,h6{line-height:1.3;margin:1.1em 0 .6em}
+p{margin:0 0 .8em}
+img,picture{max-width:100%;height:auto}
+table{max-width:100%;border-collapse:collapse}
+pre{overflow-x:auto;white-space:pre-wrap}
+a{color:inherit}
+/* paragraph affordance + card-style highlight (matches the pre-P1 reader:
+   padding, rounded corners, left border; hover only on selectable blocks) */
+.rd-content :is(p,h1,h2,h3,h4,h5,h6,blockquote,pre,li){border-radius:5px;
+  transition:background .12s ease}
+.rd-content :is(p,h1,h2,h3,h4,h5,h6,blockquote,pre,li):not(.rd-cur):not(.rd-speaking):hover{
+  background:rgb(127 127 127 / .10)}
+.rd-cur{padding:4px 8px;margin-left:-8px;margin-right:-8px;
+  background:rgb(127 127 127 / .18);box-shadow:inset 3px 0 0 currentColor;
+  border-radius:5px}
+.rd-speaking{padding:4px 8px;margin-left:-8px;margin-right:-8px;
+  background:rgb(127 145 255 / .20);box-shadow:inset 3px 0 0 #6f8cff;
+  border-radius:5px}
+.rd-fnmark{background:rgb(255 200 80 / .35);border-radius:3px}
+html.rd-force body,html.rd-force body *:not(svg):not(svg *):not(img){
+  font-family:var(--rd-fam) !important}
+html.pg{overflow:hidden;height:100%}
+html.pg body{height:100vh;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+html.pg body::-webkit-scrollbar{display:none}
+html.pg .rd-content{max-width:none;height:100vh;padding:var(--rd-pad-y) var(--rd-padx);
+column-width:var(--rd-pgw);column-gap:var(--rd-pggap);column-fill:auto}
+html.pg .rd-content img{max-height:calc(100vh - 2 * var(--rd-pad-y));object-fit:contain}
+"""
+
+_SKELETON = (
+    '<!DOCTYPE html><html><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    "</head><body></body></html>"
+)
+
+
+def _build_page(soup: BeautifulSoup, title: str, lang: str) -> str:
+    """Wrap sanitized chapter content in the reader's own document shell."""
+    doc = BeautifulSoup(_SKELETON, "html.parser")
+    if lang:
+        doc.html["lang"] = lang
+    csp = doc.new_tag("meta")
+    csp["http-equiv"] = "Content-Security-Policy"
+    csp["content"] = CHAPTER_CSP
+    doc.head.append(csp)
+    style = doc.new_tag("style")
+    style.string = _INJECT_CSS
+    if title:
+        t = doc.new_tag("title")
+        t.string = title
+        doc.head.append(t)
+
+    # nh3 flattens html/head/body: hoist stylesheet tags, body the rest.
+    for child in list(soup.contents):
+        if isinstance(child, Tag) and child.name in ("style", "link"):
+            doc.head.append(child)
+        elif isinstance(child, Tag) and child.name == "title":
+            child.decompose()  # we emit our own <title> above
+        else:
+            doc.body.append(child)
+
+    # Our sheet goes last so the reader's theme/size win ties against the book.
+    doc.head.append(style)
+
+    wrap = doc.new_tag("div")
+    wrap["class"] = "rd-content"
+    for child in list(doc.body.contents):
+        wrap.append(child)
+    doc.body.append(wrap)
+    doc.body["class"] = "rd-doc"
+    return str(doc)
+
+
+# --------------------------------------------------------------------------
+# Chapter items (paragraph-level, for TTS + position mapping)
+# --------------------------------------------------------------------------
+
+
+def _res_ref(src: str):
+    """Extract the ``ref`` from a rewritten ``/api/reader/res?...`` URL."""
+    if not src or not src.startswith(_RES_URL + "?"):
+        return None
+    m = re.search(r"[?&]ref=([^&]+)", src)
+    if not m:
+        return None
+    return urllib.parse.unquote(m.group(1))
+
+
+def _collect_images(node, items):
     for img in node.find_all("img"):
-        src = _resolve_href(base_file, img.get("src") or "")
-        if src:
-            items.append({"type": "img", "src": src})
+        ref = _res_ref(img.get("src") or "")
+        if ref:
+            items.append({"type": "img", "src": ref})
 
 
 def _extract_items(soup, base_file: str):
@@ -116,8 +415,10 @@ def _extract_items(soup, base_file: str):
     The outermost block wins (a ``blockquote``/``li`` becomes one item, its inner
     ``<p>``s are not emitted twice); images nested anywhere are always collected.
     A wrapper with no block children (``<div>line<br>line</div>``) is itself a
-    paragraph, otherwise its text would be lost.
+    paragraph, otherwise its text would be lost. ``base_file`` is kept for
+    signature stability — srcs arrive already rewritten to resource URLs.
     """
+    del base_file
     body = soup.body or soup
     items = []
 
@@ -135,15 +436,15 @@ def _extract_items(soup, base_file: str):
             if name in _SKIP_TAGS:
                 continue
             if name == "img":
-                src = _resolve_href(base_file, child.get("src") or "")
-                if src:
-                    items.append({"type": "img", "src": src})
+                ref = _res_ref(child.get("src") or "")
+                if ref:
+                    items.append({"type": "img", "src": ref})
                 continue
             if name in _BLOCK_TAGS:
                 text = _collapse(child.get_text(" ", strip=True))
                 if text:
                     items.append({"type": "p", "text": text})
-                _collect_images(child, base_file, items)
+                _collect_images(child, items)
                 continue  # nested blocks belong to the parent
             if not has_block_descendant(child) and not child.find("img"):
                 text = _collapse(child.get_text(" ", strip=True))
@@ -156,67 +457,321 @@ def _extract_items(soup, base_file: str):
     return items
 
 
-def _is_nav_doc(soup) -> bool:
-    """True for the EPUB navigation document (the table of contents page)."""
-    nav = soup.find("nav")
-    if nav is None:
-        return False
-    kind = (nav.get("epub:type") or nav.get("type") or "").lower()
-    return not kind or "toc" in kind or "landmarks" in kind or "page-list" in kind
+# --------------------------------------------------------------------------
+# OPF / navigation parsing
+# --------------------------------------------------------------------------
 
 
-def _zip_root(path: str) -> str:
-    """Folder of the OPF inside the zip (``OEBPS``), or "" when at the root."""
+def _container_opf(zf: zipfile.ZipFile):
+    """``(opf_zip_path, opf_dir)`` from META-INF/container.xml (fallback: search)."""
     try:
-        with zipfile.ZipFile(path) as zf:
-            try:
-                data = zf.read("META-INF/container.xml")
-            except KeyError:
-                return ""
-    except (OSError, zipfile.BadZipFile):
-        return ""
-    match = re.search(rb"""full-path\s*=\s*["']([^"']+)["']""", data)
-    if not match:
-        return ""
-    opf = match.group(1).decode("utf-8", "replace")
-    return os.path.dirname(opf).replace("\\", "/")
+        data = zf.read("META-INF/container.xml")
+    except KeyError:
+        data = b""
+    m = re.search(rb"""full-path\s*=\s*["']([^"']+)["']""", data)
+    if m:
+        opf = urllib.parse.unquote(m.group(1).decode("utf-8", "replace"))
+        return opf, os.path.dirname(opf).replace("\\", "/")
+    for name in zf.namelist():
+        if name.lower().endswith(".opf"):
+            return name, os.path.dirname(name).replace("\\", "/")
+    raise ValueError("no OPF package file in EPUB")
+
+
+def _html_soup(text: str):
+    """html.parser, silencing bs4's XML-prolog complaint (NCX/nav are XHTML)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+        return BeautifulSoup(text, "html.parser")
+
+
+def _walk_ol(ol, map_href, want_type=False):
+    """Nested TOC entries from an EPUB3 nav ``<ol>``."""
+    nodes = []
+    for li in ol.find_all("li", recursive=False):
+        a = li.find("a", recursive=False) or li.find("a")
+        title = _collapse(a.get_text(" ", strip=True)) if a else ""
+        href = a.get("href") if a else None
+        n, frag = map_href(href)
+        node = {"title": title, "n": n, "frag": frag, "children": []}
+        if want_type and a is not None:
+            node["type"] = (a.get("epub:type") or a.get("type") or "").lower()
+        child_ol = li.find("ol", recursive=False)
+        if child_ol:
+            node["children"] = _walk_ol(child_ol, map_href, want_type)
+        nodes.append(node)
+    return nodes
+
+
+def _parse_nav_doc(text: str, nav_dir: str, n_by_zip):
+    """EPUB3 navigation document → ``(toc, landmarks, page_list)``."""
+    def map_href(href):
+        if not href:
+            return None, None
+        ref, frag = _normalize_ref(nav_dir, href)
+        n = n_by_zip.get(ref) if ref else None
+        return n, frag or None
+
+    soup = _html_soup(text)   # nav doc (XHTML)
+    toc, landmarks, pages = [], [], []
+    for nav_el in soup.find_all("nav"):
+        kind = (nav_el.get("epub:type") or nav_el.get("type") or "").lower()
+        ol = nav_el.find("ol")
+        if ol is None:
+            continue
+        if (not toc) and "toc" in kind:
+            toc = _walk_ol(ol, map_href)
+        elif "landmark" in kind:
+            landmarks = _walk_ol(ol, map_href, want_type=True)
+        elif "page-list" in kind:
+            pages = _walk_ol(ol, map_href)
+    return toc, landmarks, pages
+
+
+def _parse_ncx(text: str, ncx_dir: str, n_by_zip):
+    """EPUB2 NCX navMap → nested TOC entries."""
+
+    def map_href(href):
+        if not href:
+            return None, None
+        ref, frag = _normalize_ref(ncx_dir, href)
+        n = n_by_zip.get(ref) if ref else None
+        return n, frag or None
+
+    soup = _html_soup(text)   # NCX is XML but flat-tagged; html.parser is fine
+    navmap = soup.find("navmap")
+    if navmap is None:
+        return []
+
+    def walk(container):
+        out = []
+        for np in container.find_all("navpoint", recursive=False):
+            label = np.find("text")
+            content = np.find("content")
+            href = content.get("src") if content else None
+            n, frag = map_href(href)
+            out.append({
+                "title": _collapse(label.get_text(" ", strip=True)) if label else "",
+                "n": n,
+                "frag": frag,
+                "children": walk(np),
+            })
+        return out
+
+    return walk(navmap)
+
+
+def _retitle(nodes, chapters):
+    """Prefer the document's own (migrated) title over the nav label."""
+    for nd in nodes:
+        if nd.get("n"):
+            doc_title = chapters[nd["n"] - 1]["title"]
+            if doc_title:
+                nd["title"] = doc_title
+        if nd.get("children"):
+            _retitle(nd["children"], chapters)
+
+
+def _count_nodes(nodes) -> int:
+    return sum(1 + _count_nodes(n["children"]) for n in nodes)
+
+
+class BookDoc:
+    """Lazily parsed EPUB: metadata + light chapter index up front, XHTML on demand.
+
+    ``root`` is to the OPF's folder inside the zip (``OEBPS``): resource lookup
+    needs it again because manifest hrefs are OPF-relative.
+    """
+
+    def __init__(self, path, title, author, language, chapters, toc, landmarks,
+                 pages, root=""):
+        self.path = path
+        self.title = title
+        self.author = author
+        self.language = language
+        self.chapters = chapters   # [{"n", "title", "zip", "chars"}]
+        self.toc = toc             # nested [{title, n, frag, children}]
+        self.landmarks = landmarks
+        self.pages = pages
+        self.root = root
+        self._n_by_zip = {c["zip"]: c["n"] for c in chapters}
+        self._ch: "OrderedDict[int, dict]" = OrderedDict()
+        self._ch_lock = threading.Lock()
+
+    def meta(self):
+        return {
+            "path": self.path,
+            "title": self.title,
+            "author": self.author,
+            "language": self.language,
+            "total": len(self.chapters),
+            "chars": sum(c["chars"] for c in self.chapters),
+            "chapters": [{"n": c["n"], "title": c["title"]} for c in self.chapters],
+        }
+
+    def toc_payload(self):
+        return {
+            "toc": self.toc,
+            "landmarks": self.landmarks,
+            "pages": self.pages,
+        }
+
+    def _check(self, n):
+        if not isinstance(n, int) or not (1 <= n <= len(self.chapters)):
+            raise ValueError(f"Chapter {n} out of range (1..{len(self.chapters)})")
+        return n
+
+    def _chapter_data(self, n):
+        with self._ch_lock:
+            data = self._ch.get(n)
+            if data is not None:
+                self._ch.move_to_end(n)
+                return data
+            data = self._build_chapter(n)
+            self._ch[n] = data
+            while len(self._ch) > _CH_CACHE_MAX:
+                self._ch.popitem(last=False)
+            return data
+
+    def _build_chapter(self, n):
+        ch = self.chapters[n - 1]
+        try:
+            with zipfile.ZipFile(self.path) as zf:
+                raw = zf.read(ch["zip"])
+        except KeyError as e:
+            raise ValueError(f"Missing document {ch['zip']} in EPUB") from e
+        text = _decode(raw)
+        cleaned = _sanitize(text, self.path, n, os.path.dirname(ch["zip"]), self._n_by_zip)
+        soup = BeautifulSoup(cleaned, "html.parser")
+        items = _extract_items(soup, ch["zip"])
+        page = _build_page(soup, ch["title"], self.language or "")
+        return {"items": items, "html": page}
+
+    def chapter(self, n):
+        n = self._check(n)
+        data = self._chapter_data(n)
+        return {
+            "n": n,
+            "title": self.chapters[n - 1]["title"],
+            "items": data["items"],
+            "chars": self.chapters[n - 1]["chars"],
+            "prev": n - 1 if n > 1 else None,
+            "next": n + 1 if n < len(self.chapters) else None,
+            "total": len(self.chapters),
+        }
+
+    def doc_html(self, n):
+        n = self._check(n)
+        return self._chapter_data(n)["html"]
 
 
 def parse_book(path: str) -> BookDoc:
-    """Parse the whole EPUB (throws on a broken file — caller reports the error)."""
-    from ebooklib import epub
+    """Parse the EPUB index (metadata + spine + TOC). Throws on a broken file."""
+    with zipfile.ZipFile(path) as zf:
+        opf_name, opf_dir = _container_opf(zf)
+        opf = BeautifulSoup(_decode(zf.read(opf_name)), "xml")
 
-    book = epub.read_epub(path)
-    chapters = []
-    for item in iter_chapters(book):
-        soup = load_soup(item)
-        if _is_nav_doc(soup):
-            continue  # the TOC page is not a chapter
-        items = _extract_items(soup, item.get_name())
-        if not items:
-            continue  # nothing to read (blank placeholder document)
-        chapters.append(
-            {
-                "n": len(chapters) + 1,
-                "title": _chapter_title(soup, len(chapters) + 1),
-                "items": items,
+        def meta(name):
+            el = opf.find(name)
+            return _collapse(el.get_text()) if el else None
+
+        manifest = {}
+        for it in opf.find_all("item"):
+            iid = it.get("id")
+            href = it.get("href")
+            if not iid or not href:
+                continue
+            ref, _ = _normalize_ref(opf_dir, href)
+            manifest[iid] = {
+                "zip": ref,
+                "mt": (it.get("media-type") or "").lower(),
+                "props": set((it.get("properties") or "").lower().split()),
             }
-        )
 
-    def meta(ns, key):
-        try:
-            vals = book.get_metadata(ns, key)
-            return vals[0][0] if vals else None
-        except Exception:  # noqa: BLE001
-            return None
+        spine_el = opf.find("spine")
+        idrefs = []
+        if spine_el is not None:
+            idrefs = [el.get("idref") for el in spine_el.find_all("itemref")
+                      if el.get("idref")]
+        if not idrefs:  # broken/absent spine → fall back to manifest order
+            idrefs = list(manifest)
+
+        chapters = []
+        nav_ref = None
+        ncx_ref = None
+        n_by_zip = {}
+        # Some generators write <itemref idref="ch1.xhtml"/> (an href) instead of
+        # the manifest id — accept both or those spines read as empty books.
+        by_ref = {}
+        for entry in manifest.values():
+            by_ref.setdefault(entry["zip"], entry)
+            by_ref.setdefault(os.path.basename(entry["zip"]), entry)
+        for iid in idrefs:
+            entry = manifest.get(iid) or by_ref.get(iid) or by_ref.get(
+                os.path.basename(iid)
+            )
+            if not entry:
+                continue
+            if "nav" in entry["props"]:
+                nav_ref = entry["zip"]
+                continue
+            if entry["mt"] == "application/x-dtbncx+xml":
+                ncx_ref = entry["zip"]
+                continue
+            try:
+                text = _decode(zf.read(entry["zip"]))
+            except KeyError:
+                continue
+            kind, title, chars = _quick_scan(text)
+            if kind != "doc":
+                continue
+            n_by_zip[entry["zip"]] = len(chapters) + 1
+            chapters.append({
+                "n": len(chapters) + 1,
+                "title": title or f"Chương {len(chapters) + 1}",
+                "zip": entry["zip"],
+                "chars": chars,
+            })
+
+        if not ncx_ref:
+            for entry in manifest.values():
+                if entry["mt"] == "application/x-dtbncx+xml":
+                    ncx_ref = entry["zip"]
+                    break
+
+        toc, landmarks, pages = [], [], []
+        if nav_ref:
+            try:
+                toc, landmarks, pages = _parse_nav_doc(
+                    _decode(zf.read(nav_ref)), os.path.dirname(nav_ref), n_by_zip
+                )
+            except KeyError:
+                pass
+        if not toc and ncx_ref:
+            try:
+                toc = _parse_ncx(
+                    _decode(zf.read(ncx_ref)), os.path.dirname(ncx_ref), n_by_zip
+                )
+            except KeyError:
+                pass
+        for group in (toc, landmarks, pages):
+            _retitle(group, chapters)
+
+        _, root = _container_opf(zf)
+
+    if not chapters:
+        raise ValueError("no readable chapters in EPUB")
 
     return BookDoc(
         path=path,
-        title=meta("DC", "title") or os.path.basename(path),
-        author=meta("DC", "creator"),
-        language=meta("DC", "language"),
+        title=meta("title") or os.path.basename(path),
+        author=meta("creator"),
+        language=meta("language"),
         chapters=chapters,
-        root=_zip_root(path),
+        toc=toc,
+        landmarks=landmarks,
+        pages=pages,
+        root=root,
     )
 
 
@@ -242,9 +797,29 @@ def load_book(path: str) -> BookDoc:
     return doc
 
 
+# --------------------------------------------------------------------------
+# Resources (CSS / images / fonts) out of the zip
+# --------------------------------------------------------------------------
+
+
+def _find_entry(path: str, ref: str, root: str):
+    """Locate ``ref`` inside the zip (exact, OPF-prefixed, then suffix)."""
+    ref = (ref or "").replace("\\", "/").strip().lstrip("/")
+    if not ref or ".." in ref.split("/"):
+        return None
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        candidates = [ref]
+        if root:
+            candidates.append(f"{root}/{ref}")
+        entry = next((c for c in candidates if c in names), None)
+        if entry is None:
+            entry = next((n for n in names if n.endswith("/" + ref)), None)
+        return entry
+
+
 def find_image(doc: BookDoc, src: str):
     """Sanitize a reader ``src`` into an OPF-relative image href (or ``None``)."""
-    del doc  # kept for signature stability / future validation
     src = (src or "").split("#")[0].split("?")[0].strip().lstrip("/")
     if not src or ".." in src.split("/"):
         return None
@@ -264,28 +839,112 @@ def read_image(path: str, src: str):
     name = find_image(doc, src)
     if not name:
         return None, None
+    entry = _find_entry(path, name, doc.root)
+    if entry is None:
+        return None, None
     with zipfile.ZipFile(path) as zf:
-        names = set(zf.namelist())
-        candidates = [name]
-        if doc.root:
-            candidates.append(f"{doc.root}/{name}")
-        entry = next((c for c in candidates if c in names), None)
-        if entry is None:
-            entry = next((n for n in names if n.endswith("/" + name)), None)
-        if entry is None:
-            return None, None
         data = zf.read(entry)
     ext = os.path.splitext(entry)[1].lower()
-    mime = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".svg": "image/svg+xml",
-        ".bmp": "image/bmp",
-    }.get(ext, "application/octet-stream")
+    return data, _MIME.get(ext, "application/octet-stream")
+
+
+def _rewrite_css_urls(css: str, css_dir: str) -> str:
+    """Point ``url(...)`` / ``@import`` inside a stylesheet at the resource endpoint."""
+
+    def repl(m):
+        quote, value = m.group(1), m.group(2).strip()
+        return "url(" + _css_value(value, css_dir) + ")"
+
+    def imp(m):
+        return "@import " + _css_value(m.group(2).strip(), css_dir)
+
+    out = _CSS_URL_RX.sub(repl, css)
+    return _CSS_IMPORT_RX.sub(imp, out)
+
+
+def _css_value(value: str, css_dir: str) -> str:
+    if not value or value.startswith("#") or _SCHEME_RX.match(value):
+        return value  # fragments and external/data URLs stay as they are
+    ref, _ = _normalize_ref(css_dir, value)
+    if not ref:
+        return value
+    return _RES_URL + "?ref=" + urllib.parse.quote(ref, safe="/")
+
+
+def read_resource(path: str, ref: str):
+    """Read a CSS/image/font out of the EPUB. Returns ``(bytes, media_type)``.
+
+    Chapter documents (xhtml/html/js/…) are refused: the reader gets those from
+    ``/api/reader/doc`` (sanitized), never raw.
+    """
+    doc = load_book(path)
+    ref = (ref or "").split("#", 1)[0].split("?", 1)[0]
+    ext = os.path.splitext(ref)[1].lower()
+    if ext not in _MIME:
+        return None, None
+    entry = _find_entry(path, ref, doc.root)
+    if entry is None:
+        return None, None
+    with zipfile.ZipFile(path) as zf:
+        data = zf.read(entry)
+    mime = _MIME[ext]
+    if ext == ".css":
+        css_dir = os.path.dirname(entry).replace("\\", "/")
+        data = _rewrite_css_urls(_decode(data), css_dir).encode("utf-8")
     return data, mime
+
+
+# --------------------------------------------------------------------------
+# Reading state sidecar (<book>.reader.json)
+# --------------------------------------------------------------------------
+
+_STATE_MAX_BYTES = 512 * 1024
+
+
+def state_path_for(path: str) -> str:
+    return os.path.splitext(path)[0] + ".reader.json"
+
+
+def load_state(path: str) -> dict:
+    try:
+        with open(state_path_for(path), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(path: str, data: dict) -> None:
+    raw = json.dumps(data, ensure_ascii=False)
+    if len(raw.encode("utf-8")) > _STATE_MAX_BYTES:
+        raise ValueError("reader state too large")
+    target = state_path_for(path)
+    # Unique temp name per writer: two concurrent PUTs (the debounced save
+    # racing a keepalive flush on unload) used to share one ".part" file, so
+    # the second os.replace raised FileNotFoundError -> HTTP 500.
+    fd, part = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(target)) or ".",
+        prefix=".rdstate-",
+        suffix=".part",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(raw)
+        last: OSError | None = None
+        for i in range(6):
+            try:
+                os.replace(part, target)
+                return
+            except OSError as e:  # target momentarily locked by a reader/writer
+                last = e
+                time.sleep(0.05 * (i + 1))
+        raise last  # type: ignore[misc]
+    finally:
+        if os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------

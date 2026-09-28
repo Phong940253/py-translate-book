@@ -340,6 +340,35 @@
       });
     });
 
+    // Mobile nav menu: hamburger opens the topnav as a dropdown panel below
+    // the sticky topbar (style.css shows the button only at <=1000px).
+    var navBtn = document.getElementById('nav-toggle');
+    var navEl = document.getElementById('topnav');
+    function setNavOpen(open) {
+      if (!navEl || !navBtn) return;
+      navEl.classList.toggle('is-open', open);
+      navBtn.setAttribute('aria-expanded', String(open));
+      // raise .topbar above sticky page chrome (reader toolbar) while open
+      document.body.classList.toggle('nav-open', open);
+    }
+    if (navBtn && navEl) {
+      navBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        setNavOpen(!navEl.classList.contains('is-open'));
+      });
+      document.addEventListener('click', function (ev) {
+        if (!navEl.classList.contains('is-open')) return;
+        if (navEl.contains(ev.target) || navBtn.contains(ev.target)) return;
+        setNavOpen(false);
+      });
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape') setNavOpen(false);
+      });
+      window.addEventListener('resize', function () {
+        if (window.innerWidth > 1000) setNavOpen(false);
+      });
+    }
+
     // Lightbox (illustrations page; delegated, no inline handlers).
     var lightbox = document.getElementById('lightbox');
     var lbImg = document.getElementById('lb-img');
