@@ -1058,7 +1058,15 @@
 
   function onFrameClick(ev) {
     wakeBar();
-    hideSelPop();
+    /* mousedown→mouseup over a selection still dispatches a click on the
+       common ancestor. Hiding unconditionally here raced the 90ms
+       selectionchange debounce: the popup appears mid-drag, then the
+       trailing click killed it the moment the mouse was released (text
+       stayed highlighted, popup gone). Keep it while a real selection
+       exists — clicking elsewhere collapses the selection first. */
+    var sel = null;
+    try { sel = fdoc && fdoc.getSelection(); } catch (e) {}
+    if (!sel || sel.isCollapsed || !sel.rangeCount) hideSelPop();
     var t = ev.target;
     if (!t || !t.closest) return;
     var a = t.closest ? t.closest('a[href]') : null;
@@ -1631,6 +1639,7 @@
   }
 
   function showSelPop(range) {
+    hideLookup();       // a new selection makes any open AI card stale
     var pop = el('rd-selpop');
     if (!pop || !frame) return;
     pop.hidden = false;
