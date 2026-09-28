@@ -1,0 +1,135 @@
+/* EPUB reader (/read) — toolbar, panels, reading stage, TTS controls. */
+
+.rd { --rd-width: 760px; --rd-size: 18px; --rd-lh: 1.75; --rd-family: serif; }
+
+/* ---------------------------------------------------------------- toolbar */
+.rd-bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.rd-group { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.rd-center { flex: 1 1 220px; justify-content: center; }
+.rd-select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  font-size: var(--text-sm);
+  max-width: 340px;
+}
+.rd-progress {
+  flex: 1 1 120px;
+  height: 6px;
+  max-width: 260px;
+  background: var(--surface-2);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.rd-progress span { display: block; height: 100%; width: 0; background: var(--accent); transition: width var(--t-fast) var(--ease); }
+#rd-pos { white-space: nowrap; }
+
+/* ----------------------------------------------------------------- panels */
+.rd-panel {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.rd-panel-title { font-weight: 600; margin-bottom: var(--sp-2); }
+.rd-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); }
+.rd-field { display: flex; flex-direction: column; gap: 6px; font-size: var(--text-sm); color: var(--text-2); }
+.rd-field .rd-select { max-width: none; }
+.rd-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.rd-field b { color: var(--text); font-variant-numeric: tabular-nums; }
+.rd-actions { flex-direction: row; flex-wrap: wrap; align-items: center; }
+
+.rd-toc { max-height: 60vh; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.rd-toc button {
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--text-2);
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.rd-toc button:hover { background: var(--surface-2); color: var(--text); }
+.rd-toc button[aria-current="true"] { background: var(--surface-2); color: var(--accent); font-weight: 600; }
+
+/* ------------------------------------------------------------------ stage */
+.rd-stage {
+  margin-top: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-6) var(--sp-4);
+  min-height: 55vh;
+  transition: background var(--t-fast) var(--ease);
+}
+.rd-stage[data-theme="light"] { background: #ffffff; color: #1a1d21; }
+.rd-stage[data-theme="sepia"] { background: #f7ecd7; color: #3b2f1e; }
+.rd-stage[data-theme="dark"]  { background: #14171c; color: #d7dbe0; }
+
+.rd-page {
+  max-width: var(--rd-width);
+  margin: 0 auto;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: var(--rd-size);
+  line-height: var(--rd-lh);
+}
+.rd[data-family="sans"] .rd-page { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+.rd[data-family="mono"] .rd-page { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+.rd-item {
+  margin: 0 0 0.75em;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.rd-item:hover { background: rgb(127 127 127 / 0.12); }
+.rd-item.current { background: rgb(127 127 127 / 0.18); border-left-color: currentColor; }
+.rd-item.speaking {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border-left-color: var(--accent);
+  font-weight: 500;
+}
+.rd-page img { display: block; max-width: 100%; height: auto; margin: 1em auto; border-radius: var(--r-sm); }
+.rd-page h1, .rd-page h2, .rd-page h3, .rd-page h4 { line-height: 1.3; margin: 0 0 0.6em; font-size: 1.25em; }
+
+/* ------------------------------------------------------------ jump bar */
+.rd-jump {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  margin-top: var(--sp-3);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  backdrop-filter: blur(6px);
+}
+
+/* -------------------------------------------------------------- responsive */
+@media (max-width: 760px) {
+  .rd-label { display: none; }
+  .rd-select { max-width: 160px; }
+  .rd-stage { padding: var(--sp-4) var(--sp-3); }
+}

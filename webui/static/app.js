@@ -175,6 +175,8 @@
     // `data-path` (not a JS string literal) keeps Windows backslashes intact.
     a.push('<button type="button" class="btn btn-ghost btn-sm" data-path="' + esc(e.path) +
       '" onclick="preview(this)">' + esc(i18n('books.preview')) + '</button>');
+    a.push('<a class="btn btn-ghost btn-sm" href="' + APP.readUrl + '?path=' +
+      encodeURIComponent(e.path) + '">' + esc(i18n('books.read')) + '</a>');
     return a.join('');
   }
 

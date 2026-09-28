@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ book_title }} · {{ t('read.title') }}{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+{% endblock %}
+{% block app_config %}
+window.APP.reader = {
+  path: {{ path|tojson }},
+  metaUrl: {{ url_for('api_reader_meta')|tojson }},
+  chapterUrl: {{ url_for('api_reader_chapter')|tojson }},
+  imageUrl: {{ url_for('api_reader_image')|tojson }},
+  ttsUrl: {{ url_for('api_tts')|tojson }},
+  voicesUrl: {{ url_for('api_tts_voices')|tojson }}
+};
+{% endblock %}
+{% block content %}
+<div class="rd" id="rd" data-panel="">
+  <div class="rd-bar">
+    <div class="rd-group">
+      <button id="rd-prev-ch" type="button" class="btn btn-ghost btn-sm">{{ icon('chevron-left') }}<span class="rd-label">{{ t('read.prev_ch') }}</span></button>
+      <select id="rd-chapter" class="rd-select" aria-label="{{ t('read.toc') }}"></select>
+      <button id="rd-next-ch" type="button" class="btn btn-ghost btn-sm"><span class="rd-label">{{ t('read.next_ch') }}</span>{{ icon('chevron-right') }}</button>
+    </div>
+
+    <div class="rd-group rd-center">
+      <span id="rd-pos" class="muted small"></span>
+      <div class="rd-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span id="rd-progress-bar"></span>
+      </div>
+    </div>
+
+    <div class="rd-group">
+      <button id="rd-open-toc" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('books') }}<span class="rd-label">{{ t('read.toc') }}</span></button>
+      <button id="rd-open-font" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">Aa<span class="rd-label">{{ t('read.font') }}</span></button>
+      <button id="rd-open-tts" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('play') }}<span class="rd-label">{{ t('read.aloud') }}</span></button>
+    </div>
+  </div>
+
+  <div id="rd-panel-toc" class="rd-panel" hidden>
+    <div class="rd-panel-title">{{ t('read.toc') }} <span id="rd-toc-count" class="muted small"></span></div>
+    <div id="rd-toc" class="rd-toc"></div>
+  </div>
+
+  <div id="rd-panel-font" class="rd-panel" hidden>
+    <div class="rd-panel-title">{{ t('read.font') }}</div>
+    <div class="rd-fields">
+      <label class="rd-field">
+        <span>{{ t('read.font_family') }}</span>
+        <select id="rd-set-family" class="rd-select">
+          <option value="serif">{{ t('read.family_serif') }}</option>
+          <option value="sans">{{ t('read.family_sans') }}</option>
+          <option value="mono">{{ t('read.family_mono') }}</option>
+        </select>
+      </label>
+      <label class="rd-field">
+        <span>{{ t('read.font_size') }} <b id="rd-set-size-v"></b></span>
+        <input id="rd-set-size" type="range" min="14" max="30" step="1">
+      </label>
+      <label class="rd-field">
+        <span>{{ t('read.line_height') }} <b id="rd-set-lh-v"></b></span>
+        <input id="rd-set-lh" type="range" min="1.3" max="2.4" step="0.05">
+      </label>
+      <label class="rd-field">
+        <span>{{ t('read.width') }} <b id="rd-set-width-v"></b></span>
+        <input id="rd-set-width" type="range" min="480" max="1200" step="20">
+      </label>
+      <div class="rd-field">
+        <span>{{ t('read.page_theme') }}</span>
+        <div class="seg" role="group" aria-label="{{ t('read.page_theme') }}">
+          <button type="button" class="btn btn-ghost btn-sm rd-theme" data-theme="light">{{ t('read.theme_light') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm rd-theme" data-theme="sepia">{{ t('read.theme_sepia') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm rd-theme" data-theme="dark">{{ t('read.theme_dark') }}</button>
+        </div>
+      </div>
+      <div class="rd-field">
+        <button id="rd-set-reset" type="button" class="btn btn-ghost btn-sm">{{ t('read.reset') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rd-panel-tts" class="rd-panel" hidden>
+    <div class="rd-panel-title">{{ t('read.aloud') }}</div>
+    <div class="rd-fields">
+      <div id="rd-tts-status" class="muted small"></div>
+      <label class="rd-field">
+        <span>{{ t('read.voice') }}</span>
+        <select id="rd-tts-voice" class="rd-select" disabled></select>
+      </label>
+      <label class="rd-field">
+        <span>{{ t('read.rate') }} <b id="rd-tts-rate-v"></b></span>
+        <input id="rd-tts-rate" type="range" min="0.75" max="1.75" step="0.05">
+      </label>
+      <div class="rd-field rd-actions">
+        <button id="rd-tts-test" type="button" class="btn btn-ghost btn-sm">{{ t('read.test') }}</button>
+        <button id="rd-tts-play" type="button" class="btn btn-primary btn-sm">{{ icon('play') }} {{ t('read.play') }}</button>
+        <button id="rd-tts-pause" type="button" class="btn btn-ghost btn-sm" hidden>{{ t('read.pause') }}</button>
+        <button id="rd-tts-stop" type="button" class="btn btn-ghost btn-sm" hidden>{{ icon('stop') }} {{ t('read.stop') }}</button>
+      </div>
+      <div id="rd-tts-note" class="muted small"></div>
+    </div>
+  </div>
+
+  <div class="rd-stage" data-theme="dark">
+    <article id="rd-page" class="rd-page"></article>
+  </div>
+
+  <div class="rd-jump">
+    <button id="rd-prev-p" type="button" class="btn btn-ghost btn-sm">{{ icon('chevron-left') }} {{ t('read.prev_p') }}</button>
+    <span id="rd-p-pos" class="muted small"></span>
+    <button id="rd-next-p" type="button" class="btn btn-ghost btn-sm">{{ t('read.next_p') }} {{ icon('chevron-right') }}</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='reader.js') }}"></script>
+{% endblock %}

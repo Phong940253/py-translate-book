@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Translate Book Manager{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% block extra_head %}{% endblock %}
   <script>
     // Apply the saved/preferred theme before first paint to avoid a flash.
     (function () {
@@ -23,6 +24,7 @@
       libUrl: {{ url_for('api_library')|tojson }},
       jobNewUrl: {{ url_for('job_new')|tojson }},
       previewUrl: {{ url_for('book_preview')|tojson }},
+      readUrl: {{ url_for('reader_view')|tojson }},
       coverUrl: {{ url_for('book_cover')|tojson }},
       downloadUrl: {{ url_for('download')|tojson }},
       coverPlaceholder: {{ url_for('static', filename='cover-placeholder.svg')|tojson }}
