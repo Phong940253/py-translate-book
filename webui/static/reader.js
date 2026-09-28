@@ -1866,7 +1866,7 @@
   /* --------------------------------------------------------------- TTS */
   var tts = { state: 'unknown', voices: [], def: null, poll: 0, tries: 0 };
   var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, audio: null, cache: {}, inflight: {},
-    segs: null, sent: null, sentIdx: -1 };
+    segs: null, sent: null, sentIdx: -1, gen: 0, pfGen: 0 };
 
   function ttsStatus(text, cls) {
     var n = el('rd-tts-status');
@@ -1943,9 +1943,18 @@
 
   function cacheKey(ch, i) { return ch + ':' + i; }
 
+  /* Recent non-current chapters' items (queue walks past the current chapter) */
+  var chapItems = {};
+
   function chapterItems(n) {
     if (state.chapter && state.chapter.n === n) return Promise.resolve(state.items);
-    return fetchChap(n).then(function (ch) { return ch.items; });
+    if (chapItems[n]) return Promise.resolve(chapItems[n]);
+    return fetchChap(n).then(function (ch) {
+      var ks = Object.keys(chapItems);
+      if (ks.length > 3) delete chapItems[ks[0]];
+      chapItems[n] = ch.items;
+      return ch.items;
+    });
   }
 
   /* Audio blob for (chapter, item) — deduped, cached, one request in flight. */
@@ -1954,13 +1963,16 @@
     if (speak.cache[k]) return Promise.resolve(speak.cache[k]);
     if (speak.inflight[k]) return speak.inflight[k];
 
+    var gen = speak.gen;
     var p = chapterItems(ch).then(function (items) {
       var it = items[i];
       if (!it || it.type !== 'p') return null;
       return ttsPost(it.text).then(function (entry) {
-        var keys = Object.keys(speak.cache);
-        if (keys.length > 12) delete speak.cache[keys[0]];
-        speak.cache[k] = entry;
+        if (gen === speak.gen) {   // voice changed mid-flight → don't cache stale audio
+          var keys = Object.keys(speak.cache);
+          if (keys.length > 16) delete speak.cache[keys[0]];
+          speak.cache[k] = entry;
+        }
         return entry;
       });
     }).then(function (entry) {
@@ -1974,14 +1986,40 @@
     return p;
   }
 
-  /* One-deep lookahead: VieNeu synthesizes at ~0.45x real time, so a single
-     request in flight already keeps playback gapless — queueing two would just
-     make the second wait behind the first on the server's synthesis lock. */
+  /* Lookahead queue: synthesize the next TTS_QUEUE paragraphs while the
+     current one plays, so paragraph transitions and jump buttons never wait
+     for synthesis. Requests are chained one at a time — the server
+     serializes synthesis anyway, and one in-flight fetch keeps the UI
+     (state saves, chapter loads) responsive. A new prefetch call or a stop
+     invalidates older chains via pfGen. */
+  var TTS_QUEUE = 10;
+
   function prefetchCurrent(i) {
-    if (i + 1 < state.items.length) audioFor(state.ch, i + 1).catch(noop);
-    if (i + 1 >= state.items.length && state.chapter && state.chapter.next) {
-      audioFor(state.chapter.next, 0).catch(noop);
+    var gen = ++speak.pfGen;
+    var ch = state.ch, idx = i + 1, left = TTS_QUEUE;
+    var total = (state.meta && state.meta.total) || 0;
+    var its = state.items;
+
+    function step() {
+      if (gen !== speak.pfGen || !speak.on || left <= 0) return;
+      if (ch === state.ch) its = state.items;
+      while (idx < its.length && (!its[idx] || its[idx].type !== 'p')) idx++;
+      if (idx < its.length) {
+        var j = idx++;
+        left--;
+        audioFor(ch, j).then(step, step);   // one failure must not kill the queue
+        return;
+      }
+      if (total && ch >= total) return;
+      var nch = ch + 1;
+      chapterItems(nch).then(function (next) {
+        if (gen !== speak.pfGen || !speak.on || left <= 0) return;
+        if (!next || !next.length) return;
+        ch = nch; its = next; idx = 0;
+        step();
+      }, noop);
     }
+    step();
   }
 
   function speakNote(text) {
@@ -2017,8 +2055,8 @@
       if (t + 0.001 >= segs[i][2]) idx = i; else break;
     }
     if (idx === speak.sentIdx) return;
-    speak.sentIdx = idx;
     highlightSeg(segs[idx]);
+    speak.sentIdx = idx;   // AFTER highlightSeg: clearSent() inside resets it to -1
   }
 
   function playBlob(entry, token) {
@@ -2484,6 +2522,9 @@
     var voice = el('rd-tts-voice');
     if (voice) voice.addEventListener('change', function () {
       ttsCfg.voice = this.value;
+      speak.cache = {};        // old blobs belong to the previous voice
+      speak.inflight = {};
+      speak.gen++;
       saveJSON(ttsKey, ttsCfg);
     });
     var play = el('rd-tts-play');
