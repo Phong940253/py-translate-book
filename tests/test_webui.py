@@ -849,6 +849,221 @@ class TestWebUI(unittest.TestCase):
                 last_end = e
         self.assertEqual(reader.split_for_tts_seg("   "), [])
 
+    # ---------------------------------------------------------- AI lookup
+
+    def _patch_lookup_urlopen(self, seen, reply="nghĩa là …"):
+        """Route webui.lookup's HTTP calls into a fake OpenAI response."""
+        from webui import lookup as lk_mod
+
+        def fake(req, timeout=None, *a, **k):
+            seen["url"] = req.full_url
+            seen["auth"] = req.get_header("Authorization")
+            seen["body"] = json.loads(req.data.decode("utf-8"))
+            seen["timeout"] = timeout
+
+            class _Resp:
+                def read(self_inner):
+                    return json.dumps(
+                        {"choices": [{"message": {"content": "  " + reply + "  "}}]}
+                    ).encode("utf-8")
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Resp()
+
+        orig = lk_mod.urllib.request.urlopen
+        lk_mod.urllib.request.urlopen = fake
+        self.addCleanup(setattr, lk_mod.urllib.request, "urlopen", orig)
+        return lk_mod
+
+    def test_lookup_explain_picks_first_usable_provider(self):
+        seen = {}
+        lk = self._patch_lookup_urlopen(seen)
+        cfg = {
+            "openai": {"api_key": ""},                 # builtin without key → skip
+            "gemini": {"api_key": "", "model": "g"},   # ditto
+            "groq": {
+                "type": "openai_compatible",
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_key": "k1",
+                "model": "m1",
+            },
+        }
+        out = lk.explain(cfg, "hạ hạ", "ngữ cảnh")
+        self.assertEqual(out["engine"], "groq")
+        self.assertEqual(out["result"], "nghĩa là …")   # whitespace stripped
+        self.assertTrue(seen["url"].endswith("/chat/completions"))
+        self.assertEqual(seen["auth"], "Bearer k1")
+        self.assertEqual(seen["body"]["model"], "m1")
+        # no length/temperature knobs: several models reject non-defaults
+        self.assertNotIn("max_tokens", seen["body"])
+        self.assertNotIn("temperature", seen["body"])
+        user = seen["body"]["messages"][1]["content"]
+        self.assertIn("hạ hạ", user)
+        self.assertIn("ngữ cảnh", user)
+
+    def test_lookup_maps_builtin_gemini_to_openai_compat(self):
+        seen = {}
+        lk = self._patch_lookup_urlopen(seen)
+        out = lk.explain(
+            {"gemini": {"api_key": "AIza", "model": "flash-lite"}}, "truong"
+        )
+        self.assertEqual(out["engine"], "gemini")
+        self.assertIn(
+            "generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            seen["url"],
+        )
+
+    def test_lookup_engine_preference_and_keyless_provider(self):
+        seen = {}
+        lk = self._patch_lookup_urlopen(seen)
+        cfg = {
+            "lookup": {"engine": "ollama"},
+            "gemini": {"api_key": "AIza", "model": "g"},
+            "ollama": {
+                "type": "openai_compatible",
+                "base_url": "http://localhost:11434/v1",
+                "model": "qwen3:14b",
+            },
+        }
+        out = lk.explain(cfg, "từ")
+        self.assertEqual(out["engine"], "ollama")
+        self.assertIn("localhost:11434", seen["url"])
+        self.assertIsNone(seen["auth"])                 # local box: no Bearer
+
+    def test_lookup_no_usable_provider_raises(self):
+        from webui import lookup as lk_mod
+
+        with self.assertRaises(lk_mod.LookupError):
+            lk_mod.explain({"openai": {"api_key": ""}}, "từ")
+
+    def test_lookup_http_error_becomes_lookup_error(self):
+        import io
+        import urllib.error
+
+        seen = {}
+        lk = self._patch_lookup_urlopen(seen)
+
+        def boom(req, timeout=None, *a, **k):
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests", {},
+                io.BytesIO(b'{"error": {"message": "rate limit"}}'),
+            )
+
+        orig = lk.urllib.request.urlopen
+        lk.urllib.request.urlopen = boom
+        self.addCleanup(setattr, lk.urllib.request, "urlopen", orig)
+        with self.assertRaises(lk.LookupError) as ctx:
+            lk.explain({"gemini": {"api_key": "AIza", "model": "g"}}, "từ")
+        self.assertIn("429", str(ctx.exception))
+
+    def test_lookup_falls_back_to_next_provider_on_error(self):
+        import io
+        import urllib.error
+
+        seen = {}
+        lk = self._patch_lookup_urlopen(seen)
+        attempts = []
+
+        def fake(req, timeout=None, *a, **k):
+            attempts.append(req.full_url)
+            if "generativelanguage" in req.full_url:      # first choice: 503 spike
+                raise urllib.error.HTTPError(
+                    req.full_url, 503, "UNAVAILABLE", {}, io.BytesIO(b"{}")
+                )
+
+            class _Resp:
+                def read(self_inner):
+                    return json.dumps(
+                        {"choices": [{"message": {"content": "chữ"}}]}
+                    ).encode("utf-8")
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Resp()
+
+        orig = lk.urllib.request.urlopen
+        lk.urllib.request.urlopen = fake
+        self.addCleanup(setattr, lk.urllib.request, "urlopen", orig)
+        cfg = {
+            "gemini": {"api_key": "AIza", "model": "g"},
+            "groq": {
+                "type": "openai_compatible",
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_key": "k",
+                "model": "m",
+            },
+        }
+        out = lk.explain(cfg, "từ")
+        self.assertEqual(out["engine"], "groq")
+        self.assertEqual(out["result"], "chữ")
+        self.assertEqual(len(attempts), 2)                 # gemini → groq, then stop
+
+    def test_lookup_endpoint_validates_text(self):
+        self.assertEqual(
+            self.client.post("/api/reader/lookup", json={"text": ""}).status_code, 400
+        )
+        self.assertEqual(
+            self.client.post("/api/reader/lookup", json={}).status_code, 400
+        )
+
+    def test_lookup_endpoint_success_truncates_input(self):
+        with mock.patch(
+            "webui.lookup.explain",
+            return_value={"engine": "gemini", "result": "nghĩa"},
+        ) as ex:
+            r = self.client.post(
+                "/api/reader/lookup",
+                json={"text": "x" * 500, "ctx": "c" * 900},
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["result"], "nghĩa")
+        from webui import lookup as lk_mod
+
+        args = ex.call_args[0]
+        self.assertEqual(len(args[1]), lk_mod.MAX_TEXT)
+        self.assertEqual(len(args[2]), lk_mod.MAX_CTX)
+
+    def test_lookup_endpoint_maps_lookup_error_to_502(self):
+        from webui import lookup as lk_mod
+
+        with mock.patch(
+            "webui.lookup.explain",
+            side_effect=lk_mod.LookupError("no provider"),
+        ):
+            r = self.client.post("/api/reader/lookup", json={"text": "từ"})
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("no provider", r.get_json()["error"])
+
+    def test_pwa_manifest_and_service_worker(self):
+        m = self.client.get("/manifest.webmanifest")
+        self.assertEqual(m.status_code, 200)
+        self.assertIn("manifest+json", m.headers.get("Content-Type", ""))
+        data = json.loads(m.data)
+        self.assertEqual(data["scope"], "/")
+        self.assertTrue(data["icons"])
+        for icon in data["icons"]:
+            r = self.client.get(icon["src"])
+            self.assertEqual(r.status_code, 200, icon["src"])
+        sw = self.client.get("/sw.js")
+        self.assertEqual(sw.status_code, 200)
+        self.assertEqual(sw.headers.get("Service-Worker-Allowed"), "/")
+        self.assertIn("self.addEventListener", sw.data.decode("utf-8"))
+
+    def test_pages_link_the_pwa_shell(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b'rel="manifest"', r.data)
+        self.assertIn(b"/sw.js", r.data)
+
     def test_tts_engine_synthesizes_with_a_stub_model(self):
         from webui import reader
 

@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#131622" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
   <title>{% block title %}Translate Book Manager{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   {% block extra_head %}{% endblock %}
@@ -66,6 +69,19 @@
   </footer>
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script>
+    // PWA: register only in a secure context (https/localhost) — service
+    // workers are rejected on plain-HTTP LAN addresses, where the manifest
+    // still provides an add-to-home-screen shortcut.
+    window.addEventListener('load', function () {
+      if (!('serviceWorker' in navigator)) return;
+      var host = location.hostname;
+      var secure = location.protocol === 'https:' || host === 'localhost' ||
+        host === '127.0.0.1' || host === '[::1]';
+      if (!secure) return;
+      navigator.serviceWorker.register('/sw.js').catch(function () {});
+    });
+  </script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

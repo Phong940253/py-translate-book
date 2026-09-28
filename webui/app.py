@@ -40,6 +40,7 @@ from webui.books import (
     get_cover,
 )
 import webui.reader as reader
+import webui.lookup as lookup
 import webui.i18n as i18n
 
 from translator.job import (
@@ -734,6 +735,42 @@ def api_reader_annotations():
         except OSError as e:
             return jsonify({"error": f"cannot write annotations: {e}"}), 500
     return jsonify(ann), status
+
+
+# --------------------------------------------------------------------------
+# PWA: manifest + service worker (scope must be the site root)
+# --------------------------------------------------------------------------
+
+
+@app.route("/manifest.webmanifest")
+def pwa_manifest():
+    path = os.path.join(PROJECT_ROOT, "webui", "static", "manifest.webmanifest")
+    return send_file(path, mimetype="application/manifest+json", max_age=3600)
+
+
+@app.route("/sw.js")
+def pwa_service_worker():
+    path = os.path.join(PROJECT_ROOT, "webui", "static", "sw.js")
+    resp = send_file(path, mimetype="application/javascript", max_age=0)
+    resp.headers["Service-Worker-Allowed"] = "/"
+    return resp
+
+
+@app.route("/api/reader/lookup", methods=["POST"])
+def api_reader_lookup():
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "text is required"}), 400
+    ctx = payload.get("ctx")
+    try:
+        return jsonify(lookup.explain(
+            load_config(),
+            text.strip()[: lookup.MAX_TEXT],
+            ctx.strip()[: lookup.MAX_CTX] if isinstance(ctx, str) else "",
+        ))
+    except lookup.LookupError as e:
+        return jsonify({"error": str(e)}), 502
 
 
 @app.route("/api/tts/voices")

@@ -1645,6 +1645,45 @@
     pop.style.top = Math.max(8, y) + 'px';
   }
 
+  /* --------------------------------------------------- AI lookup popover */
+  function hideLookup() {
+    var n = el('rd-lkp');
+    if (n) n.hidden = true;
+  }
+
+  function runLookup() {
+    if (!selPend || !R.lookupUrl) return;
+    var box = el('rd-lkp'), body = el('rd-lkp-body'), pop = el('rd-selpop');
+    if (!box || !body) return;
+    if (pop && !pop.hidden) {            // anchor where the selection popup was
+      box.style.left = pop.style.left;
+      box.style.top = pop.style.top;
+    }
+    box.hidden = false;
+    var x = parseFloat(box.style.left) || 8;
+    box.style.left = Math.max(8, Math.min(x, window.innerWidth - box.offsetWidth - 8)) + 'px';
+    body.textContent = i18n('read.lookup_loading');
+    var pend = selPend;
+    hideSelPop();
+    fetch(R.lookupUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: pend.quote,
+        ctx: (pend.pre || '') + pend.quote + (pend.post || '')
+      })
+    }).then(function (res) {
+      return res.json().then(function (j) {
+        if (!res.ok || j.error) {
+          throw new Error(j.error || res.statusText || ('HTTP ' + res.status));
+        }
+        body.textContent = j.result || '';
+      });
+    }).catch(function (e) {
+      body.textContent = i18n('read.lookup_fail') + ': ' + ((e && e.message) || '');
+    });
+  }
+
   var selT = 0;
   function onSelChangeSoon() {
     if (selT) clearTimeout(selT);
@@ -2346,6 +2385,8 @@
     if (k === 'Escape' || k === 'Esc') {
       var pop = el('rd-selpop');
       if (pop && !pop.hidden) { hideSelPop(); return; }
+      var lk = el('rd-lkp');
+      if (lk && !lk.hidden) { hideLookup(); return; }
       var fn = el('rd-fn');
       if (fn && !fn.hidden) { closeFootnote(); return; }
       if (document.fullscreenElement || document.webkitFullscreenElement) { toggleFullscreen(); return; }
@@ -2467,9 +2508,15 @@
           if (row) editAnnNote(row, created);
         });
       });
+      var selAi = el('rd-sel-ai');
+      if (selAi) selAi.addEventListener('click', runLookup);
     }
-    // click anywhere else in the parent document dismisses the popup
+    var lkpClose = el('rd-lkp-close');
+    if (lkpClose) lkpClose.addEventListener('click', hideLookup);
+    // click anywhere else in the parent document dismisses the popups
     document.addEventListener('mousedown', function (ev) {
+      var lkp = el('rd-lkp');
+      if (lkp && !lkp.hidden && !lkp.contains(ev.target)) hideLookup();
       var p = el('rd-selpop');
       if (!p || p.hidden) return;
       if (p.contains(ev.target)) return;

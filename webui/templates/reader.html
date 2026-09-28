@@ -15,6 +15,7 @@ window.APP.reader = {
   stateUrl: {{ url_for('api_reader_state')|tojson }},
   searchUrl: {{ url_for('api_reader_search')|tojson }},
   annUrl: {{ url_for('api_reader_annotations')|tojson }},
+  lookupUrl: {{ url_for('api_reader_lookup')|tojson }},
   ttsUrl: {{ url_for('api_tts')|tojson }},
   voicesUrl: {{ url_for('api_tts_voices')|tojson }}
 };
@@ -218,6 +219,15 @@ window.APP.reader = {
     <button type="button" class="rd-dot rd-dot-blue" data-color="blue" title="{{ t('read.ann') }}" aria-label="blue"></button>
     <button type="button" class="rd-dot rd-dot-pink" data-color="pink" title="{{ t('read.ann') }}" aria-label="pink"></button>
     <button id="rd-sel-note" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.ann_note_ph') }}" title="{{ t('read.ann_note_ph') }}">✎</button>
+    <button id="rd-sel-ai" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.lookup') }}" title="{{ t('read.lookup') }}">AI</button>
+  </div>
+
+  <div id="rd-lkp" class="rd-fn" hidden role="dialog" aria-label="{{ t('read.lookup') }}">
+    <div class="rd-fn-head">
+      <span class="rd-fn-title">{{ t('read.lookup') }}</span>
+      <button id="rd-lkp-close" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.close') }}">✕</button>
+    </div>
+    <div class="rd-fn-body" id="rd-lkp-body"></div>
   </div>
 </div>
 {% endblock %}
