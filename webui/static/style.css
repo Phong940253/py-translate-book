@@ -322,6 +322,24 @@ textarea.code {
 .diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
 .diff-grid pre { height: 300px; margin: 0; }
 
+/* ── rules view ─────────────────────────────────────────────── */
+.rules-container { max-height: 400px; overflow-y: auto; }
+.rules-container h3 { margin: var(--sp-3) 0 var(--sp-1); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); }
+.rules-chars { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.rules-char-card {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-2);
+  padding: var(--sp-2) var(--sp-3); min-width: 200px; flex: 1 1 200px; max-width: 360px;
+}
+.rules-char-name { font-weight: 700; margin-bottom: 2px; }
+.rules-calls { margin-top: 4px; }
+.rules-call-row { font-size: 0.85rem; padding: 1px 0; }
+.rules-narr, .rules-fallback { font-size: 0.85rem; padding: 2px 0; }
+.rules-narr-row { padding: 1px 0; }
+.rules-analysis { margin-top: var(--sp-1); }
+.rules-analysis summary { cursor: pointer; font-size: 0.85rem; color: var(--text-2); padding: 2px 0; }
+.rules-analysis summary:hover { color: var(--text); }
+.rules-analysis pre { height: 200px; margin-top: var(--sp-1); }
+
 .progressbar {
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--r-full); height: 10px; overflow: hidden; margin-top: var(--sp-2);

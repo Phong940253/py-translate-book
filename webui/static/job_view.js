@@ -21,6 +21,33 @@
   }
 
   var logEl = document.getElementById('log');
+  // Display cap: the <pre> keeps only the newest lines (the on-disk .log file
+  // stays complete; the stream also sends just the tail on connect).
+  var MAX_LOG_LINES = 1000;
+  var logLines = [];
+
+  var logDirty = false;
+  var logRaf = null;
+
+  function flushLog() {
+    if (!logEl) { logDirty = false; return; }
+    logEl.textContent = logLines.join('\n') + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+    logDirty = false;
+  }
+
+  function appendLog(text) {
+    if (!logEl) return;
+    var parts = String(text == null ? '' : text).split('\n');
+    for (var i = 0; i < parts.length; i++) logLines.push(parts[i]);
+    if (logLines.length > MAX_LOG_LINES) {
+      logLines.splice(0, logLines.length - MAX_LOG_LINES);
+    }
+    if (!logDirty) {
+      logDirty = true;
+      logRaf = requestAnimationFrame(flushLog);
+    }
+  }
   var progEl = document.getElementById('progress');
   var barEl = document.getElementById('bar');
   var apiEl = document.getElementById('api');
@@ -188,8 +215,140 @@
     if (nearBottom) view.scrollTop = view.scrollHeight;
   }
 
-  var VIEWS = { struct: 'structView', diff: 'diffView', side: 'diffWrap' };
-  var BUTTONS = { struct: 'btnStruct', diff: 'btnDiff', side: 'btnSide' };
+  // ── Rules view ─────────────────────────────────────────────────
+  var rulesContent = document.getElementById('rulesContent');
+  var rulesLoaded = false;
+
+  function fetchRules() {
+    if (!data.id || rulesLoaded) return;
+    var url = '/api/jobs/' + data.id + '/rules';
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.onload = function () {
+      if (xhr.status === 200) {
+        try {
+          var rules = JSON.parse(xhr.responseText);
+          renderRules(rules);
+          rulesLoaded = true;
+        } catch (e) {}
+      }
+    };
+    xhr.send();
+  }
+
+  function renderRules(rules) {
+    if (!rulesContent) return;
+    rulesContent.textContent = '';
+
+    var chars = rules.characters || {};
+    var narration = rules.narration_defaults || {};
+    var fallback = rules.fallback || '';
+    var analyses = rules.analyses || {};
+
+    // Empty state
+    if (Object.keys(chars).length === 0) {
+      var empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'No rules yet — rules are generated as chapters are translated.';
+      rulesContent.appendChild(empty);
+      return;
+    }
+
+    // Characters section
+    var charsTitle = document.createElement('h3');
+    charsTitle.textContent = 'Characters';
+    rulesContent.appendChild(charsTitle);
+
+    var charList = document.createElement('div');
+    charList.className = 'rules-chars';
+    Object.keys(chars).forEach(function (name) {
+      var entry = chars[name];
+      var card = document.createElement('div');
+      card.className = 'rules-char-card';
+
+      var nameEl = document.createElement('div');
+      nameEl.className = 'rules-char-name';
+      nameEl.textContent = name;
+      card.appendChild(nameEl);
+
+      if (entry.names && entry.names.length > 1) {
+        var aliases = document.createElement('div');
+        aliases.className = 'muted small';
+        aliases.textContent = 'Aliases: ' + entry.names.join(', ');
+        card.appendChild(aliases);
+      }
+
+      if (entry.calls && Object.keys(entry.calls).length > 0) {
+        var callsEl = document.createElement('div');
+        callsEl.className = 'rules-calls';
+        Object.keys(entry.calls).forEach(function (target) {
+          var row = document.createElement('div');
+          row.className = 'rules-call-row';
+          row.innerHTML = esc(name) + ' → <b>' + esc(target) + '</b>: ' + esc(entry.calls[target]);
+          callsEl.appendChild(row);
+        });
+        card.appendChild(callsEl);
+      }
+
+      charList.appendChild(card);
+    });
+    rulesContent.appendChild(charList);
+
+    // Narration defaults
+    if (Object.keys(narration).length > 0) {
+      var narrTitle = document.createElement('h3');
+      narrTitle.textContent = 'Narration Defaults';
+      rulesContent.appendChild(narrTitle);
+
+      var narrList = document.createElement('div');
+      narrList.className = 'rules-narr';
+      Object.keys(narration).forEach(function (ctx) {
+        var row = document.createElement('div');
+        row.className = 'rules-narr-row';
+        row.innerHTML = esc(ctx) + ' → ' + esc(narration[ctx]);
+        narrList.appendChild(row);
+      });
+      rulesContent.appendChild(narrList);
+    }
+
+    // Fallback
+    if (fallback) {
+      var fbTitle = document.createElement('h3');
+      fbTitle.textContent = 'Default Fallback';
+      rulesContent.appendChild(fbTitle);
+      var fbEl = document.createElement('div');
+      fbEl.className = 'rules-fallback';
+      fbEl.textContent = fallback;
+      rulesContent.appendChild(fbEl);
+    }
+
+    // Chapter analyses (collapsible)
+    var chapterKeys = Object.keys(analyses).sort(function (a, b) { return Number(a) - Number(b); });
+    if (chapterKeys.length > 0) {
+      var analTitle = document.createElement('h3');
+      analTitle.textContent = 'Chapter Analyses (' + chapterKeys.length + ')';
+      rulesContent.appendChild(analTitle);
+
+      chapterKeys.forEach(function (ch) {
+        var details = document.createElement('details');
+        details.className = 'rules-analysis';
+
+        var summary = document.createElement('summary');
+        summary.textContent = 'Chapter ' + ch;
+        details.appendChild(summary);
+
+        var pre = document.createElement('pre');
+        pre.className = 'log';
+        pre.textContent = analyses[ch];
+        details.appendChild(pre);
+
+        rulesContent.appendChild(details);
+      });
+    }
+  }
+
+  var VIEWS = { struct: 'structView', diff: 'diffView', side: 'diffWrap', rules: 'rulesView' };
+  var BUTTONS = { struct: 'btnStruct', diff: 'btnDiff', side: 'btnSide', rules: 'btnRules' };
 
   function show(name) {
     Object.keys(VIEWS).forEach(function (viewName) {
@@ -206,6 +365,10 @@
     document.getElementById('btnStruct').addEventListener('click', function () { show('struct'); });
     document.getElementById('btnDiff').addEventListener('click', function () { show('diff'); });
     document.getElementById('btnSide').addEventListener('click', function () { show('side'); });
+    document.getElementById('btnRules').addEventListener('click', function () {
+      show('rules');
+      fetchRules();
+    });
   }
 
   // Render current state first, then live-update via SSE (no flash on reload).
@@ -215,13 +378,21 @@
     var es = new EventSource(data.streamUrl);
     es.onmessage = function (e) {
       var msg = JSON.parse(e.data);
-      if (msg.type === 'log') {
-        if (logEl) {
-          logEl.textContent += (msg.line || '') + '\n';
-          logEl.scrollTop = logEl.scrollHeight;
+      if (msg.type === 'log_batch' && Array.isArray(msg.lines)) {
+        for (var i = 0; i < msg.lines.length; i++) {
+          appendLog(msg.lines[i] + '\n');
         }
+      } else if (msg.type === 'log') {
+        appendLog((msg.line || '') + '\n');
       } else if (msg.type === 'progress') {
         renderProgress(msg.progress);
+        // Refresh rules when new chapter completes (last_completed changes)
+        var p = msg.progress || {};
+        if (p.last_completed) {
+          rulesLoaded = false;
+          var rulesView = document.getElementById('rulesView');
+          if (rulesView && !rulesView.hidden) fetchRules();
+        }
         if (['done', 'error', 'stopped', 'interrupted'].indexOf(msg.status) !== -1) {
           if (progEl) {
             var badge = document.createElement('span');
@@ -230,7 +401,7 @@
             d.className = 'status-dot';
             badge.appendChild(d);
             badge.appendChild(document.createTextNode(' ' + i18n('job.status.' + msg.status)));
-            if (msg.error) logEl.textContent += '\n' + i18n('job.view.error_line') + msg.error + '\n';
+            if (msg.error) appendLog('\n' + i18n('job.view.error_line') + msg.error + '\n');
             progEl.appendChild(document.createTextNode(' — '));
             progEl.appendChild(badge);
           }

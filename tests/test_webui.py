@@ -392,6 +392,162 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("Hello world", r.get_json()["text"])
 
+    # ------------------------------------------------------------------ /read
+    def _reader_epub(self, name="_test_reader.epub"):
+        path = os.path.join(PROJECT_ROOT, name)
+        _make_epub(path)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def _warm_noop(self):
+        """Never let a test boot the real TTS model (downloads + ~15s load)."""
+        from webui import reader
+        return mock.patch.object(reader.ENGINE, "ensure_warm")
+
+    def test_read_page_renders_with_reader_bootstrap(self):
+        path = self._reader_epub()
+        with self._warm_noop():
+            r = self.client.get("/read?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("window.APP.reader", body)
+        self.assertIn("reader.js", body)
+        self.assertIn("reader.css", body)
+        self.assertIn("rd-panel-tts", body)
+
+    def test_read_page_rejects_bad_path(self):
+        r = self.client.get("/read?path=/etc/passwd")
+        self.assertEqual(r.status_code, 400)
+
+    def test_reader_meta_excludes_nav_document(self):
+        # The EPUB nav (table of contents) document is also ITEM_DOCUMENT — it
+        # must not show up as a readable chapter.
+        path = self._reader_epub("_test_reader_meta.epub")
+        r = self.client.get("/api/reader/meta?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        meta = r.get_json()
+        self.assertEqual(meta["total"], 1)
+        self.assertEqual(meta["chapters"][0]["n"], 1)
+        self.assertEqual(meta["title"], "WebUI Test")
+
+    def test_reader_chapter_payload(self):
+        path = self._reader_epub("_test_reader_ch.epub")
+        r = self.client.get("/api/reader/chapter?path=" + path + "&n=1")
+        self.assertEqual(r.status_code, 200)
+        ch = r.get_json()
+        self.assertEqual(ch["n"], 1)
+        self.assertIsNone(ch["prev"])
+        self.assertIsNone(ch["next"])
+        self.assertEqual(ch["total"], 1)
+        self.assertTrue(ch["items"])
+        self.assertEqual(ch["items"][0]["type"], "p")
+        self.assertIn("Hello world", ch["items"][0]["text"])
+
+    def test_reader_chapter_errors_are_json(self):
+        path = self._reader_epub("_test_reader_bad.epub")
+        r = self.client.get("/api/reader/chapter?path=" + path + "&n=42")
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(r.is_json)
+        self.assertIn("error", r.get_json())
+
+        r = self.client.get("/api/reader/chapter?path=" + path + "&n=abc")
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(r.is_json)
+
+        r = self.client.get("/api/reader/meta?path=" + os.path.join("C:\\", "nope.epub"))
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(r.is_json)
+
+    def test_tts_voices_reports_engine_state(self):
+        from webui import reader
+        fake = {
+            "state": "ready", "error": None, "load_seconds": 12.3,
+            "voices": [{"id": "v1", "label": "Test voice"}], "default": "v1",
+        }
+        with mock.patch.object(reader.ENGINE, "ensure_warm"), \
+                mock.patch.object(reader.ENGINE, "status", return_value=fake):
+            r = self.client.get("/api/tts/voices")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["state"], "ready")
+        self.assertEqual(data["voices"][0]["label"], "Test voice")
+
+    def test_tts_rejects_bad_payload(self):
+        from webui import reader
+        with mock.patch.object(reader.ENGINE, "ensure_warm"):
+            r = self.client.post("/api/tts", json={"text": ""})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("error", r.get_json())
+
+            r = self.client.post("/api/tts", json={"text": "x" * (reader.MAX_TEXT + 1)})
+            self.assertEqual(r.status_code, 400)
+
+            r = self.client.post("/api/tts", json={"text": "ok", "voice": 42})
+            self.assertEqual(r.status_code, 400)
+
+    def test_tts_returns_wav_when_engine_ready(self):
+        from webui import reader
+        wav = b"RIFF0000WAVEfake"
+        with mock.patch.object(reader.ENGINE, "ensure_warm"), \
+                mock.patch.object(reader.ENGINE, "synthesize", return_value=wav) as syn:
+            r = self.client.post("/api/tts", json={"text": "Xin chào", "voice": "v1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "audio/wav")
+        self.assertEqual(r.get_data(), wav)
+        syn.assert_called_once_with("Xin chào", "v1")
+
+    def test_tts_503_when_engine_not_ready(self):
+        from webui import reader
+        with mock.patch.object(reader.ENGINE, "ensure_warm"), \
+                mock.patch.object(reader.ENGINE, "synthesize",
+                                  side_effect=RuntimeError("tts not ready (state=idle)")):
+            r = self.client.post("/api/tts", json={"text": "Xin chào"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("not ready", r.get_json()["error"])
+
+    def test_split_for_tts_respects_the_char_limit(self):
+        from webui import reader
+        long_text = ("Một câu dài. " * 60).strip()
+        parts = reader.split_for_tts(long_text)
+        self.assertTrue(parts)
+        self.assertTrue(all(len(p) <= reader._CHUNK_CHARS for p in parts))
+        self.assertEqual(" ".join(parts).replace(" .", "."), long_text)
+        self.assertEqual(reader.split_for_tts("   "), [])
+
+    def test_tts_engine_synthesizes_with_a_stub_model(self):
+        from webui import reader
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append((text, voice))
+                return [0.0] * 480
+
+        eng = reader.TTSEngine()
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "Hải Đăng"
+        eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
+
+        wav = eng.synthesize("Một hai ba.", voice="khong-ton-tai")
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertEqual(stub.calls[-1][1], "Hải Đăng")  # unknown voice → default
+
+        eng.synthesize("Một.", voice="Hải Đăng")
+        self.assertEqual(stub.calls[-1][1], "Hải Đăng")
+
+        # Defensive clamp: an over-long request must not reach the model whole.
+        eng.synthesize("x" * (reader.MAX_TEXT + 500), voice="Hải Đăng")
+        self.assertLessEqual(max(len(t) for t, _ in stub.calls), reader.MAX_TEXT)
+
+        with self.assertRaises(RuntimeError):
+            reader.TTSEngine().synthesize("chưa sẵn sàng")
+
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")
         self.assertEqual(r.status_code, 302)
@@ -787,6 +943,43 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(
             (job.progress.get("current_chunk") or {}).get("status"), "failed"
         )
+
+    def test_stream_sends_tail_only_and_keeps_disk_file(self):
+        # A huge on-disk log must not flood the monitor: a fresh stream sends
+        # only the newest LOG_TAIL_LINES, while the disk file stays complete.
+        import json
+
+        from webui.jobs import LOG_TAIL_LINES
+
+        job = self.registry.create({"engine": "openai"})
+        log_path = self.registry._log_path(job.id)
+        total = LOG_TAIL_LINES + 200
+        with open(log_path, "w", encoding="utf-8") as f:
+            for i in range(total):
+                f.write(f"line-{i:05d}\n")
+        job.status = "done"
+        self.registry.save(job)
+
+        r = self.client.get(f"/jobs/{job.id}/stream")
+        self.assertEqual(r.status_code, 200)
+        received = []
+        for raw in r.get_data(as_text=True).splitlines():
+            if not raw.startswith("data: "):
+                continue
+            payload = json.loads(raw[len("data: "):])
+            # The tail may arrive as single `line` events or batched
+            # `log_batch` events (SSE batching keeps the monitor fast).
+            if "line" in payload:
+                received.append(payload["line"])
+            elif payload.get("type") == "log_batch":
+                received.extend(payload.get("lines") or [])
+        self.assertEqual(len(received), LOG_TAIL_LINES)
+        self.assertEqual(received[0], f"line-{total - LOG_TAIL_LINES:05d}")
+        self.assertEqual(received[-1], f"line-{total - 1:05d}")
+
+        # disk file untouched (full history kept)
+        with open(log_path, encoding="utf-8") as f:
+            self.assertEqual(len(f.read().splitlines()), total)
 
     def test_stale_running_job_marked_interrupted(self):
         # A job persisted as "running" (or "queued") belongs to a previous

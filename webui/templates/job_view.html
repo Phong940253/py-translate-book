@@ -53,6 +53,7 @@ window.APP.jobData = {
     <button id="btnStruct" type="button" class="btn btn-ghost btn-sm" aria-pressed="true">{{ t('job.view.view_struct') }}</button>
     <button id="btnDiff" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ t('job.view.view_diff') }}</button>
     <button id="btnSide" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ t('job.view.view_side') }}</button>
+    <button id="btnRules" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">Rules</button>
   </div>
   <div id="structView" class="diff mt"></div>
   <div id="diffView" class="diff mt" hidden></div>
@@ -65,6 +66,9 @@ window.APP.jobData = {
       <div class="muted small">{{ t('job.view.translated') }}</div>
       <pre id="diffTrans" class="log"></pre>
     </div>
+  </div>
+  <div id="rulesView" class="mt" hidden>
+    <div id="rulesContent" class="rules-container"></div>
   </div>
 </section>
 

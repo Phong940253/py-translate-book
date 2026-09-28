@@ -15,6 +15,15 @@ from webui.diff_utils import diff_chunk, chunk_structure
 
 JOB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
 
+# In-memory caps.
+MAX_LOG_LINES = 3000
+MAX_EVENTS = 3000
+# How many of the newest log lines a fresh monitor view receives. The client
+# keeps the same amount in the DOM, so a huge log file never floods it.
+LOG_TAIL_LINES = 1000
+# On-disk log cap: truncate to this many newest lines when the file exceeds it.
+MAX_DISK_LOG_LINES = 4000
+
 
 class Job:
     def __init__(self, job_id: str, params: dict):
@@ -124,17 +133,43 @@ class JobRegistry:
     def append_log(self, job: Job, line: str) -> None:
         with job._lock:
             job.log_lines.append(line)
-            if len(job.log_lines) > 3000:
+            if len(job.log_lines) > MAX_LOG_LINES:
                 job.log_lines.pop(0)
         try:
             with open(self._log_path(job.id), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+            # Periodically truncate the on-disk log to prevent unbounded growth.
+            # Every 200 appends, check the line count and trim if needed.
+            if hasattr(job, "_log_appends"):
+                job._log_appends += 1
+            else:
+                job._log_appends = 1
+            if job._log_appends % 200 == 0:
+                self._truncate_log(job.id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _truncate_log(self, jid: str) -> None:
+        """Trim the on-disk log file to the newest MAX_DISK_LOG_LINES lines."""
+        path = self._log_path(jid)
+        try:
+            if not os.path.exists(path):
+                return
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if len(lines) <= MAX_DISK_LOG_LINES:
+                return
+            trimmed = lines[-MAX_DISK_LOG_LINES:]
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(trimmed) + "\n")
         except Exception:  # noqa: BLE001
             pass
 
     def record_event(self, job: Job, event: str, data: dict) -> None:
         with job._lock:
             job.events.append((event, data))
+            if len(job.events) > MAX_EVENTS:
+                job.events.pop(0)
             if isinstance(job.progress, dict):
                 if event == "job_started":
                     job.progress = {

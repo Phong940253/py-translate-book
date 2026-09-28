@@ -30,7 +30,7 @@ from flask import (
 
 import webui.core_runner as core_runner
 import webui.config_schema as config_schema
-from webui.jobs import JobRegistry
+from webui.jobs import JobRegistry, LOG_TAIL_LINES
 from webui.config_store import load_config, mask_config, save_config_text, save_config_dict
 from webui.books import (
     build_library,
@@ -38,6 +38,7 @@ from webui.books import (
     preview_chapter,
     get_cover,
 )
+import webui.reader as reader
 import webui.i18n as i18n
 
 from translator.job import (
@@ -167,6 +168,7 @@ def job_new():
             "openai_batch": bool(p.get("openai_batch")),
             "reset_checkpoint": bool(p.get("reset_checkpoint")),
             "disable_resume": bool(p.get("disable_resume")),
+            "global_rules_path": p.get("global_rules_path") or None,
         }
         if not params["engine"] or not params["input"]:
             return "engine and input are required", 400
@@ -198,6 +200,42 @@ def job_view(job_id):
     if not job:
         abort(404)
     return render_template("job_view.html", job=job)
+
+
+@app.route("/api/jobs/<job_id>/rules")
+def api_job_rules(job_id):
+    """Return the global cross-chapter rules for a job (JSON)."""
+    job = registry.get(job_id)
+    if not job:
+        abort(404)
+    # Determine rules path from job params (same logic as run_translation)
+    output = (job.params or {}).get("output", "")
+    if not output:
+        return jsonify({"error": "no output path"}), 404
+    rules_path = os.path.splitext(output)[0] + ".rules.json"
+    if not os.path.exists(rules_path):
+        return jsonify({"characters": {}, "narration_defaults": {}, "fallback": ""})
+    try:
+        from translator.global_rules import GlobalRulesManager
+        mgr = GlobalRulesManager(rules_path)
+        mgr.load()
+        state = mgr.state
+        return jsonify({
+            "characters": {
+                name: {
+                    "names": entry.names,
+                    "calls": entry.calls,
+                    "pronouns": entry.pronouns,
+                    "notes": entry.notes,
+                }
+                for name, entry in state.characters.items()
+            },
+            "narration_defaults": state.narration_defaults,
+            "fallback": state.fallback,
+            "analyses": mgr.get_all_analyses(),
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/jobs/<job_id>/stop", methods=["POST"])
@@ -259,8 +297,27 @@ def job_stream(job_id):
 
     log_path = registry._log_path(job_id)
 
+    LOG_BATCH_SIZE = 100  # send log lines in batches to avoid O(n²) DOM updates
+
     def gen():
-        last = 0
+        # Send only the tail on connect: the on-disk log is never truncated,
+        # so resending it whole would flood the client on every page load.
+        # Afterwards follow the file by byte position (O(new bytes) per tick
+        # instead of re-reading the whole file).
+        pos = 0
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, encoding="utf-8") as f:
+                    tail = f.read().splitlines()[-LOG_TAIL_LINES:]
+                # Send log tail in batches to avoid overwhelming the client
+                for i in range(0, len(tail), LOG_BATCH_SIZE):
+                    batch = tail[i : i + LOG_BATCH_SIZE]
+                    yield "data: " + json.dumps(
+                        {"type": "log_batch", "lines": batch}, ensure_ascii=False
+                    ) + "\n\n"
+                pos = os.path.getsize(log_path)
+            except Exception:  # noqa: BLE001
+                pos = 0
         while True:
             # Read state from disk so it works for both the thread worker (which
             # shares memory but also persists) and a subprocess worker (which
@@ -274,17 +331,24 @@ def job_stream(job_id):
             lines = []
             if os.path.exists(log_path):
                 try:
-                    with open(log_path, encoding="utf-8") as f:
-                        cur = f.read().splitlines()
+                    size = os.path.getsize(log_path)
+                    if size < pos:
+                        pos = 0  # file shrank; start over
+                    if size > pos:
+                        with open(log_path, encoding="utf-8") as f:
+                            f.seek(pos)
+                            lines = f.read().splitlines()
+                        pos = size
                 except Exception:  # noqa: BLE001
-                    cur = []
-                lines = cur[last:]
-                last = len(cur)
+                    lines = []
 
-            for line in lines:
-                yield "data: " + json.dumps(
-                    {"type": "log", "line": line}, ensure_ascii=False
-                ) + "\n\n"
+            if lines:
+                # Send incremental log lines in batches
+                for i in range(0, len(lines), LOG_BATCH_SIZE):
+                    batch = lines[i : i + LOG_BATCH_SIZE]
+                    yield "data: " + json.dumps(
+                        {"type": "log_batch", "lines": batch}, ensure_ascii=False
+                    ) + "\n\n"
             payload = {
                 "type": "progress",
                 "progress": prog,
@@ -421,6 +485,108 @@ def book_cover():
         abort(404)
     data, mime = cover
     return send_file(io.BytesIO(data), mimetype=mime)
+
+
+# --------------------------------------------------------------------------
+# EPUB reader (/read) + local TTS
+# --------------------------------------------------------------------------
+
+
+def _reader_path() -> str:
+    """Validated absolute EPUB path from ``?path=`` (400 on anything else)."""
+    path = request.args.get("path", "")
+    if not path or not path.startswith(PROJECT_ROOT) or not os.path.isfile(path):
+        abort(400, description="invalid path")
+    if not path.lower().endswith(".epub"):
+        abort(400, description="not an epub")
+    return path
+
+
+def _reader_doc():
+    """Parsed book for an API request, or a JSON error response to return early.
+
+    Usage: ``doc, err = _reader_doc(); if err: return err``.
+    """
+    path = request.args.get("path", "")
+    if not path or not path.startswith(PROJECT_ROOT) or not os.path.isfile(path):
+        return None, (jsonify({"error": "invalid path"}), 400)
+    try:
+        return reader.load_book(path), None
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+    except Exception as e:  # noqa: BLE001 — broken EPUB → clean JSON error
+        return None, (jsonify({"error": f"{type(e).__name__}: {e}"}), 422)
+
+
+@app.route("/read")
+def reader_view():
+    path = _reader_path()
+    reader.ENGINE.ensure_warm()
+    return render_template("reader.html", path=path, book_title=os.path.basename(path))
+
+
+@app.route("/api/reader/meta")
+def api_reader_meta():
+    doc, err = _reader_doc()
+    if err:
+        return err
+    return jsonify(doc.meta())
+
+
+@app.route("/api/reader/chapter")
+def api_reader_chapter():
+    doc, err = _reader_doc()
+    if err:
+        return err
+    try:
+        n = int(request.args.get("n", "1"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "n must be an integer"}), 400
+    try:
+        return jsonify(doc.chapter(n))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/reader/image")
+def api_reader_image():
+    doc, err = _reader_doc()
+    if err:
+        return err
+    src = request.args.get("src", "")
+    data, mime = reader.read_image(doc.path, src)
+    if not data:
+        abort(404)
+    return send_file(io.BytesIO(data), mimetype=mime, max_age=86400)
+
+
+@app.route("/api/tts/voices")
+def api_tts_voices():
+    reader.ENGINE.ensure_warm()
+    return jsonify(reader.ENGINE.status())
+
+
+@app.route("/api/tts", methods=["POST"])
+def api_tts():
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text")
+    voice = payload.get("voice")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "text is required"}), 400
+    if len(text) > reader.MAX_TEXT:
+        return jsonify({"error": f"text too long (max {reader.MAX_TEXT} chars)"}), 400
+    if voice is not None and not isinstance(voice, str):
+        return jsonify({"error": "voice must be a string"}), 400
+    reader.ENGINE.ensure_warm()
+    try:
+        wav = reader.ENGINE.synthesize(text, voice)
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "state": reader.ENGINE.state}), 503
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001 — synthesis failure → readable JSON
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return send_file(io.BytesIO(wav), mimetype="audio/wav")
 
 
 # --------------------------------------------------------------------------
@@ -661,4 +827,4 @@ def health():
 
 if __name__ == "__main__":
     print("Web UI running at http://127.0.0.1:5000  (local only)")
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False, threaded=True)
