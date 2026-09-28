@@ -372,6 +372,8 @@
       scroll: opts.scroll !== false
     };
     showLoading(true);
+    setChromeAway(false);   // fresh chapter → toolbar/header back in view
+    chromeReset();
     return Promise.all([fetchDoc(n), fetchChap(n)]).then(function (r) {
       if (token !== state.token) return null;
       pending.html = r[0];
@@ -406,6 +408,7 @@
     if (!doc || !doc.body) return;
 
     fdoc = doc;
+    chromeReset();   // the previous document's scroll position means nothing here
     state.frameReady = true;
     pushVars(doc);
     if (settings.mode === 'page') layoutPages(false);
@@ -612,6 +615,7 @@
   function scrollToNode(node) {
     if (!node || !fdoc) return;
     if (settings.mode === 'page') { setPage(pageOfNode(node)); return; }
+    chromeReset();   // programmatic jump — don't read it as a scroll gesture
     var sc = fdoc.scrollingElement || fdoc.documentElement;
     sc.scrollTop = Math.max(0, absTop(node) - sc.clientHeight * 0.25);
   }
@@ -1084,6 +1088,7 @@
   }
 
   function onFrameScroll() {
+    chromeFrom('f', frameScrollY());
     wakeBar();
     if (scrollT) return;
     scrollT = setTimeout(function () {
@@ -1895,6 +1900,7 @@
     var prev = rd.dataset.panel;
     var open = rd.dataset.panel === name ? '' : (name || '');
     rd.dataset.panel = open;
+    if (open) setChromeAway(false);   // the panel toggles live in the bar
     ['toc', 'font', 'tts', 'search', 'ann'].forEach(function (n) {
       var panel = el('rd-panel-' + n);
       var btn = el('rd-open-' + n);
@@ -2351,6 +2357,90 @@
     }
   }
 
+  /* ------------------------------------------ scroll-direction chrome hide */
+  /* Phone: scrolling down slides the reader toolbar + page header up and out
+     (negative top margins — only JS knows the pixel heights — pull the stage
+     into the freed space); scrolling up, a keypress, opening a panel or a
+     chapter change brings them back. The CSS half of the effect lives under a
+     (max-width: 760px), (pointer: coarse) query, and chromeOn() mirrors that
+     query here, so desktop never arms it. */
+  var chrome = { away: false, fY: null, wY: null, acc: 0, follow: 0, followUntil: 0, quiet: 0, lastLayout: 0 };
+  var CHROME_PX = 16;      // accumulated scroll drift before we flip state
+  var CHROME_JUMP = 400;   // bigger jumps are programmatic — re-baseline only
+  var chromeMq = window.matchMedia
+    ? window.matchMedia('(max-width: 760px), (pointer: coarse)') : null;
+
+  function chromeOn() { return !!(chromeMq && chromeMq.matches); }
+
+  function chromeBlocked() {
+    var rd = el('rd');
+    return document.body.classList.contains('nav-open') || !!(rd && rd.dataset.panel);
+  }
+
+  function chromeReset() { chrome.fY = null; chrome.wY = null; chrome.acc = 0; }
+
+  function frameScrollY() {
+    if (!fdoc) return null;
+    var sc = fdoc.scrollingElement || fdoc.documentElement;
+    return (sc && sc.scrollTop) || 0;
+  }
+
+  /* rect.top moves every frame while the margins animate, so keep resizing the
+     stage until the transition is done — one shot at either end would leave it
+     the wrong height. */
+  function followStage() {
+    chrome.followUntil = Date.now() + 420;
+    if (chrome.follow) return;
+    function step() {
+      resizeStage();
+      if (Date.now() < chrome.followUntil) chrome.follow = requestAnimationFrame(step);
+      else { chrome.follow = 0; resizeStage(); }
+    }
+    chrome.follow = requestAnimationFrame(step);
+  }
+
+  function setChromeAway(on) {
+    on = !!on;
+    if (on && (!chromeOn() || chromeBlocked())) return;
+    if (on === chrome.away) return;
+    chrome.away = on;
+    chrome.acc = 0;
+    document.body.classList.toggle('chrome-away', on);
+    [document.querySelector('.topbar'), el('rd-bar')].forEach(function (bar) {
+      if (!bar) return;
+      if (on) {
+        var h = bar.offsetHeight;
+        if (h) bar.style.marginTop = -h + 'px';
+      } else {
+        bar.style.marginTop = '';
+      }
+    });
+    followStage();
+    // shrinking/growing the stage changes the document height and can clamp
+    // the parent page's scroll — swallow that self-inflicted scroll until the
+    // transition has settled (frame-side clamps are filtered by lastLayout)
+    chrome.quiet = chrome.followUntil;
+  }
+
+  function chromeFrom(src, y) {
+    if (y == null) return;
+    var key = src === 'f' ? 'fY' : 'wY';
+    var prev = chrome[key];
+    chrome[key] = y;
+    if (prev == null) return;
+    var d = y - prev;
+    if (!d || !chromeOn()) return;
+    if (Math.abs(d) > CHROME_JUMP) { chrome.acc = 0; return; }   // jumpTo/restore
+    // while our own stage resize is animating the iframe, Blink re-anchors the
+    // frame's scroll (clamped at the chapter end, anchored mid-content) — those
+    // events must not read as user scrolling or state flips into a resize loop
+    if (src === 'f' && Date.now() - chrome.lastLayout < 120) return;
+    if (src !== 'f' && Date.now() < chrome.quiet) return;
+    chrome.acc = (chrome.acc && (d > 0) === (chrome.acc > 0)) ? chrome.acc + d : d;
+    if (chrome.acc >= CHROME_PX) setChromeAway(true);
+    else if (chrome.acc <= -CHROME_PX) setChromeAway(false);
+  }
+
   function toggleFullscreen() {
     try {
       if (!document.fullscreenElement && !document.webkitFullscreenElement) {
@@ -2373,7 +2463,10 @@
     var jumpH = jump ? jump.offsetHeight + 8 : 0;
     var h = Math.round(window.innerHeight - rect.top - jumpH - 8);
     if (h < 320) h = 320;
-    if (Math.abs(h - stage.offsetHeight) > 3) stage.style.height = h + 'px';
+    if (Math.abs(h - stage.offsetHeight) > 3) {
+      stage.style.height = h + 'px';
+      chrome.lastLayout = Date.now();   // frame scroll events right now are ours
+    }
     scheduleLayout();
   }
 
@@ -2389,6 +2482,7 @@
     var tag = ((t && t.tagName) || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    setChromeAway(false);   // deliberate keypress → chrome back on screen
     var k = ev.key;
 
     if (k === 'Escape' || k === 'Esc') {
@@ -2694,6 +2788,15 @@
     document.addEventListener('mousemove', wakeBar, { passive: true });
     window.addEventListener('resize', resizeSoon);
     window.addEventListener('scroll', resizeSoon, { passive: true });
+    // phone: page scroll direction retracts/restores header + reader toolbar
+    window.addEventListener('scroll', function () {
+      chromeFrom('w', window.pageYOffset || (document.documentElement || {}).scrollTop || 0);
+    }, { passive: true });
+    if (chromeMq) {
+      var onChromeMq = function () { if (!chromeOn()) setChromeAway(false); };
+      if (chromeMq.addEventListener) chromeMq.addEventListener('change', onChromeMq);
+      else if (chromeMq.addListener) chromeMq.addListener(onChromeMq);
+    }
     document.addEventListener('mousedown', function (ev) {
       var fn = el('rd-fn');
       if (!fn || fn.hidden) return;
@@ -2733,6 +2836,7 @@
     if (b) b.setAttribute('aria-pressed', String(on));
     if (!on && hideT) { clearTimeout(hideT); hideT = 0; }
     wakeBar();
+    setChromeAway(false);
     resizeStage();
     requestAnimationFrame(resizeStage);
   }

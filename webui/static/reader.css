@@ -50,6 +50,18 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   transform: translateY(-6px);
   pointer-events: none;
 }
+/* phone: scroll direction retracts the toolbar together with the page header
+   (body.chrome-away + the negative margin are set by reader.js) */
+@media (max-width: 760px), (pointer: coarse) {
+  .rd-bar {
+    transition: opacity 260ms var(--ease), transform 260ms var(--ease), margin 260ms var(--ease);
+  }
+  body.chrome-away .rd-bar {
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+  }
+}
 .rd-group { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .rd-center { flex: 1 1 220px; justify-content: center; }
 .rd-select {
@@ -60,6 +72,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   padding: 6px 8px;
   font-size: var(--text-sm);
   max-width: 340px;
+  transition: border-color var(--t-fast), background var(--t-fast);
 }
 .rd-progress {
   flex: 1 1 120px;
@@ -85,6 +98,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
+  animation: fade-up 240ms var(--ease);
 }
 .rd-panel-title { font-weight: 600; margin-bottom: var(--sp-2); }
 .rd-fields {
@@ -144,6 +158,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   padding: 3px 10px;
   font-size: var(--text-xs);
   cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .rd-toc-marks button:hover { color: var(--text); }
 
@@ -157,8 +172,10 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   margin: 0;
   padding-left: 16px;
   border-left: 1px solid var(--border);
+  animation: fade-in 150ms var(--ease);
 }
 .rd-tree > ul { padding-left: 0; border-left: 0; }
+.rd-tree li.is-collapsed > ul { display: none; }
 .rd-tree li { margin: 1px 0; }
 .rd-node {
   display: flex;
@@ -176,6 +193,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   font-size: 11px;
   line-height: 1;
   padding: 5px 0;
+  transition: background var(--t-fast), color var(--t-fast);
 }
 .rd-node-toggle:hover { background: var(--surface-2); color: var(--text); }
 .rd-node-toggle.is-empty { visibility: hidden; }
@@ -191,6 +209,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background var(--t-fast), color var(--t-fast);
 }
 .rd-node-go:hover { background: var(--surface-2); color: var(--text); }
 .rd-node-go[aria-current="true"] {
@@ -232,6 +251,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   font-size: var(--text-sm);
   background: inherit;
   z-index: 2;
+  animation: fade-in 200ms var(--ease);
 }
 .rd-loading[hidden] { display: none; }
 .rd-loading.is-error { color: var(--danger, #d66); }
@@ -266,6 +286,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
   padding: var(--sp-2) var(--sp-3) var(--sp-3);
   font-size: var(--text-sm);
+  animation: pop-in 160ms var(--ease);
 }
 .rd-fn[hidden] { display: none; }
 .rd-fn-head {
@@ -290,6 +311,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   font-size: var(--text-sm);
   font-family: inherit;
   width: 100%;
+  transition: border-color var(--t-fast), background var(--t-fast);
 }
 .rd-input:focus { outline: none; border-color: var(--accent); }
 .rd-input::placeholder { color: var(--text-2); opacity: 0.8; }
@@ -325,6 +347,8 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
   color: var(--text);
   font-size: var(--text-sm);
   cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+  animation: fade-up 200ms var(--ease);
 }
 .rd-res:hover { border-color: var(--border); background: var(--surface); }
 .rd-res-head {
@@ -359,6 +383,7 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   box-shadow: 0 6px 22px rgb(0 0 0 / 0.35);
+  animation: pop-in 140ms var(--ease);
 }
 .rd-dot {
   width: 22px;
@@ -367,6 +392,7 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
   border: 1px solid rgb(0 0 0 / 0.25);
   border-radius: var(--r-full);
   cursor: pointer;
+  transition: transform var(--t-fast);
 }
 .rd-dot:hover, .rd-dot:focus-visible { transform: scale(1.12); }
 .rd-dot-static { display: inline-block; flex: 0 0 auto; cursor: default; }
@@ -394,6 +420,8 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
   background: var(--surface-2);
   border: 1px solid transparent;
   border-radius: var(--r-sm);
+  transition: border-color var(--t-fast);
+  animation: fade-up 200ms var(--ease);
 }
 .rd-ann-row:hover { border-color: var(--border); }
 .rd-ann-row .rd-dot-static { margin-top: 4px; }

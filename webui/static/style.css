@@ -82,7 +82,7 @@ h2 { font-size: 1.05rem; font-weight: 650; }
 .page-title { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-5); flex-wrap: wrap; }
 .page-title .mono { font-weight: 600; }
 
-a { color: var(--accent); text-decoration: none; }
+a { color: var(--accent); text-decoration: none; transition: color var(--t-fast); }
 a:hover { text-decoration: underline; }
 code {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -109,6 +109,7 @@ code {
   padding: var(--sp-2) var(--sp-5);
   background: color-mix(in oklch, var(--surface) 88%, var(--bg));
   border-bottom: 1px solid var(--border);
+  transition: margin 260ms var(--ease), opacity 260ms var(--ease), transform 260ms var(--ease);
 }
 .brand {
   display: inline-flex; align-items: center; gap: var(--sp-2);
@@ -133,6 +134,16 @@ code {
 /* open hamburger menu must paint above page chrome (e.g. reader .rd-bar z30,
    footnote popup z60) — the topbar's own stacking context caps the panel at 20 */
 body.nav-open .topbar { z-index: 70; }
+
+/* Phone: scrolling down in the reader retracts the header together with the
+   reader toolbar (body.chrome-away + the negative margin come from reader.js). */
+@media (max-width: 760px), (pointer: coarse) {
+  body.chrome-away .topbar {
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+  }
+}
 
 .lang-switch { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
 .lang-btn {
@@ -191,6 +202,7 @@ html[data-theme="light"] #theme-toggle .ic-sun  { display: none; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 2px 10px; border-radius: var(--r-full); font-size: var(--text-xs); font-weight: 550;
   background: var(--surface-2); color: var(--text-2); border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
 .status-dot { width: 7px; height: 7px; border-radius: var(--r-full); background: currentColor; flex: 0 0 auto; }
 .badge.done  { background: color-mix(in oklch, var(--ok) 16%, var(--surface)); color: var(--ok); }
@@ -231,6 +243,7 @@ html[data-theme="light"] #theme-toggle .ic-sun  { display: none; }
   color: var(--text-3); font-weight: 600; font-size: var(--text-xs);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
+.table tbody tr { transition: background var(--t-fast); }
 .table tbody tr:hover { background: var(--surface-2); }
 .table .cell-mono { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -357,7 +370,10 @@ textarea.code {
   width: 80px; height: 6px; border-radius: var(--r-full); background: var(--code-bg);
   overflow: hidden; flex: 0 0 auto;
 }
-.progress-mini span { display: block; height: 100%; background: var(--warn); }
+.progress-mini span {
+  display: block; height: 100%; background: var(--warn);
+  transition: width 500ms var(--ease);
+}
 
 /* ---------------------------------------------------------------- library */
 .lib-toolbar {
@@ -403,8 +419,15 @@ textarea.code {
 /* Book-grid (dashboard mini). */
 .book-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--sp-4); }
 .book-grid.compact { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
-.book-card { display: flex; flex-direction: column; overflow: hidden; }
+.book-card {
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: transform var(--t-fast) var(--ease), border-color var(--t-fast);
+}
 .book-grid.compact .book-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+.book-grid.compact .book-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--border-strong);
+}
 .book-cover {
   display: block; background: var(--surface-2); aspect-ratio: 3 / 4; overflow: hidden;
   border-radius: var(--r-sm) var(--r-sm) 0 0;
@@ -454,6 +477,22 @@ textarea.code {
 .toast-err { border-left-color: var(--err); color: var(--err); }
 .toast-warn { border-left-color: var(--warn); color: var(--warn); }
 .toast-out { opacity: 0; transform: translateY(4px); }
+
+/* ---------------------------------------------------------------- motion */
+/* Shared keyframes — reader.css reuses them too (panels, popovers, results).
+   Everything here is neutralised by the prefers-reduced-motion block at the
+   top of this file. */
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(4px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+main { animation: fade-in 220ms var(--ease); }                 /* page entrance */
+.topnav.is-open { animation: menu-in 180ms var(--ease); }      /* hamburger menu */
+.lightbox.open { animation: fade-in 160ms var(--ease); }
+.lightbox img { animation: pop-in 200ms var(--ease); }
+.toast { animation: fade-up 240ms var(--ease); }
+.lib-loading { animation: fade-in 200ms var(--ease); }
 
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 760px) {
