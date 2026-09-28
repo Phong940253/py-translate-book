@@ -1843,6 +1843,7 @@
   function togglePanel(name) {
     var rd = el('rd');
     if (!rd) return;
+    var prev = rd.dataset.panel;
     var open = rd.dataset.panel === name ? '' : (name || '');
     rd.dataset.panel = open;
     ['toc', 'font', 'tts', 'search', 'ann'].forEach(function (n) {
@@ -1852,6 +1853,15 @@
       if (panel) panel.hidden = !show;
       if (btn) btn.setAttribute('aria-pressed', String(show));
     });
+    // focus: opening moves into the panel, closing returns to its toggle
+    if (open && open !== 'search') {
+      var np = el('rd-panel-' + open);
+      var first = np && np.querySelector('button:not([disabled]), select, input:not([disabled])');
+      if (first) { try { first.focus(); } catch (e) { /* inert */ } }
+    } else if (!open && prev) {
+      var pb = el('rd-open-' + prev);
+      if (pb) { try { pb.focus(); } catch (e) { /* inert */ } }
+    }
     if (open === 'tts') warmVoices();
     if (open === 'toc') markToc();
     if (open === 'search') {

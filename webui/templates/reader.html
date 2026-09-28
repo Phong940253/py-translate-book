@@ -50,13 +50,13 @@ window.APP.reader = {
     </div>
   </header>
 
-  <div id="rd-panel-toc" class="rd-panel" hidden>
+  <div id="rd-panel-toc" class="rd-panel" role="region" aria-label="{{ t('read.toc') }}" hidden>
     <div class="rd-panel-title">{{ t('read.toc') }} <span id="rd-toc-count" class="muted small"></span></div>
     <div id="rd-toc-landmarks" class="rd-toc-marks" hidden></div>
     <div id="rd-toc-tree" class="rd-tree" role="tree" aria-label="{{ t('read.toc') }}"></div>
   </div>
 
-  <div id="rd-panel-font" class="rd-panel" hidden>
+  <div id="rd-panel-font" class="rd-panel" role="region" aria-label="{{ t('read.font') }}" hidden>
     <div class="rd-panel-title">{{ t('read.font') }}</div>
     <div class="rd-fields">
       <label class="rd-field">
@@ -134,10 +134,10 @@ window.APP.reader = {
     </div>
   </div>
 
-  <div id="rd-panel-tts" class="rd-panel" hidden>
+  <div id="rd-panel-tts" class="rd-panel" role="region" aria-label="{{ t('read.aloud') }}" hidden>
     <div class="rd-panel-title">{{ t('read.aloud') }}</div>
     <div class="rd-fields">
-      <div id="rd-tts-status" class="muted small"></div>
+      <div id="rd-tts-status" class="muted small" aria-live="polite"></div>
       <label class="rd-field">
         <span>{{ t('read.voice') }}</span>
         <select id="rd-tts-voice" class="rd-select" disabled></select>
@@ -152,11 +152,11 @@ window.APP.reader = {
         <button id="rd-tts-pause" type="button" class="btn btn-ghost btn-sm" hidden>{{ t('read.pause') }}</button>
         <button id="rd-tts-stop" type="button" class="btn btn-ghost btn-sm" hidden>{{ icon('stop') }} {{ t('read.stop') }}</button>
       </div>
-      <div id="rd-tts-note" class="muted small"></div>
+      <div id="rd-tts-note" class="muted small" aria-live="polite"></div>
     </div>
   </div>
 
-  <div id="rd-panel-search" class="rd-panel" hidden>
+  <div id="rd-panel-search" class="rd-panel" role="region" aria-label="{{ t('read.search') }}" hidden>
     <div class="rd-panel-title">{{ t('read.search') }}</div>
     <div class="rd-fields">
       <div class="rd-field rd-searchbar">
@@ -180,7 +180,7 @@ window.APP.reader = {
     </div>
   </div>
 
-  <div id="rd-panel-ann" class="rd-panel" hidden>
+  <div id="rd-panel-ann" class="rd-panel" role="region" aria-label="{{ t('read.ann') }}" hidden>
     <div class="rd-panel-title">{{ t('read.ann') }} <span id="rd-ann-count" class="muted small"></span></div>
     <div id="rd-ann-status" class="muted small" role="status"></div>
     <div id="rd-ann-list" class="rd-results"></div>

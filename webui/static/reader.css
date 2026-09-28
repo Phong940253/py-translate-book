@@ -13,6 +13,22 @@
   gap: var(--sp-2);
 }
 
+/* ------------------------------------------------------------- a11y (P4) */
+.rd .btn:focus-visible, .rd-select:focus-visible, .rd-input:focus-visible,
+.rd-tree button:focus-visible, .rd-tree a:focus-visible,
+.rd-dot:focus-visible, .rd-fn button:focus-visible,
+input[type="range"]:focus-visible, input[type="color"]:focus-visible,
+input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
+  outline: 2px solid var(--accent, #6f8cff);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rd *, .rd *::before, .rd *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
 /* ---------------------------------------------------------------- toolbar */
 .rd-bar {
   position: sticky;
