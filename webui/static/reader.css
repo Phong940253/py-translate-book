@@ -101,6 +101,38 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   animation: fade-up 240ms var(--ease);
 }
 .rd-panel-title { font-weight: 600; margin-bottom: var(--sp-2); }
+.rd-panel-close { display: none; }   /* phone modal only (shown below) */
+/* phone: panels open as modal dialogs — a dimmed backdrop (#rd::before,
+   rendered only while [data-panel] is set) with a centered, scrollable
+   dialog above everything; tap the backdrop or ✕ (Esc also works) to close.
+   NOTE: this block must stay AFTER the base rules above — same specificity,
+   so source order decides and the phone overrides have to come last. */
+@media (max-width: 760px), (pointer: coarse) {
+  #rd[data-panel]:not([data-panel=""])::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 0.5);
+    z-index: 40;
+    animation: fade-in 200ms var(--ease);
+    touch-action: none;              /* swiping the backdrop never scrolls */
+  }
+  .rd-panel {
+    position: fixed;
+    inset: 0;
+    margin: auto;                    /* centers a definite-size fixed box */
+    z-index: 41;
+    width: min(94vw, 560px);
+    height: max-content;
+    max-height: 84vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+    padding: var(--sp-4);
+  }
+  .rd-panel-title { display: flex; align-items: center; gap: var(--sp-2); }
+  .rd-panel-close { display: inline-flex; margin-left: auto; }
+}
 .rd-fields {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

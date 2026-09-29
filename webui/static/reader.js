@@ -1900,6 +1900,8 @@
     var prev = rd.dataset.panel;
     var open = rd.dataset.panel === name ? '' : (name || '');
     rd.dataset.panel = open;
+    // phone: panels are modal — nothing may scroll behind the backdrop
+    document.body.style.overflow = (open && chromeOn()) ? 'hidden' : '';
     if (open) setChromeAway(false);   // the panel toggles live in the bar
     ['toc', 'font', 'tts', 'search', 'ann'].forEach(function (n) {
       var panel = el('rd-panel-' + n);
@@ -2673,6 +2675,7 @@
   var hideT = 0;
 
   function wakeBar() {
+    idleWake();   // any input (bar, chapter, iframe) re-arms the idle hide
     var bar = el('rd-bar');
     if (!bar) return;
     bar.classList.remove('is-hidden');
@@ -2769,6 +2772,32 @@
     chrome.acc = (chrome.acc && (d > 0) === (chrome.acc > 0)) ? chrome.acc + d : d;
     if (chrome.acc >= CHROME_PX) setChromeAway(true);
     else if (chrome.acc <= -CHROME_PX) setChromeAway(false);
+  }
+
+  /* ------------------------------------------ idle auto-hide (phone) */
+  /* No touch for 10s → the header + reader toolbar retract exactly like a
+     scroll-down does; the first tap brings them straight back. A bar that a
+     scroll hid stays a scroll-bar until 10s pass without a touch — only then
+     does a tap start to reveal it (idle.away). Desktop never arms: the media
+     query in idleArm mirrors the one setChromeAway guards. */
+  var idle = { t: 0, away: false };
+  var IDLE_MS = 10000;
+
+  function idleArm() {
+    if (idle.t) clearTimeout(idle.t);
+    idle.t = 0;
+    if (!chromeOn()) return;
+    idle.t = setTimeout(function () {
+      idle.t = 0;
+      if (!chromeOn() || chromeBlocked()) return;   // panel/nav open → keep it
+      idle.away = true;
+      setChromeAway(true);
+    }, IDLE_MS);
+  }
+
+  function idleWake() {
+    if (idle.away) { setChromeAway(false); idle.away = false; }   // reveal now
+    idleArm();
   }
 
   function toggleFullscreen() {
@@ -2915,6 +2944,8 @@
       var btn = el('rd-open-' + n);
       if (btn) btn.addEventListener('click', function () { togglePanel(n); });
     });
+    Array.prototype.forEach.call(document.querySelectorAll('.rd-panel-close'),
+      function (b) { b.addEventListener('click', function () { togglePanel(''); }); });
     var fnClose = el('rd-fn-close');
     if (fnClose) fnClose.addEventListener('click', closeFootnote);
 
@@ -3123,6 +3154,16 @@
     document.addEventListener('keydown', onKeydown);
     setInterval(statsTick, 15000);   // reading-time counter (visibility/TTS aware)
     document.addEventListener('mousemove', wakeBar, { passive: true });
+    ['pointerdown', 'touchstart', 'keydown'].forEach(function (evt) {
+      document.addEventListener(evt, wakeBar, { passive: true });
+    });
+    // phone modal: tapping the dimmed backdrop (#rd::before) closes the panel
+    document.addEventListener('click', function (ev) {
+      var rd = el('rd');
+      if (!rd || !rd.dataset.panel || !chromeOn()) return;
+      if (ev.target === rd) togglePanel('');
+    });
+    idleArm();   // phone: the bar retracts on its own after 10s of no touch
     window.addEventListener('resize', resizeSoon);
     window.addEventListener('scroll', resizeSoon, { passive: true });
     // phone: page scroll direction retracts/restores header + reader toolbar
@@ -3130,7 +3171,15 @@
       chromeFrom('w', window.pageYOffset || (document.documentElement || {}).scrollTop || 0);
     }, { passive: true });
     if (chromeMq) {
-      var onChromeMq = function () { if (!chromeOn()) setChromeAway(false); };
+      var onChromeMq = function () {
+        if (!chromeOn()) {
+          setChromeAway(false);
+          document.body.style.overflow = '';   // desktop → inline panels again
+        } else if (el('rd') && el('rd').dataset.panel) {
+          document.body.style.overflow = 'hidden';   // reopened as a modal
+        }
+        idleArm();
+      };
       if (chromeMq.addEventListener) chromeMq.addEventListener('change', onChromeMq);
       else if (chromeMq.addListener) chromeMq.addListener(onChromeMq);
     }
