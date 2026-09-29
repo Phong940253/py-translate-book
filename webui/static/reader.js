@@ -2000,7 +2000,7 @@
   /* --------------------------------------------------------------- TTS */
   var tts = { state: 'unknown', voices: [], def: null, poll: 0, tries: 0 };
   var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, audio: null, cache: {}, inflight: {},
-    segs: null, sent: null, sentIdx: -1, gen: 0, pfGen: 0 };
+    segs: null, sent: null, sentIdx: -1, gen: 0, pfGen: 0, fails: 0 };
 
   function ttsStatus(text, cls) {
     var n = el('rd-tts-status');
@@ -2214,11 +2214,31 @@
       if (audio.__rdEnded) return;          // 'ended' must advance once only
       audio.__rdEnded = 1;
       if (speak.audio !== audio) return;    // stale object: a newer blob owns the queue
+      speak.fails = 0;                      // this clip played: clear the streak
       try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
       speakNext();
     };
-    audio.onerror = function () { speakFail(i18n('read.tts_play_fail')); };
-    audio.play().catch(function (e) { speakFail(e && e.message ? e.message : String(e)); });
+    // Undecodable audio (an old empty-WAV response, a truncated download)
+    // must not kill the session: skip this paragraph. Only a pile-up of
+    // consecutive failures means a real problem worth stopping for.
+    audio.onerror = function () {
+      if (audio.__rdEnded) return;
+      audio.__rdEnded = 1;
+      if (!speak.on || speak.audio !== audio) return;   // stale/stopped: ignore
+      try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
+      speak.audio = null;
+      speak.segs = null;
+      speak.fails++;
+      if (speak.fails > 3) { speakFail(i18n('read.tts_play_fail')); return; }
+      speakNext();
+    };
+    audio.play().catch(function (e) {
+      if (e && e.name === 'NotAllowedError') {   // autoplay policy, not bad audio
+        speakFail(e && e.message ? e.message : String(e));
+        return;
+      }
+      audio.onerror();                       // treat like an undecodable blob
+    });
   }
 
   function speakFail(message) {
@@ -2277,6 +2297,7 @@
     speak.on = true;
     speak.paused = false;
     speak.token++;
+    speak.fails = 0;
     speak.i = state.cur;
     speak.ch = state.ch;
     var play = el('rd-tts-play'), pause = el('rd-tts-pause'), stop = el('rd-tts-stop');

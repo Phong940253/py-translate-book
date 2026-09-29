@@ -1295,6 +1295,15 @@ _GUARD_SEC_PER_CHAR = 0.065
 _GUARD_OVERHEAD = 0.3
 _GUARD_FLOOR = 0.75
 
+# Text the Vietnamese phonemizer cannot read (leftover Chinese paragraphs, a
+# lone full-width "？", …) synthesizes to zero frames. Shipping that out as a
+# header-only WAV makes the browser fire audio.onerror and kill the whole
+# read-aloud session, so unreadable pieces become proportional silence
+# instead — playback and the sentence highlight simply move past them.
+_MIN_AUDIO_SEC = 0.05          # model output below this is effectively empty
+_SILENCE_SEC_PER_CHAR = 0.05   # reading pace for unreadable text
+_SILENCE_MIN = 0.4             # even a single "？" holds the line briefly
+
 
 def _suspects_extra_copy(part: str, seconds: float) -> bool:
     """True when *seconds* of audio for *part* is long enough that the model
@@ -1452,13 +1461,22 @@ class TTSEngine:
         if hit is not None:
             return hit
 
+        import numpy as np
+
         pieces = split_for_tts_seg(text)
         sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
         with self._lock:
             wavs = []
             for part, _s, _e in pieces:
                 wav = tts.infer(part, voice=voice)
-                if _suspects_extra_copy(part, float(len(wav)) / sr):
+                if float(len(wav)) / sr < _MIN_AUDIO_SEC:
+                    # Unreadable text → no phonemes → a 0-frame WAV the
+                    # browser cannot decode (it would stop the session).
+                    # Substitute proportional silence so reading continues.
+                    secs = max(len(part) * _SILENCE_SEC_PER_CHAR,
+                               _SILENCE_MIN)
+                    wav = np.zeros(int(secs * sr), dtype=np.float32)
+                elif _suspects_extra_copy(part, float(len(wav)) / sr):
                     # Model occasionally speaks a phrase one time more than
                     # the text (free-running copy). A fresh sample almost
                     # never repeats the mistake — take it when it's clean,
@@ -1469,8 +1487,6 @@ class TTSEngine:
                         wav = alt
                 wavs.append(wav)
         wav = _to_wav(wavs, int(sr))
-
-        import numpy as np
 
         segs, t = [], 0.0
         for (_p, s, e), chunk in zip(pieces, wavs):

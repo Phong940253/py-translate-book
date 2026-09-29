@@ -1193,6 +1193,56 @@ class TestWebUI(unittest.TestCase):
         eng.synthesize("Một câu khác hẳn.", voice="Hải Đăng")
         self.assertEqual(len(stub.calls), 3)
 
+    def test_tts_engine_silences_text_it_cannot_read(self):
+        from webui import reader
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                # the phonemizer yields no phonemes for Chinese or for
+                # punctuation-only text like a lone "？"
+                if (any("㐀" <= c <= "鿿" for c in text)
+                        or not any(c.isalpha() for c in text)):
+                    return []
+                return [0.0] * 4800
+
+        eng = reader.TTSEngine()
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "Hải Đăng"
+        eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
+
+        import io
+        import wave
+
+        def dur(wav_bytes):
+            with wave.open(io.BytesIO(wav_bytes)) as wf:
+                return wf.getnframes() / wf.getframerate()
+
+        # a lone full-width "？": zero frames → at least the silence floor,
+        # and never an extra-copy retry loop on empty output
+        wav, segs = eng.synthesize("？", voice="Hải Đăng")
+        self.assertGreaterEqual(dur(wav), reader._SILENCE_MIN)
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertEqual(len(stub.calls), 1)
+        self.assertEqual(len(segs), 1)
+
+        # an untranslated paragraph: silence at reading pace, segs intact
+        text = "全班掌声热烈。"
+        wav2, segs2 = eng.synthesize(text, voice="Hải Đăng")
+        expected = max(len(text) * reader._SILENCE_SEC_PER_CHAR,
+                       reader._SILENCE_MIN)
+        self.assertAlmostEqual(dur(wav2), expected, places=3)
+        s, e, t = segs2[0]
+        self.assertEqual(text[s:e], text)
+        self.assertEqual(t, 0.0)
+
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")
         self.assertEqual(r.status_code, 302)
