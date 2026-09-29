@@ -1138,8 +1138,12 @@
     doc.addEventListener('touchend', onTouchEnd, { passive: true });
     doc.addEventListener('selectionchange', onSelChangeSoon);
     ['mousemove', 'keydown', 'touchstart'].forEach(function (evt) {
-      doc.addEventListener(evt, wakeBar, { passive: true });
+      doc.addEventListener(evt, wakeBar, { passive: true });   // rearm only
     });
+    // the parent document never sees iframe events: a tap on the chapter text
+    // (click) or a keypress inside the frame hands an idle-hidden bar back
+    doc.addEventListener('click', idleReveal, { passive: true });
+    doc.addEventListener('keydown', idleReveal, { passive: true });
   }
 
   /* --------------------------------------------- text match + marks */
@@ -2675,7 +2679,7 @@
   var hideT = 0;
 
   function wakeBar() {
-    idleWake();   // any input (bar, chapter, iframe) re-arms the idle hide
+    idleArm();   // any input re-arms the idle hide — revealing is deliberate
     var bar = el('rd-bar');
     if (!bar) return;
     bar.classList.remove('is-hidden');
@@ -2698,7 +2702,11 @@
      (max-width: 760px), (pointer: coarse) query, and chromeOn() mirrors that
      query here, so desktop never arms it. */
   var chrome = { away: false, fY: null, wY: null, acc: 0, follow: 0, followUntil: 0, quiet: 0, lastLayout: 0 };
-  var CHROME_PX = 16;      // accumulated scroll drift before we flip state
+  var CHROME_PX = 16;         // down-drift before the bars retract
+  var CHROME_UP_PX = 64;      // up-drift before they come back — a phone user
+                              // steering a scroll often tugs the thumb up a few
+                              // pixels first, so a deliberate 16px is way too
+                              // twitchy to mean "show the toolbar"
   var CHROME_JUMP = 400;   // bigger jumps are programmatic — re-baseline only
   var chromeMq = window.matchMedia
     ? window.matchMedia('(max-width: 760px), (pointer: coarse)') : null;
@@ -2734,6 +2742,9 @@
 
   function setChromeAway(on) {
     on = !!on;
+    if (!on) idle.away = false;   // whatever brings the bars back ends the idle
+                                  // state (flag lives here so every reveal path
+                                  // — scroll, key, tap, panel, mq — clears it)
     if (on && (!chromeOn() || chromeBlocked())) return;
     if (on === chrome.away) return;
     chrome.away = on;
@@ -2771,15 +2782,18 @@
     if (src !== 'f' && Date.now() < chrome.quiet) return;
     chrome.acc = (chrome.acc && (d > 0) === (chrome.acc > 0)) ? chrome.acc + d : d;
     if (chrome.acc >= CHROME_PX) setChromeAway(true);
-    else if (chrome.acc <= -CHROME_PX) setChromeAway(false);
+    else if (chrome.acc <= -CHROME_UP_PX) setChromeAway(false);
   }
 
   /* ------------------------------------------ idle auto-hide (phone) */
   /* No touch for 10s → the header + reader toolbar retract exactly like a
-     scroll-down does; the first tap brings them straight back. A bar that a
-     scroll hid stays a scroll-bar until 10s pass without a touch — only then
-     does a tap start to reveal it (idle.away). Desktop never arms: the media
-     query in idleArm mirrors the one setChromeAway guards. */
+     scroll-down does. Touches only RE-ARM the timer (wakeBar → idleArm); the
+     bars come back only on a deliberate act: a tap (click — no click ever fires
+     from a drag, so steering a scroll never pops them up) or a pull-up of
+     CHROME_UP_PX, or a keypress. A bar that a scroll hid stays a scroll-bar
+     until 10s pass without a touch — only then does a tap start to reveal it
+     (idle.away). Desktop never arms: the media query in idleArm mirrors the one
+     setChromeAway guards. */
   var idle = { t: 0, away: false };
   var IDLE_MS = 10000;
 
@@ -2795,8 +2809,8 @@
     }, IDLE_MS);
   }
 
-  function idleWake() {
-    if (idle.away) { setChromeAway(false); idle.away = false; }   // reveal now
+  function idleReveal() {
+    if (idle.away) setChromeAway(false);   // deliberate act gives them back
     idleArm();
   }
 
@@ -3163,6 +3177,9 @@
       if (!rd || !rd.dataset.panel || !chromeOn()) return;
       if (ev.target === rd) togglePanel('');
     });
+    // a real tap gives an idle-hidden bar back (a drag never fires click, so
+    // touching down to steer a scroll only re-arms the timer)
+    document.addEventListener('click', idleReveal, { passive: true });
     idleArm();   // phone: the bar retracts on its own after 10s of no touch
     window.addEventListener('resize', resizeSoon);
     window.addEventListener('scroll', resizeSoon, { passive: true });
