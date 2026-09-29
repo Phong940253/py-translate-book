@@ -873,6 +873,33 @@ class TestWebUI(unittest.TestCase):
                 last_end = e
         self.assertEqual(reader.split_for_tts_seg("   "), [])
 
+    def test_tts_guard_flags_only_overrun_audio(self):
+        from webui import reader
+
+        # the real chap_0323 case: 31-char piece, normal ≈1.7–1.9 s,
+        # a free-running third copy lands at ≈2.4–2.7 s
+        shout = '"Giáo quan tới! Giáo quan tới!"'
+        self.assertEqual(len(shout), 31)
+        self.assertTrue(reader._suspects_extra_copy(shout, 2.64))
+        self.assertTrue(reader._suspects_extra_copy(shout, 2.40))
+        self.assertFalse(reader._suspects_extra_copy(shout, 1.84))
+        self.assertFalse(reader._suspects_extra_copy(shout, 2.08))
+
+        # 13-char phrase: normal ≈0.93 s stays quiet, a doubled read trips
+        self.assertFalse(reader._suspects_extra_copy("Giáo quan tới!", 0.96))
+        self.assertTrue(reader._suspects_extra_copy("Giáo quan tới!", 1.92))
+
+        # long pieces: normal ~0.05 s/char never trips; +1.5 s overrun does
+        normal64 = 'Giáo quan nhíu mày: "Cậu xem mấy ký túc xá khác còn trống không?'
+        self.assertEqual(len(normal64), 64)
+        self.assertFalse(reader._suspects_extra_copy(normal64, 3.36))
+        self.assertTrue(reader._suspects_extra_copy(normal64, 5.10))
+
+        # floor protects tiny pieces; a doubled short stub still trips
+        self.assertFalse(reader._suspects_extra_copy("Ừ.", 0.6))
+        self.assertTrue(reader._suspects_extra_copy("Ừ.", 1.2))
+        self.assertFalse(reader._suspects_extra_copy("", 0.0))
+
     # ---------------------------------------------------------- AI lookup
 
     def _patch_lookup_urlopen(self, seen, reply="nghĩa là …"):
@@ -1133,6 +1160,38 @@ class TestWebUI(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             reader.TTSEngine().synthesize("chưa sẵn sàng")
+
+    def test_tts_engine_resynthesizes_a_piece_that_overruns(self):
+        from webui import reader
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                # first render free-runs (≈3 s for an 11-char piece); a fresh
+                # sample comes back clean (≈0.4 s)
+                secs = 3.0 if len(self.calls) == 1 else 0.4
+                return [0.0] * int(48000 * secs)
+
+        eng = reader.TTSEngine()
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "Hải Đăng"
+        eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
+
+        wav, _segs = eng.synthesize("Một hai ba.", voice="Hải Đăng")
+        self.assertEqual(len(stub.calls), 2)   # suspect overrun → one retry
+        expected = reader._to_wav([[0.0] * int(48000 * 0.4)], 48000)
+        self.assertEqual(wav, expected)        # the clean sample wins
+
+        # a clean render is never re-synthesized (2 calls → 3, no 4th)
+        eng.synthesize("Một câu khác hẳn.", voice="Hải Đăng")
+        self.assertEqual(len(stub.calls), 3)
 
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")

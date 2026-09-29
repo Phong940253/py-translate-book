@@ -1285,6 +1285,28 @@ def split_for_tts(text: str, limit: int = _CHUNK_CHARS):
     return [p for p, _, _ in split_for_tts_seg(text, limit)]
 
 
+# Anti-hallucination guard: normal speech runs ≈0.048–0.060 s/char plus
+# ~0.3 s of lead/tail silence, but the model occasionally speaks a phrase one
+# time more than the text does (a free-running copy adds ≈+0.9–1.3 s). The
+# threshold keeps ≈25–30 % headroom over normal speech so only such overruns
+# trip it — calibrated on 164 measured piece renders (0 false positives, the
+# one real extra-copy render flagged).
+_GUARD_SEC_PER_CHAR = 0.065
+_GUARD_OVERHEAD = 0.3
+_GUARD_FLOOR = 0.75
+
+
+def _suspects_extra_copy(part: str, seconds: float) -> bool:
+    """True when *seconds* of audio for *part* is long enough that the model
+    very likely repeated a phrase the text does not repeat (extra copy ≈
+    +0.9–1.3 s). Used to re-synthesize a suspect piece once."""
+    if seconds <= 0:
+        return False
+    expected = max(len(part) * _GUARD_SEC_PER_CHAR + _GUARD_OVERHEAD,
+                   _GUARD_FLOOR)
+    return seconds > expected
+
+
 def _to_wav(chunks, sample_rate: int) -> bytes:
     """Concatenate float32 waveforms (+ short gaps) into 16-bit mono WAV bytes."""
     import numpy as np
@@ -1431,9 +1453,21 @@ class TTSEngine:
             return hit
 
         pieces = split_for_tts_seg(text)
-        with self._lock:
-            wavs = [tts.infer(part, voice=voice) for part, _s, _e in pieces]
         sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
+        with self._lock:
+            wavs = []
+            for part, _s, _e in pieces:
+                wav = tts.infer(part, voice=voice)
+                if _suspects_extra_copy(part, float(len(wav)) / sr):
+                    # Model occasionally speaks a phrase one time more than
+                    # the text (free-running copy). A fresh sample almost
+                    # never repeats the mistake — take it when it's clean,
+                    # else keep the shorter of the two.
+                    alt = tts.infer(part, voice=voice)
+                    if (not _suspects_extra_copy(part, float(len(alt)) / sr)
+                            or len(alt) < len(wav)):
+                        wav = alt
+                wavs.append(wav)
         wav = _to_wav(wavs, int(sr))
 
         import numpy as np
