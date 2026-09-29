@@ -1463,28 +1463,37 @@ class TTSEngine:
 
         import numpy as np
 
+        def _pause_for(part):
+            """Proportional pause for a piece with nothing to pronounce."""
+            secs = max(len(part) * _SILENCE_SEC_PER_CHAR, _SILENCE_MIN)
+            return np.zeros(int(secs * sr), dtype=np.float32)
+
         pieces = split_for_tts_seg(text)
         sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
         with self._lock:
             wavs = []
             for part, _s, _e in pieces:
-                wav = tts.infer(part, voice=voice)
-                if float(len(wav)) / sr < _MIN_AUDIO_SEC:
-                    # Unreadable text → no phonemes → a 0-frame WAV the
-                    # browser cannot decode (it would stop the session).
-                    # Substitute proportional silence so reading continues.
-                    secs = max(len(part) * _SILENCE_SEC_PER_CHAR,
-                               _SILENCE_MIN)
-                    wav = np.zeros(int(secs * sr), dtype=np.float32)
-                elif _suspects_extra_copy(part, float(len(wav)) / sr):
-                    # Model occasionally speaks a phrase one time more than
-                    # the text (free-running copy). A fresh sample almost
-                    # never repeats the mistake — take it when it's clean,
-                    # else keep the shorter of the two.
-                    alt = tts.infer(part, voice=voice)
-                    if (not _suspects_extra_copy(part, float(len(alt)) / sr)
-                            or len(alt) < len(wav)):
-                        wav = alt
+                wav = None
+                if any(c.isalnum() for c in part):
+                    wav = tts.infer(part, voice=voice)
+                    if float(len(wav)) / sr < _MIN_AUDIO_SEC:
+                        # Unreadable text → no phonemes → a 0-frame WAV the
+                        # browser cannot decode (it would stop the session).
+                        wav = None
+                    elif _suspects_extra_copy(part, float(len(wav)) / sr):
+                        # Model occasionally speaks a phrase one time more than
+                        # the text (free-running copy). A fresh sample almost
+                        # never repeats the mistake — take it when it's clean,
+                        # else keep the shorter of the two.
+                        alt = tts.infer(part, voice=voice)
+                        if (not _suspects_extra_copy(part, float(len(alt)) / sr)
+                                or len(alt) < len(wav)):
+                            wav = alt
+                # Punctuation-only piece ("……", "..."): the phonemizer still
+                # emits a lone "." token that the model turns into junk
+                # speech — there is nothing to pronounce, so pause instead.
+                if wav is None:
+                    wav = _pause_for(part)
                 wavs.append(wav)
         wav = _to_wav(wavs, int(sr))
 

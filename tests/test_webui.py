@@ -1225,23 +1225,36 @@ class TestWebUI(unittest.TestCase):
             with wave.open(io.BytesIO(wav_bytes)) as wf:
                 return wf.getnframes() / wf.getframerate()
 
-        # a lone full-width "？": zero frames → at least the silence floor,
-        # and never an extra-copy retry loop on empty output
+        # a lone full-width "？": nothing to pronounce → never reaches the
+        # model, goes straight to the silence floor
         wav, segs = eng.synthesize("？", voice="Hải Đăng")
+        self.assertEqual(len(stub.calls), 0)
         self.assertGreaterEqual(dur(wav), reader._SILENCE_MIN)
         self.assertTrue(wav.startswith(b"RIFF"))
-        self.assertEqual(len(stub.calls), 1)
         self.assertEqual(len(segs), 1)
 
-        # an untranslated paragraph: silence at reading pace, segs intact
+        # "……" phonemizes to a lone "." token that the model would turn
+        # into junk speech (heard as Chinese-sounding gibberish) → pause
+        wav_e, segs_e = eng.synthesize("……", voice="Hải Đăng")
+        self.assertEqual(len(stub.calls), 0)
+        self.assertGreaterEqual(dur(wav_e), reader._SILENCE_MIN)
+        self.assertEqual(len(segs_e), 1)
+
+        # an untranslated paragraph: the model IS asked, comes back empty,
+        # and the piece becomes silence at reading pace with segs intact
         text = "全班掌声热烈。"
         wav2, segs2 = eng.synthesize(text, voice="Hải Đăng")
+        self.assertEqual(len(stub.calls), 1)
         expected = max(len(text) * reader._SILENCE_SEC_PER_CHAR,
                        reader._SILENCE_MIN)
         self.assertAlmostEqual(dur(wav2), expected, places=3)
         s, e, t = segs2[0]
         self.assertEqual(text[s:e], text)
         self.assertEqual(t, 0.0)
+
+        # the empty-output path must not trigger an extra-copy retry loop
+        # (no second infer call for unpronounceable text)
+        self.assertEqual(len(stub.calls), 1)
 
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")
