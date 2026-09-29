@@ -1999,8 +1999,8 @@
 
   /* --------------------------------------------------------------- TTS */
   var tts = { state: 'unknown', voices: [], def: null, poll: 0, tries: 0 };
-  var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, audio: null, cache: {}, inflight: {},
-    segs: null, sent: null, sentIdx: -1, gen: 0, pfGen: 0, fails: 0 };
+  var speak = { on: false, paused: false, i: 0, ch: 0, token: 0, groups: {}, inflight: {},
+    sent: null, sentIdx: -1, gen: 0, pfGen: 0, fails: 0, ac: null };
 
   function ttsStatus(text, cls) {
     var n = el('rd-tts-status');
@@ -2091,33 +2091,230 @@
     });
   }
 
-  /* Audio blob for (chapter, item) — deduped, cached, one request in flight. */
+  /* ------------------------------------------------- streaming TTS pieces
+     Frame format: uint32be hdrLen | JSON header | uint32be wavLen | wav. */
+
+  function frameParser(onPiece) {
+    var acc = new Uint8Array(0), hdr = null, dec = new TextDecoder('utf8');
+    function u32(u8) { return new DataView(u8.buffer, u8.byteOffset, u8.length).getUint32(0); }
+    return function feed(chunk) {
+      var merged = new Uint8Array(acc.length + chunk.length);
+      merged.set(acc);
+      merged.set(chunk, acc.length);
+      acc = merged;
+      for (;;) {
+        if (!hdr) {
+          if (acc.length < 4) return;
+          var hl = u32(acc);
+          if (acc.length < 4 + hl) return;
+          hdr = JSON.parse(dec.decode(acc.subarray(4, 4 + hl)));
+          acc = acc.subarray(4 + hl);
+        }
+        if (acc.length < 4) return;
+        var wl = u32(acc);
+        if (acc.length < 4 + wl) return;
+        var wav = acc.slice(4, 4 + wl);       // copy: decodeAudioData detaches
+        acc = acc.subarray(4 + wl);
+        var h = hdr;
+        hdr = null;
+        if (h.error) throw new Error(h.error);  // mid-stream error frame
+        onPiece(h, wav);
+      }
+    };
+  }
+
+  function ttsFrames(text, signal, onPiece) {
+    return fetch(R.ttsStreamUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text, voice: ttsCfg.voice }),
+      signal: signal
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (raw) {
+          var data = null;
+          try { data = JSON.parse(raw); } catch (e) { /* ignore */ }
+          throw new Error((data && data.error) || ('HTTP ' + res.status));
+        });
+      }
+      if (!res.body || !res.body.getReader) throw new Error('no stream support');
+      var rdr = res.body.getReader();
+      var feed = frameParser(onPiece);
+      function pump() {
+        return rdr.read().then(function (r) {
+          if (r.done) return;
+          feed(r.value);
+          return pump();
+        });
+      }
+      return pump();
+    });
+  }
+
+  function decodePiece(bytes) {
+    var ctx = playerCtx();
+    return new Promise(function (resolve, reject) {
+      ctx.decodeAudioData(bytes.buffer, resolve, reject);
+    });
+  }
+
+  /* ---------------------------------------------- gapless Web Audio player
+     Decoded pieces are scheduled on an AudioContext with exact start times —
+     no element swap, so sentences and paragraphs join with a true 0ms seam.
+     Pause = ctx.suspend() keeps the whole schedule; resume continues exactly
+     where it left off. */
+
+  var player = {
+    ctx: null, gain: null, timer: 0, rate: 1,
+    q: [],        // decoded, not yet scheduled: {buf, s, e, final}
+    wins: [],     // scheduled windows: {src, buf, s, e, final, t0, t1, n}
+    nextT: 0,     // ctx time where the next piece starts
+    wseq: 0
+  };
+
+  function playerCtx() {
+    if (player.ctx) return player.ctx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    player.ctx = new AC();
+    player.gain = player.ctx.createGain();
+    player.gain.connect(player.ctx.destination);
+    player.rate = ttsCfg.rate;
+    return player.ctx;
+  }
+
+  function playerSchedule() {
+    var ctx = player.ctx;
+    if (!ctx) return;
+    var now = ctx.currentTime;
+    if (!player.nextT) player.nextT = now + 0.06;      // cold start: tiny lead
+    else if (player.nextT < now) player.nextT = now;   // gap behind us: now
+    while (player.q.length && player.nextT < now + 1.0) {
+      var p = player.q.shift();
+      var src = ctx.createBufferSource();
+      src.buffer = p.buf;
+      src.playbackRate.value = player.rate;
+      src.connect(player.gain);
+      var t0 = player.nextT;
+      var dur = p.buf.duration / player.rate;
+      src.start(t0);
+      player.wins.push({ src: src, buf: p.buf, s: p.s, e: p.e, final: p.final,
+                         t0: t0, t1: t0 + dur, n: ++player.wseq });
+      player.nextT = t0 + dur;
+    }
+  }
+
+  function playerPush(p) {
+    if (!player.ctx) return;   // no context yet — nothing can play
+    player.q.push(p);
+    playerSchedule();
+  }
+
+  function playerReset() {
+    player.q.length = 0;
+    player.wins.forEach(function (w) {
+      try { w.src.stop(0); } catch (e) { /* not started */ }
+      try { w.src.disconnect(); } catch (e) { /* already gone */ }
+    });
+    player.wins.length = 0;
+    player.nextT = 0;
+  }
+
+  function playerSetRate(rate) {
+    player.rate = rate;
+    var ctx = player.ctx;
+    if (!ctx) return;
+    onSpeakTime();                // shift windows that already ended
+    var now = ctx.currentTime;
+    var act = null, requeue = [];
+    player.wins.forEach(function (w) {
+      if (act === null && w.t0 <= now) {   // currently playing: retarget live
+        act = w;
+        var played = (now - w.t0) * w.src.playbackRate.value;
+        w.src.playbackRate.value = rate;
+        w.t1 = now + Math.max(0, w.buf.duration - played) / rate;
+        return;
+      }
+      // waiting behind the active one: re-time it under the new rate
+      requeue.push({ buf: w.buf, s: w.s, e: w.e, final: w.final });
+      try { w.src.stop(0); } catch (e) { /* not started */ }
+      try { w.src.disconnect(); } catch (e) { /* already gone */ }
+    });
+    if (act) {
+      player.wins = [act];
+      player.nextT = act.t1;
+    } else if (player.wins.length) {       // mid-gap: keep the absolute anchor
+      player.nextT = player.wins[0].t0;
+      player.wins = [];
+    }
+    if (requeue.length) player.q = requeue.concat(player.q);
+    playerSchedule();
+  }
+
+  /* Test hook: read-aloud internals for the browser e2e (state, clock). */
+  if (typeof window !== 'undefined') {
+    window.__rd = { speak: speak, tts: tts, player: player, state: state, hl: highlightSeg };
+  }
+
+  /* Prefetched decoded group for (chapter, item) — filled while the current
+     paragraph plays so paragraph transitions start instantly. Deduped. */
   function audioFor(ch, i) {
     var k = cacheKey(ch, i);
-    if (speak.cache[k]) return Promise.resolve(speak.cache[k]);
+    if (speak.groups[k]) return Promise.resolve(speak.groups[k]);
     if (speak.inflight[k]) return speak.inflight[k];
 
     var gen = speak.gen;
     var p = chapterItems(ch).then(function (items) {
       var it = items[i];
       if (!it || it.type !== 'p') return null;
-      return ttsPost(it.text).then(function (entry) {
-        if (gen === speak.gen) {   // voice changed mid-flight → don't cache stale audio
-          var keys = Object.keys(speak.cache);
-          if (keys.length > 16) delete speak.cache[keys[0]];
-          speak.cache[k] = entry;
+      var pieces = [], chain = Promise.resolve();
+      return ttsFrames(it.text, null, function (h, wav) {
+        chain = chain.then(function () { return decodePiece(wav); }).then(function (buf) {
+          pieces.push({ buf: buf, s: h.s, e: h.e, final: !!h.final });
+        });
+      }).then(function () { return chain; }).then(function () {
+        if (gen === speak.gen && pieces.length) {   // voice changed mid-flight → drop
+          var keys = Object.keys(speak.groups);
+          if (keys.length > 16) delete speak.groups[keys[0]];
+          speak.groups[k] = pieces;
         }
-        return entry;
+        return pieces;
       });
-    }).then(function (entry) {
+    }).then(function (g) {
       delete speak.inflight[k];
-      return entry;
+      return g;
     }, function (e) {
       delete speak.inflight[k];
       throw e;
     });
     speak.inflight[k] = p;
     return p;
+  }
+
+  /* Stream paragraph (ch, i) straight into the player: the first piece
+     speaks as soon as it is synthesized — no waiting for the whole file.
+     onFirst fires after the first decoded piece. */
+  function streamLive(ch, i, token, onFirst) {
+    var ac = new AbortController();
+    speak.ac = ac;
+    var chain = Promise.resolve();
+    var first = false;
+    return chapterItems(ch).then(function (items) {
+      var it = items[i];
+      if (!it || it.type !== 'p') return null;
+      return ttsFrames(it.text, ac.signal, function (h, wav) {
+        chain = chain.then(function () { return decodePiece(wav); }).then(function (buf) {
+          if (token !== speak.token || !speak.on) return;
+          if (!first) { first = true; if (onFirst) onFirst(); }
+          playerPush({ buf: buf, s: h.s, e: h.e, final: !!h.final });
+        });
+      }).then(function () { return chain; });
+    }).then(function (r) {
+      if (speak.ac === ac) speak.ac = null;
+      return r;
+    }, function (e) {
+      if (speak.ac === ac) speak.ac = null;
+      throw e;
+    });
   }
 
   /* Lookahead queue: synthesize the next TTS_QUEUE paragraphs while the
@@ -2173,72 +2370,42 @@
   function highlightSeg(seg) {
     clearSent();
     var it = state.items[speak.i];
-    if (!seg || !it || it.type !== 'p' || !it.node) return;
-    var nf = normFull(it.node);
+    if (!seg || !it || it.type !== 'p') return;
+    // items come from server JSON — the rendered node lives in nodeOf
+    var node = it.node || (state.nodeOf && state.nodeOf[speak.i]);
+    if (!node) return;
+    var nf = normFull(node);
     var a = Math.max(0, Math.min(seg[0], nf.text.length));
     var b = Math.max(a, Math.min(seg[1], nf.text.length));
     if (b - a < 1) return;
     speak.sent = wrapRange(nf, a, b, 'rd-sent');
   }
 
+  /* Ticker: schedule upcoming pieces, highlight the piece under the
+     AudioContext clock; when a paragraph's final window ends, reset the
+     failure streak and advance (even while paused — speakStep() itself
+     no-ops until resume). */
   function onSpeakTime() {
-    var audio = speak.audio, segs = speak.segs;
-    if (!audio || !segs || !segs.length) return;
-    var t = audio.currentTime, idx = 0;
-    for (var i = 0; i < segs.length; i++) {
-      if (t + 0.001 >= segs[i][2]) idx = i; else break;
-    }
-    if (idx === speak.sentIdx) return;
-    highlightSeg(segs[idx]);
-    speak.sentIdx = idx;   // AFTER highlightSeg: clearSent() inside resets it to -1
-  }
-
-  function playBlob(entry, token) {
-    if (token !== speak.token) return;
-    // pause raced the synthesis: never start while paused — speakResume()
-    // re-runs speakStep(), which finds this entry in the cache and plays it
-    // exactly once (a play here + a resume would replay the paragraph).
-    if (!speak.on || speak.paused) return;
-    var url = URL.createObjectURL(entry.blob);
-    if (speak.audio) {
-      speak.audio.pause();
-      try { URL.revokeObjectURL(speak.audio.src); } catch (e) { /* already revoked */ }
-    }
-    var audio = new Audio(url);
-    speak.audio = audio;
-    speak.segs = entry.segs || null;
-    speak.sentIdx = -1;
-    audio.playbackRate = ttsCfg.rate;
-    audio.ontimeupdate = onSpeakTime;
-    audio.onended = function () {
-      if (audio.__rdEnded) return;          // 'ended' must advance once only
-      audio.__rdEnded = 1;
-      if (speak.audio !== audio) return;    // stale object: a newer blob owns the queue
-      speak.fails = 0;                      // this clip played: clear the streak
-      try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
-      speakNext();
-    };
-    // Undecodable audio (an old empty-WAV response, a truncated download)
-    // must not kill the session: skip this paragraph. Only a pile-up of
-    // consecutive failures means a real problem worth stopping for.
-    audio.onerror = function () {
-      if (audio.__rdEnded) return;
-      audio.__rdEnded = 1;
-      if (!speak.on || speak.audio !== audio) return;   // stale/stopped: ignore
-      try { URL.revokeObjectURL(url); } catch (e) { /* already revoked */ }
-      speak.audio = null;
-      speak.segs = null;
-      speak.fails++;
-      if (speak.fails > 3) { speakFail(i18n('read.tts_play_fail')); return; }
-      speakNext();
-    };
-    audio.play().catch(function (e) {
-      if (e && e.name === 'NotAllowedError') {   // autoplay policy, not bad audio
-        speakFail(e && e.message ? e.message : String(e));
-        return;
+    if (!player.ctx || !speak.on) return;
+    playerSchedule();
+    var now = player.ctx.currentTime;
+    while (player.wins.length && player.wins[0].t1 <= now) {
+      var w = player.wins.shift();
+      try { w.src.disconnect(); } catch (e) { /* already gone */ }
+      if (w.final) {                 // paragraph boundary → next paragraph
+        speak.fails = 0;             // it played: clear the failure streak
+        speak.i++;
+        speakStep();                 // no-op while paused; resume re-runs it
+        break;
       }
-      audio.onerror();                       // treat like an undecodable blob
-    });
+    }
+    var cur = null;
+    for (var i = 0; i < player.wins.length; i++) {
+      if (player.wins[i].t0 <= now) cur = player.wins[i]; else break;
+    }
+    if (!cur || cur.n === speak.sentIdx) return;
+    highlightSeg([cur.s, cur.e]);
+    speak.sentIdx = cur.n;   // AFTER highlightSeg: clearSent() inside resets it to -1
   }
 
   function speakFail(message) {
@@ -2273,27 +2440,72 @@
     speakNote(fmt('read.tts_speaking', { ch: state.ch, i: speak.i + 1, total: state.items.length }));
     ttsStatus(i18n('read.tts_synthesizing'));
 
-    var idx = speak.i;
-    audioFor(state.ch, idx).then(function (entry) {
-      if (token !== speak.token || !speak.on || speak.paused) return;
-      if (!entry || !entry.blob) { speak.i++; speakStep(); return; }
+    var idx = speak.i, k = cacheKey(state.ch, idx);
+    var cached = speak.groups[k];
+    if (cached && cached.length) {
+      delete speak.groups[k];               // consume: each group plays once
       ttsStatus(i18n('read.tts_playing'));
-      playBlob(entry, token);
+      cached.forEach(playerPush);           // already decoded → 0ms handoff
       prefetchCurrent(idx);
+      return;
+    }
+    streamLive(state.ch, idx, token, function () {
+      ttsStatus(i18n('read.tts_playing'));
+      prefetchCurrent(idx);                 // next paragraphs while this one speaks
+    }).then(function (item) {
+      if (token !== speak.token || !speak.on) return;
+      if (item === null) { speak.i++; speakStep(); return; }   // not a paragraph
     }).catch(function (e) {
       if (token !== speak.token) return;
-      speakFail(e && e.message ? e.message : String(e));
+      if (e && e.name === 'AbortError') return;
+      // A broken paragraph must not kill the session: skip it. Only a
+      // pile-up of consecutive failures is worth stopping for.
+      speak.fails++;
+      if (speak.fails > 3) {
+        speakFail(e && e.message ? e.message : i18n('read.tts_play_fail'));
+        return;
+      }
+      speak.i++;
+      speakStep();
     });
   }
 
-  function speakNext() {
-    if (!speak.on || speak.paused) return;
-    speak.i++;
+  /* Bottom-bar transport: pause/resume + stop while reading aloud. */
+  function jumpTransport() {
+    var wrap = el('rd-tts-jump'), tog = el('rd-tts-jump-toggle');
+    if (!wrap) return;
+    wrap.hidden = !speak.on;
+    if (tog) {
+      tog.textContent = speak.paused ? '▶' : '⏸';
+      tog.setAttribute('aria-label', i18n(speak.paused ? 'read.resume' : 'read.pause'));
+      tog.title = i18n(speak.paused ? 'read.resume' : 'read.pause');
+    }
+  }
+
+  /* Move the reading position (bottom jump buttons while reading aloud):
+     abort the live stream, reschedule the player, continue at item i. */
+  function speakSeek(i) {
+    if (!speak.on) return;
+    speak.i = i;
+    speak.token++;
+    if (speak.ac) { try { speak.ac.abort(); } catch (e) { /* closed */ } speak.ac = null; }
+    playerReset();
     speakStep();
+  }
+
+  function stepItemTts(delta) {
+    if (!speak.on) { stepItem(delta); return; }
+    var i = state.cur + delta;
+    if (i < 0 || i >= state.items.length) { stepItem(delta); return; }  // chapter edge
+    setCurrent(i, { scroll: true });
+    speakSeek(i);
   }
 
   function speakStart() {
     if (!state.chapter) return;
+    var ctx = playerCtx();          // called from a click → context allowed
+    if (ctx.state === 'suspended') { var r = ctx.resume(); if (r && r.catch) r.catch(noop); }
+    playerReset();
     speak.on = true;
     speak.paused = false;
     speak.token++;
@@ -2304,6 +2516,8 @@
     if (play) play.hidden = true;
     if (pause) pause.hidden = false;
     if (stop) stop.hidden = false;
+    jumpTransport();
+    if (!player.timer) player.timer = setInterval(onSpeakTime, 80);
     markSpeaking();
     speakStep();
   }
@@ -2311,10 +2525,11 @@
   function speakPause() {
     if (!speak.on) return;
     speak.paused = true;
-    if (speak.audio) speak.audio.pause();
+    if (player.ctx) { var r = player.ctx.suspend(); if (r && r.catch) r.catch(noop); }
     var pause = el('rd-tts-pause'), play = el('rd-tts-play');
     if (pause) pause.hidden = true;
     if (play) play.hidden = false;
+    jumpTransport();
     ttsStatus(i18n('read.tts_paused'));
     speakNote(i18n('read.tts_paused_note'));
   }
@@ -2325,15 +2540,16 @@
     var play = el('rd-tts-play'), pause = el('rd-tts-pause');
     if (play) play.hidden = true;
     if (pause) pause.hidden = false;
-    var a = speak.audio;
-    if (a && a.src && !a.ended) {        // this item's audio, mid-play
+    jumpTransport();
+    if (player.ctx && (player.q.length || player.wins.length || speak.ac)) {
+      // pieces are queued or a stream is still in flight — the suspended
+      // context resumes exactly where it stopped (0ms)
+      var r = player.ctx.resume();
+      if (r && r.catch) r.catch(noop);
       ttsStatus(i18n('read.tts_playing'));
-      if (a.paused) a.play().catch(function () { speakStep(); });
       return;
     }
-    // no audio, or the PREVIOUS item's ended clip — replaying that object
-    // would speak the finished paragraph again; let speakStep() fetch the
-    // current item instead (cache/inflight: it plays exactly once).
+    // nothing buffered (or the stream died while paused) → fetch current item
     speakStep();
   }
 
@@ -2341,17 +2557,15 @@
     speak.on = false;
     speak.paused = false;
     speak.token++;
-    if (speak.audio) {
-      speak.audio.pause();
-      try { URL.revokeObjectURL(speak.audio.src); } catch (e) { /* already revoked */ }
-      speak.audio = null;
-    }
-    speak.segs = null;
+    if (speak.ac) { try { speak.ac.abort(); } catch (e) { /* closed */ } speak.ac = null; }
+    playerReset();
+    if (player.timer) { clearInterval(player.timer); player.timer = 0; }
     clearSent();
     var play = el('rd-tts-play'), pause = el('rd-tts-pause'), stop = el('rd-tts-stop');
     if (play) play.hidden = false;
     if (pause) pause.hidden = true;
     if (stop) stop.hidden = true;
+    jumpTransport();
     ttsStatus(tts.state === 'ready' ? fmt('read.tts_ready_n', { n: tts.voices.length }) : ttsStatusText());
     if (updateNote !== false) speakNote('');
     markSpeaking();
@@ -2702,8 +2916,8 @@
 
     // paragraph nav + pages
     var prevP = el('rd-prev-p'), nextP = el('rd-next-p');
-    if (prevP) prevP.addEventListener('click', function () { stepItem(-1); });
-    if (nextP) nextP.addEventListener('click', function () { stepItem(1); });
+    if (prevP) prevP.addEventListener('click', function () { stepItemTts(-1); });
+    if (nextP) nextP.addEventListener('click', function () { stepItemTts(1); });
     var prevPage = el('rd-prev-page'), nextPage = el('rd-next-page');
     if (prevPage) prevPage.addEventListener('click', function () { flipPage(-1); });
     if (nextPage) nextPage.addEventListener('click', function () { flipPage(1); });
@@ -2778,13 +2992,13 @@
       ttsCfg.rate = Number(this.value);
       var v = el('rd-tts-rate-v');
       if (v) v.textContent = 'x' + ttsCfg.rate.toFixed(2);
-      if (speak.audio) speak.audio.playbackRate = ttsCfg.rate;
+      playerSetRate(ttsCfg.rate);
       saveJSON(ttsKey, ttsCfg);
     });
     var voice = el('rd-tts-voice');
     if (voice) voice.addEventListener('change', function () {
       ttsCfg.voice = this.value;
-      speak.cache = {};        // old blobs belong to the previous voice
+      speak.groups = {};        // old audio belongs to the previous voice
       speak.inflight = {};
       speak.gen++;
       saveJSON(ttsKey, ttsCfg);
@@ -2799,6 +3013,13 @@
     if (pause) pause.addEventListener('click', speakPause);
     var stop = el('rd-tts-stop');
     if (stop) stop.addEventListener('click', function () { speakStop(true); });
+    var jtog = el('rd-tts-jump-toggle');
+    if (jtog) jtog.addEventListener('click', function () {
+      if (!speak.on) return;
+      if (speak.paused) speakResume(); else speakPause();
+    });
+    var jstop = el('rd-tts-jump-stop');
+    if (jstop) jstop.addEventListener('click', function () { speakStop(true); });
     var test = el('rd-tts-test');
     if (test) test.addEventListener('click', function () {
       if (!tts.voices.length) { warmVoices(); return; }

@@ -1422,8 +1422,9 @@ class TTSEngine:
                 return hit[0], hit[1]
             return None
 
-    def _cache_put(self, key, wav, segs):
-        size = len(wav)
+    def _cache_put(self, key, wav, segs, size=None):
+        if size is None:
+            size = len(wav)
         if size > _CACHE_MAX_BYTES // 4:   # one giant item must not evict all
             return
         with self._cache_lock:
@@ -1437,14 +1438,10 @@ class TTSEngine:
                 _k, dropped = self._cache.popitem(last=False)
                 self._cache_bytes -= dropped[2]
 
-    def synthesize(self, text: str, voice=None):
-        """Return ``(wav_bytes, segs)`` — segs maps audio time onto the
-        collapsed text as ``[[start_c, end_c, t_seconds], …]`` for
-        sentence-level highlighting. Raises RuntimeError when not ready."""
-        text = _collapse(text)[:MAX_TEXT]
-        if not text:
-            raise ValueError("empty text")
-
+    def _session(self, voice):
+        """Resolve ``(tts, sample_rate, voice)`` for a request; raises
+        RuntimeError when the engine is not ready and falls back to the
+        default voice for unknown presets."""
         with self._state_lock:
             tts = self._tts
             ready = self.state == "ready"
@@ -1456,6 +1453,60 @@ class TTSEngine:
         if voice not in known:  # unknown/None preset → fall back to the default
             voice = default
         voice = voice or default
+        sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
+        return tts, sr, voice
+
+    def _render_piece(self, part: str, voice, tts, sr: float):
+        """Synthesize one split piece → audio samples (list/ndarray).
+
+        Piece-level LRU so both the whole-paragraph and the streaming paths
+        re-read instantly; silence fallback for text the model cannot read
+        (a 0-frame WAV would stop the browser session, a punctuation-only
+        piece would turn into junk speech); one extra-copy retry.
+        """
+        key = (voice, "p", part)
+        hit = self._cache_get(key)
+        if hit is not None:
+            return hit[0]
+
+        wav = None
+        with self._lock:
+            if any(c.isalnum() for c in part):
+                wav = tts.infer(part, voice=voice)
+                if float(len(wav)) / sr < _MIN_AUDIO_SEC:
+                    # Unreadable text → no phonemes → a 0-frame WAV the
+                    # browser cannot decode (it would stop the session).
+                    wav = None
+                elif _suspects_extra_copy(part, float(len(wav)) / sr):
+                    # Model occasionally speaks a phrase one time more than
+                    # the text (free-running copy). A fresh sample almost
+                    # never repeats the mistake — take it when it's clean,
+                    # else keep the shorter of the two.
+                    alt = tts.infer(part, voice=voice)
+                    if (not _suspects_extra_copy(part, float(len(alt)) / sr)
+                            or len(alt) < len(wav)):
+                        wav = alt
+        if wav is None:
+            # Nothing to pronounce ("……", Chinese, lone "?") → a proportional
+            # pause instead of letting the model invent speech.
+            import numpy as np
+
+            secs = max(len(part) * _SILENCE_SEC_PER_CHAR, _SILENCE_MIN)
+            wav = np.zeros(int(secs * sr), dtype=np.float32)
+        # Cache stores samples (not WAV bytes): size = bytes, ≈4B/sample.
+        size = int(getattr(wav, "nbytes", None) or len(wav) * 4)
+        self._cache_put(key, wav, None, size=size)
+        return wav
+
+    def synthesize(self, text: str, voice=None):
+        """Return ``(wav_bytes, segs)`` — segs maps audio time onto the
+        collapsed text as ``[[start_c, end_c, t_seconds], …]`` for
+        sentence-level highlighting. Raises RuntimeError when not ready."""
+        text = _collapse(text)[:MAX_TEXT]
+        if not text:
+            raise ValueError("empty text")
+
+        tts, sr, voice = self._session(voice)
 
         hit = self._cache_get((voice, text))
         if hit is not None:
@@ -1463,38 +1514,9 @@ class TTSEngine:
 
         import numpy as np
 
-        def _pause_for(part):
-            """Proportional pause for a piece with nothing to pronounce."""
-            secs = max(len(part) * _SILENCE_SEC_PER_CHAR, _SILENCE_MIN)
-            return np.zeros(int(secs * sr), dtype=np.float32)
-
         pieces = split_for_tts_seg(text)
-        sr = float(getattr(tts, "sample_rate", _SAMPLE_RATE))
-        with self._lock:
-            wavs = []
-            for part, _s, _e in pieces:
-                wav = None
-                if any(c.isalnum() for c in part):
-                    wav = tts.infer(part, voice=voice)
-                    if float(len(wav)) / sr < _MIN_AUDIO_SEC:
-                        # Unreadable text → no phonemes → a 0-frame WAV the
-                        # browser cannot decode (it would stop the session).
-                        wav = None
-                    elif _suspects_extra_copy(part, float(len(wav)) / sr):
-                        # Model occasionally speaks a phrase one time more than
-                        # the text (free-running copy). A fresh sample almost
-                        # never repeats the mistake — take it when it's clean,
-                        # else keep the shorter of the two.
-                        alt = tts.infer(part, voice=voice)
-                        if (not _suspects_extra_copy(part, float(len(alt)) / sr)
-                                or len(alt) < len(wav)):
-                            wav = alt
-                # Punctuation-only piece ("……", "..."): the phonemizer still
-                # emits a lone "." token that the model turns into junk
-                # speech — there is nothing to pronounce, so pause instead.
-                if wav is None:
-                    wav = _pause_for(part)
-                wavs.append(wav)
+        wavs = [self._render_piece(part, voice, tts, sr)
+                for part, _s, _e in pieces]
         wav = _to_wav(wavs, int(sr))
 
         segs, t = [], 0.0
@@ -1504,6 +1526,32 @@ class TTSEngine:
 
         self._cache_put((voice, text), wav, segs)
         return wav, segs
+
+    def synthesize_stream(self, text: str, voice=None):
+        """Yield ``(header, wav_bytes)`` per split piece as soon as it is
+        rendered — the streaming playback path.
+
+        header = ``{i, s, e, d, sr, final}`` where ``s``/``e`` are char
+        offsets in the collapsed text (for sentence highlighting) and
+        ``final`` marks the last piece of the paragraph. Raises
+        RuntimeError/ValueError before the first yield.
+        """
+        text = _collapse(text)[:MAX_TEXT]
+        if not text:
+            raise ValueError("empty text")
+
+        tts, sr, voice = self._session(voice)
+        pieces = split_for_tts_seg(text)
+        n = len(pieces)
+        for idx, (part, s, e) in enumerate(pieces):
+            chunk = self._render_piece(part, voice, tts, sr)
+            header = {
+                "i": idx, "s": s, "e": e,
+                "d": round(len(chunk) / sr, 3),
+                "sr": int(sr),
+                "final": idx == n - 1,
+            }
+            yield header, _to_wav([chunk], int(sr))
 
 
 ENGINE = TTSEngine()

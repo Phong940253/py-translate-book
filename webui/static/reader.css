@@ -269,6 +269,9 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
 }
 #rd-p-pos { min-width: 170px; text-align: center; }
 .rd-page-nav { display: inline-flex; align-items: center; gap: 4px; }
+.rd-tts-jump { display: inline-flex; align-items: center; gap: 2px; }
+.rd-tts-jump[hidden] { display: none; }
+.rd-tts-jump button { min-width: 34px; font-variant-numeric: tabular-nums; }
 .rd[data-mode="scroll"] .rd-page-nav { display: none; }
 #rd-pageinfo { font-variant-numeric: tabular-nums; white-space: nowrap; }
 

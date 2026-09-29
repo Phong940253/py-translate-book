@@ -818,6 +818,77 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         self.assertIn("not ready", r.get_json()["error"])
 
+    def test_tts_stream_frames_and_errors(self):
+        import struct
+        from webui import reader
+
+        def frames(data):
+            """uint32be hdrLen | JSON hdr | uint32be wavLen | wav — per piece."""
+            out, off = [], 0
+            while off < len(data):
+                hl = struct.unpack(">I", data[off:off + 4])[0]
+                off += 4
+                hdr = json.loads(data[off:off + hl])
+                off += hl
+                wl = struct.unpack(">I", data[off:off + 4])[0]
+                off += 4
+                out.append((hdr, data[off:off + wl]))
+                off += wl
+            return out
+
+        with mock.patch.object(reader.ENGINE, "ensure_warm"):
+            # validation mirrors /api/tts — bad payloads never stream
+            self.assertEqual(
+                self.client.post("/api/tts/stream", json={"text": ""}).status_code, 400)
+            self.assertEqual(
+                self.client.post("/api/tts/stream",
+                                 json={"text": "x" * (reader.MAX_TEXT + 1)}).status_code, 400)
+            self.assertEqual(
+                self.client.post("/api/tts/stream", json={"text": "ok", "voice": 42}).status_code, 400)
+
+            # engine not ready → 503 with the readable error, before any frame
+            with mock.patch.object(reader.ENGINE, "synthesize_stream",
+                                   side_effect=RuntimeError("tts not ready (state=idle)")):
+                r = self.client.post("/api/tts/stream", json={"text": "Xin chào"})
+                self.assertEqual(r.status_code, 503)
+                self.assertIn("not ready", r.get_json()["error"])
+
+            # ready → one framed piece after another, `final` on the last one
+            def fake_stream(text, voice=None):
+                yield {"i": 0, "s": 0, "e": 5, "d": 0.5, "sr": 48000,
+                       "final": False}, b"RIFFaaaa"
+                yield {"i": 1, "s": 6, "e": 11, "d": 0.4, "sr": 48000,
+                       "final": True}, b"RIFFbbbb"
+
+            with mock.patch.object(reader.ENGINE, "synthesize_stream",
+                                   side_effect=fake_stream) as syn:
+                r = self.client.post("/api/tts/stream",
+                                     json={"text": "Xin chào bạn", "voice": "v1"})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.mimetype, "application/octet-stream")
+            got = frames(r.get_data())
+            self.assertEqual([h["i"] for h, _ in got], [0, 1])
+            self.assertEqual([w for _, w in got], [b"RIFFaaaa", b"RIFFbbbb"])
+            self.assertFalse(got[0][0]["final"])
+            self.assertTrue(got[1][0]["final"])
+            syn.assert_called_once_with("Xin chào bạn", "v1")
+
+            # a mid-stream crash reaches the client as an error frame,
+            # not as a dead connection with half a paragraph
+            def boom(text, voice=None):
+                yield {"i": 0, "s": 0, "e": 3, "d": 0.2, "sr": 48000,
+                       "final": False}, b"RIFFaaaa"
+                raise RuntimeError("engine died")
+
+            with mock.patch.object(reader.ENGINE, "synthesize_stream",
+                                   side_effect=boom):
+                r = self.client.post("/api/tts/stream", json={"text": "Xin chào"})
+            self.assertEqual(r.status_code, 200)   # headers already sent
+            got = frames(r.get_data())
+            self.assertEqual(len(got), 2)
+            self.assertIn("engine died", got[1][0]["error"])
+            self.assertEqual(got[1][1], b"")
+
     def test_split_for_tts_respects_the_char_limit(self):
         from webui import reader
         long_text = ("Một câu dài. " * 60).strip()
@@ -1255,6 +1326,73 @@ class TestWebUI(unittest.TestCase):
         # the empty-output path must not trigger an extra-copy retry loop
         # (no second infer call for unpronounceable text)
         self.assertEqual(len(stub.calls), 1)
+
+    def test_tts_engine_streams_pieces_as_they_render(self):
+        from webui import reader
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                if any("㐀" <= c <= "鿿" for c in text):
+                    return []
+                return [0.0] * int(48000 * 0.3)
+
+        eng = reader.TTSEngine()
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "v1"
+        eng.voices = [{"id": "v1", "label": "v1"}]
+
+        text = ("Câu đầu tiên đọc đủ rõ ràng để làm một mảnh riêng. "
+                "Câu thứ hai cũng dài đủ để đứng riêng một mảnh. Hết.")
+        pieces = reader.split_for_tts_seg(text)
+        self.assertGreater(len(pieces), 1)   # long sentences stay separate
+
+        import io
+        import wave
+
+        def dur(wav_bytes):
+            with wave.open(io.BytesIO(wav_bytes)) as wf:
+                return wf.getnframes() / wf.getframerate()
+
+        out = list(eng.synthesize_stream(text, voice="v1"))
+        self.assertEqual(len(out), len(pieces))
+        n = len(pieces)
+        for idx, ((part, s, e), (hdr, wav)) in enumerate(zip(pieces, out)):
+            self.assertEqual(hdr["i"], idx)
+            self.assertEqual((hdr["s"], hdr["e"]), (s, e))
+            self.assertEqual(text[s:e], part)
+            self.assertEqual(hdr["final"], idx == n - 1)
+            self.assertEqual(hdr["sr"], 48000)
+            self.assertTrue(wav.startswith(b"RIFF"))
+            self.assertAlmostEqual(hdr["d"], 0.3, places=2)
+            self.assertAlmostEqual(dur(wav), 0.3, places=2)
+        self.assertFalse(out[0][0]["final"])
+        self.assertTrue(out[-1][0]["final"])
+
+        # a piece the model cannot read arrives as proportional silence
+        # instead of a 0-frame WAV the browser could not decode
+        out_q = list(eng.synthesize_stream("？", voice="v1"))
+        self.assertEqual(len(out_q), 1)
+        self.assertGreaterEqual(dur(out_q[0][1]), reader._SILENCE_MIN)
+
+        # piece cache: the repeat above already covered it — no new renders
+        calls_before = len(stub.calls)
+        out2 = list(eng.synthesize_stream(text, voice="v1"))
+        self.assertEqual(len(out2), n)
+        self.assertEqual(len(stub.calls), calls_before)
+
+        # the classic endpoint keeps its (wav, segs) contract
+        wav2, segs = eng.synthesize(text, voice="v1")
+        self.assertTrue(wav2.startswith(b"RIFF"))
+        self.assertEqual(len(segs), n)
+        self.assertEqual(len(stub.calls), calls_before)  # pieces shared
 
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")

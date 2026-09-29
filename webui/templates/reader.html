@@ -17,6 +17,7 @@ window.APP.reader = {
   annUrl: {{ url_for('api_reader_annotations')|tojson }},
   lookupUrl: {{ url_for('api_reader_lookup')|tojson }},
   ttsUrl: {{ url_for('api_tts')|tojson }},
+  ttsStreamUrl: {{ url_for('api_tts_stream')|tojson }},
   voicesUrl: {{ url_for('api_tts_voices')|tojson }}
 };
 {% endblock %}
@@ -195,6 +196,10 @@ window.APP.reader = {
   </div>
 
   <div class="rd-jump" id="rd-jump">
+    <span id="rd-tts-jump" class="rd-tts-jump" hidden>
+      <button id="rd-tts-jump-toggle" type="button" class="btn btn-ghost btn-sm" aria-label="Tạm dừng" title="Tạm dừng">⏸</button>
+      <button id="rd-tts-jump-stop" type="button" class="btn btn-ghost btn-sm" aria-label="{{ t('read.stop') }}" title="{{ t('read.stop') }}">⏹</button>
+    </span>
     <button id="rd-prev-p" type="button" class="btn btn-ghost btn-sm">{{ icon('chevron-left') }} <span class="rd-label">{{ t('read.prev_p') }}</span></button>
     <span id="rd-p-pos" class="muted small"></span>
     <button id="rd-next-p" type="button" class="btn btn-ghost btn-sm"><span class="rd-label">{{ t('read.next_p') }}</span> {{ icon('chevron-right') }}</button>

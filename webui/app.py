@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import struct
 import sys
 import time
 import uuid
@@ -27,6 +28,7 @@ from flask import (
     url_for,
     Response,
     send_file,
+    stream_with_context,
 )
 
 import webui.core_runner as core_runner
@@ -804,6 +806,56 @@ def api_tts():
         resp.headers["X-TTS-Segs"] = json.dumps(segs)
     except (TypeError, ValueError):  # pragma: no cover — never fail the audio
         pass
+    return resp
+
+
+def _tts_frame(header: dict, wav: bytes) -> bytes:
+    """One stream frame: uint32be len(JSON header) | header |
+    uint32be len(wav) | wav bytes (0 bytes for an error frame)."""
+    hj = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    return struct.pack(">I", len(hj)) + hj + struct.pack(">I", len(wav)) + wav
+
+
+@app.route("/api/tts/stream", methods=["POST"])
+def api_tts_stream():
+    """Chunked piece stream for read-aloud playback: one frame per split
+    piece as soon as it is synthesized, so the reader can start speaking
+    without waiting for the whole paragraph."""
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text")
+    voice = payload.get("voice")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "text is required"}), 400
+    if len(text) > reader.MAX_TEXT:
+        return jsonify({"error": f"text too long (max {reader.MAX_TEXT} chars)"}), 400
+    if voice is not None and not isinstance(voice, str):
+        return jsonify({"error": "voice must be a string"}), 400
+    reader.ENGINE.ensure_warm()
+    try:
+        gen = reader.ENGINE.synthesize_stream(text, voice)
+        first = next(gen)  # surface engine errors BEFORE the 200 headers
+    except StopIteration:
+        return jsonify({"error": "empty text"}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "state": reader.ENGINE.state}), 503
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001 — synthesis failure → readable JSON
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    def body():
+        try:
+            header, wav = first
+            yield _tts_frame(header, wav)
+            for header, wav in gen:
+                yield _tts_frame(header, wav)
+        except Exception as e:  # noqa: BLE001 — mid-stream failure → error frame
+            yield _tts_frame({"error": f"{type(e).__name__}: {e}"}, b"")
+
+    resp = Response(stream_with_context(body()),
+                    mimetype="application/octet-stream")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Accel-Buffering"] = "no"  # proxies: flush per frame
     return resp
 
 
