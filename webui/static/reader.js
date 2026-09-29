@@ -2182,24 +2182,110 @@
     return player.ctx;
   }
 
+  /* ------------------------------------------ pitch-preserving time stretch
+     Web Audio's playbackRate shifts pitch with speed (chipmunk at x1.5,
+     growl at x0.75) — the voice must NOT change with the speed slider.
+     Buffers are time-stretched here with WSOLA and scheduled at rate 1.0,
+     so the speaker keeps their voice at every speed and seams stay 0ms. */
+
+  function wsola(x, rate, sr) {
+    var len = x.length;
+    var target = Math.max(1, Math.round(len / rate));
+    var F = Math.min(Math.round(0.04 * sr), Math.floor(len / 3));
+    if (F < 240) {        // a sliver (< ~5ms frame): linear resample is fine
+      var out0 = new Float32Array(target);
+      for (var j = 0; j < target; j++) {
+        var pp = Math.min(len - 1, Math.max(0, (j + 0.5) * rate - 0.5));
+        var i0 = Math.floor(pp), fr = pp - i0;
+        out0[j] = x[i0] * (1 - fr) + x[Math.min(len - 1, i0 + 1)] * fr;
+      }
+      return out0;
+    }
+    var Hs = Math.max(1, Math.round(F / 2));   // synthesis hop (50% overlap)
+    var X = F - Hs;                            // crossfade overlap
+    var search = Math.min(Math.round(0.006 * sr), F);   // ±6ms to re-align
+    var D = 4;                                 // decimated correlation step
+    var out = new Float32Array(target + F);
+    var aPrev = 0;
+
+    function corr(xi, yi) {                    // normalized, decimated
+      var sxy = 0, sxx = 0, syy = 0;
+      for (var i = 0; i < X; i += D) {
+        var a = x[xi + i], b = x[yi + i];
+        sxy += a * b; sxx += a * a; syy += b * b;
+      }
+      var e = Math.sqrt(sxx * syy);
+      return e < 1e-12 ? -Infinity : sxy / e;   // silence: no preference
+    }
+
+    var steps = Math.ceil(target / Hs);
+    for (var k = 0; k < steps; k++) {
+      var s = k * Hs;
+      if (s >= target) break;
+      var nominal = Math.round(s * rate);       // exact time map, no drift
+      var a = nominal;
+      if (k > 0) {
+        // WSOLA: pick the candidate whose head lines up with the previous
+        // segment's tail, so repositioned segments stay phase-continuous.
+        var tgt = aPrev + Hs, best = -Infinity, bestO = 0;
+        for (var o = -search; o <= search; o += D) {
+          var c = nominal + o;
+          if (c < 0 || c + X > len) continue;
+          var sc = corr(c, tgt);
+          if (sc > best) { best = sc; bestO = o; }
+        }
+        if (best > -Infinity) a = nominal + bestO;
+      }
+      if (a < 0) a = 0;
+      if (a + F > len) a = Math.max(0, len - F);
+      aPrev = a;
+      if (k === 0) {
+        out.set(x.subarray(a, Math.min(len, a + F)), 0);
+      } else {
+        for (var i = 0; i < X; i++) {           // linear crossfade over X
+          var g = (i + 1) / (X + 1);
+          out[s + i] = out[s + i] * (1 - g) + x[a + i] * g;
+        }
+        var end = Math.min(len, a + F);
+        for (var i2 = X; a + i2 < end; i2++) out[s + i2] = x[a + i2];
+      }
+    }
+    return out.subarray(0, target);
+  }
+
+  /* ``buf`` stretched for ``rate`` (memoized on the buffer: one copy per
+     speed). Rate 1 → the original buffer, zero DSP cost. */
+  function stretched(buf, rate) {
+    if (!buf || Math.abs(rate - 1) < 0.005) return buf;
+    if (!buf.getChannelData) return buf;              // non-audio fixture
+    var cache = buf.__rdSt || (buf.__rdSt = {});
+    var key = rate.toFixed(3);
+    if (cache[key]) return cache[key];
+    var sr = buf.sampleRate || 48000;
+    var out = wsola(buf.getChannelData(0), rate, sr);
+    var nb = player.ctx.createBuffer(1, Math.max(1, out.length), sr);
+    nb.getChannelData(0).set(out);
+    cache[key] = nb;
+    return nb;
+  }
+
   function playerSchedule() {
     var ctx = player.ctx;
     if (!ctx) return;
     var now = ctx.currentTime;
-    if (!player.nextT) player.nextT = now + 0.06;      // cold start: tiny lead
-    else if (player.nextT < now) player.nextT = now;   // gap behind us: now
+    if (!player.nextT) player.nextT = now + 0.15;     // cold start: absorb the stretch
+    else if (player.nextT < now) player.nextT = now;  // gap behind us: now
     while (player.q.length && player.nextT < now + 1.0) {
       var p = player.q.shift();
+      var buf = stretched(p.buf, player.rate);        // stretch before schedule
       var src = ctx.createBufferSource();
-      src.buffer = p.buf;
-      src.playbackRate.value = player.rate;
+      src.buffer = buf;
       src.connect(player.gain);
       var t0 = player.nextT;
-      var dur = p.buf.duration / player.rate;
       src.start(t0);
       player.wins.push({ src: src, buf: p.buf, s: p.s, e: p.e, final: p.final,
-                         t0: t0, t1: t0 + dur, n: ++player.wseq });
-      player.nextT = t0 + dur;
+                         t0: t0, t1: t0 + buf.duration, n: ++player.wseq });
+      player.nextT = t0 + buf.duration;
     }
   }
 
@@ -2220,32 +2306,28 @@
   }
 
   function playerSetRate(rate) {
+    if (Math.abs(rate - player.rate) < 0.001) return;
     player.rate = rate;
     var ctx = player.ctx;
     if (!ctx) return;
     onSpeakTime();                // shift windows that already ended
     var now = ctx.currentTime;
-    var act = null, requeue = [];
+    var act = null, requeue = [], gapT = null;
     player.wins.forEach(function (w) {
-      if (act === null && w.t0 <= now) {   // currently playing: retarget live
-        act = w;
-        var played = (now - w.t0) * w.src.playbackRate.value;
-        w.src.playbackRate.value = rate;
-        w.t1 = now + Math.max(0, w.buf.duration - played) / rate;
+      if (act === null && w.t0 <= now) {   // playing: finishes at its own
+        act = w;                           // tempo — pitch NEVER changes
         return;
       }
-      // waiting behind the active one: re-time it under the new rate
+      // waiting behind the active one: re-queue its ORIGINAL buffer — it is
+      // re-stretched for the new speed when it is (re)scheduled
+      if (gapT === null) gapT = w.t0;
       requeue.push({ buf: w.buf, s: w.s, e: w.e, final: w.final });
       try { w.src.stop(0); } catch (e) { /* not started */ }
       try { w.src.disconnect(); } catch (e) { /* already gone */ }
     });
-    if (act) {
-      player.wins = [act];
-      player.nextT = act.t1;
-    } else if (player.wins.length) {       // mid-gap: keep the absolute anchor
-      player.nextT = player.wins[0].t0;
-      player.wins = [];
-    }
+    player.wins = act ? [act] : [];
+    if (act) player.nextT = act.t1;                 // seam after the active one
+    else if (gapT !== null) player.nextT = gapT;    // mid-gap: keep the anchor
     if (requeue.length) player.q = requeue.concat(player.q);
     playerSchedule();
   }
@@ -2541,6 +2623,8 @@
     if (play) play.hidden = true;
     if (pause) pause.hidden = false;
     jumpTransport();
+    speakNote(fmt('read.tts_speaking',
+      { ch: state.ch, i: speak.i + 1, total: state.items.length }));  // not the pause note anymore
     if (player.ctx && (player.q.length || player.wins.length || speak.ac)) {
       // pieces are queued or a stream is still in flight — the suspended
       // context resumes exactly where it stopped (0ms)
