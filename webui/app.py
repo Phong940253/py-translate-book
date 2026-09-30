@@ -860,6 +860,40 @@ def api_tts_stream():
 
 
 # --------------------------------------------------------------------------
+# Background music: plain audio files dropped into <project>/music/
+# --------------------------------------------------------------------------
+
+MUSIC_DIR = os.path.join(PROJECT_ROOT, "music")
+MUSIC_EXTS = (".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".flac")
+
+
+@app.route("/api/music")
+def api_music_list():
+    """Audio files the reader can loop as background music while reading."""
+    try:
+        os.makedirs(MUSIC_DIR, exist_ok=True)   # give the user a folder to fill
+    except OSError:
+        pass
+    files = []
+    if os.path.isdir(MUSIC_DIR):
+        for fn in sorted(os.listdir(MUSIC_DIR)):
+            if fn.lower().endswith(MUSIC_EXTS) and os.path.isfile(os.path.join(MUSIC_DIR, fn)):
+                files.append({"name": fn, "url": url_for("api_music_file", name=fn)})
+    return jsonify({"files": files})
+
+
+@app.route("/api/music/<path:name>")
+def api_music_file(name):
+    base = os.path.realpath(MUSIC_DIR)
+    path = os.path.realpath(os.path.join(base, name))
+    if not path.startswith(base + os.sep) or not os.path.isfile(path):
+        abort(404)
+    if not path.lower().endswith(MUSIC_EXTS):
+        abort(404)
+    return send_file(path, conditional=True)   # Range support for streaming
+
+
+# --------------------------------------------------------------------------
 # Config editor
 # --------------------------------------------------------------------------
 

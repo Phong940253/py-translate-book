@@ -6,7 +6,7 @@
                           refreshed in the background)
    - state/annotations/search, POST/PUT, TTS audio → network only. */
 
-var CACHE = 'pytb-v8';
+var CACHE = 'pytb-v9';
 var KEEP = 240;                       // runtime entries (chapter docs, images)
 var ASSET_RX = /\/static\/|\/manifest\.webmanifest$|\/favicon/;
 var CONTENT_RX = /\/api\/reader\/(meta|toc|doc|chapter|image)\?|\/books\/cover\?|\/api\/library\?/;
@@ -45,6 +45,7 @@ self.addEventListener('fetch', function (e) {
   var req = e.request;
   if (req.method !== 'GET') return;                    // state/ann writes → net
   if (req.url.indexOf('/api/tts') >= 0) return;        // WAV blobs: never cache
+  if (req.url.indexOf('/api/music') >= 0) return;      // audio files: straight to net
   if (new URL(req.url).origin !== self.location.origin) return;
 
   if (ASSET_RX.test(new URL(req.url).pathname)) {

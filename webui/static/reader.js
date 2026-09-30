@@ -1923,7 +1923,7 @@
       var pb = el('rd-open-' + prev);
       if (pb) { try { pb.focus(); } catch (e) { /* inert */ } }
     }
-    if (open === 'tts') warmVoices();
+    if (open === 'tts') { warmVoices(); bgmList(); }
     if (open === 'toc') { markToc(); renderStats(); }
     if (open === 'search') {
       var qi = el('rd-search-q');
@@ -2675,6 +2675,156 @@
     if (speak.on) speakStop(true);
   }
 
+  /* ------------------------------------------------------ background music
+     The soundtrack runs on its OWN AudioContext (never the TTS player's):
+     pause / stop / speed changes of the read-aloud cannot touch it, so on a
+     phone that cannot play the story and a music app at the same time one
+     continuous background track plays under the reading. Volume sits on a
+     gain node below the voice (default 25%) and the loop is scheduled at
+     playbackRate 1.0 — the read-speed slider never changes its tempo. */
+  var bgmKey = 'rd.bgm';
+  var bgm = { ctx: null, gain: null, src: null, buf: null, bufFile: null,
+    on: false, want: false, loading: false, file: null, vol: 25, files: [] };
+
+  function bgmSave() { saveJSON(bgmKey, { file: bgm.file, vol: bgm.vol }); }
+
+  function bgmNote(text, cls) {
+    var n = el('rd-music-note');
+    if (!n) return;
+    n.textContent = text || '';
+    n.className = 'muted small' + (cls ? ' ' + cls : '');
+  }
+
+  function bgmRender() {
+    var btn = el('rd-music-play'), lab = el('rd-music-play-l');
+    if (btn) btn.setAttribute('aria-pressed', String(bgm.on || bgm.want));
+    if (lab) lab.textContent = i18n((bgm.on || bgm.want) ? 'read.music_stop' : 'read.music_play');
+  }
+
+  function bgmCtx() {
+    if (bgm.ctx) return bgm.ctx;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    bgm.ctx = new AC();
+    bgm.gain = bgm.ctx.createGain();
+    bgm.gain.gain.value = bgm.vol / 100;
+    bgm.gain.connect(bgm.ctx.destination);
+    return bgm.ctx;
+  }
+
+  function bgmUrl(name) {
+    var hit = bgm.files.filter(function (f) { return f.name === name; })[0];
+    return hit ? hit.url : null;
+  }
+
+  function bgmList() {
+    if (!R.musicUrl) return;
+    getJSON(R.musicUrl).then(function (data) {
+      bgm.files = (data && data.files) || [];
+      var sel = el('rd-music-file');
+      if (!sel) return;
+      sel.textContent = '';
+      if (!bgm.files.length) {
+        var none = document.createElement('option');
+        none.value = '';
+        none.textContent = i18n('read.music_none');
+        sel.appendChild(none);
+        sel.disabled = true;
+        bgmNote(i18n('read.music_empty'));
+        return;
+      }
+      sel.disabled = false;
+      bgm.files.forEach(function (f) {
+        var o = document.createElement('option');
+        o.value = f.name;
+        o.textContent = f.name;
+        sel.appendChild(o);
+      });
+      if (!bgm.file || !bgm.files.some(function (f) { return f.name === bgm.file; })) {
+        bgm.file = bgm.files[0].name;
+      }
+      sel.value = bgm.file;
+      if (bgm.on && bgm.bufFile !== bgm.file) {   // selection changed elsewhere
+        bgmStop();
+        bgm.buf = null;
+        bgmPlay();
+      }
+    }).catch(function (e) {
+      bgmNote(i18n('read.music_err') + ' ' + e.message, 'error');
+    });
+  }
+
+  function bgmSchedule() {
+    var ctx = bgm.ctx;
+    if (!ctx || !bgm.buf) return;
+    if (bgm.src) { try { bgm.src.stop(0); } catch (e) { /* already ended */ } }
+    var src = ctx.createBufferSource();
+    src.buffer = bgm.buf;
+    src.loop = true;
+    src.connect(bgm.gain);
+    src.start(0);
+    bgm.src = src;
+    bgm.on = true;
+    bgm.loading = false;
+    bgmRender();
+    bgmNote('');
+  }
+
+  function bgmPlay() {
+    var ctx = bgmCtx();
+    if (!ctx) { bgmNote(i18n('read.music_err') + ' AudioContext', 'error'); return; }
+    if (!bgm.file || !bgmUrl(bgm.file)) { bgmNote(i18n('read.music_none')); return; }
+    if (ctx.state === 'suspended') { var r = ctx.resume(); if (r && r.catch) r.catch(noop); }
+    bgm.want = true;
+    bgmRender();
+    if (bgm.buf && bgm.bufFile === bgm.file) { bgmSchedule(); return; }
+    if (bgm.loading) return;
+    bgm.loading = true;
+    bgmNote(i18n('read.music_loading'));
+    var url = bgmUrl(bgm.file), wantFile = bgm.file;
+    fetch(url).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.arrayBuffer();
+    }).then(function (ab) {
+      return new Promise(function (resolve, reject) {
+        ctx.decodeAudioData(ab, resolve, reject);   // promise-less on old WebKit
+      });
+    }).then(function (buf) {
+      bgm.loading = false;
+      if (!bgm.want || bgm.file !== wantFile) return;   // stopped/switched meanwhile
+      bgm.buf = buf;
+      bgm.bufFile = wantFile;
+      bgmSchedule();
+    }).catch(function (e) {
+      bgm.loading = false;
+      bgm.want = false;
+      bgmRender();
+      bgmNote(i18n('read.music_err') + ' ' + e.message, 'error');
+    });
+  }
+
+  function bgmStop() {
+    bgm.want = false;
+    if (bgm.src) { try { bgm.src.stop(0); } catch (e) { /* already ended */ } bgm.src = null; }
+    bgm.on = false;
+    bgmRender();
+  }
+
+  function bgmToggle() {
+    if (bgm.on || bgm.want) bgmStop();
+    else bgmPlay();
+  }
+
+  function bgmSetVol(v) {
+    bgm.vol = clamp(Math.round(Number(v) || 0), 0, 100);
+    var lab = el('rd-music-vol-v');
+    if (lab) lab.textContent = bgm.vol + '%';
+    if (bgm.gain) bgm.gain.gain.value = bgm.vol / 100;
+    bgmSave();
+  }
+
+  window.__rd.bgm = bgm;   // test hook (declared after the module initializes)
+
   /* ------------------------------------------- fullscreen / chrome hide */
   var hideT = 0;
 
@@ -3132,6 +3282,25 @@
       speak.gen++;
       saveJSON(ttsKey, ttsCfg);
     });
+    // background music: own toggle + own volume (never follows the read rate)
+    var mvol = el('rd-music-vol');
+    if (mvol) {
+      mvol.value = bgm.vol;
+      var mvolV = el('rd-music-vol-v');
+      if (mvolV) mvolV.textContent = bgm.vol + '%';
+      mvol.addEventListener('input', function () { bgmSetVol(this.value); });
+    }
+    var mplay = el('rd-music-play');
+    if (mplay) mplay.addEventListener('click', bgmToggle);
+    var mfile = el('rd-music-file');
+    if (mfile) mfile.addEventListener('change', function () {
+      var wasOn = bgm.on || bgm.want;
+      bgm.file = this.value;
+      bgm.buf = null;
+      bgm.bufFile = null;
+      bgmSave();
+      if (wasOn) { bgmStop(); bgmPlay(); }   // switch track live
+    });
     var play = el('rd-tts-play');
     if (play) play.addEventListener('click', function () {
       if (speak.on && speak.paused) { speakResume(); return; }
@@ -3276,6 +3445,11 @@
     var localPos = loadJSON(posKey, null);
     var savedTts = loadJSON(ttsKey, null);
     if (savedTts) ttsCfg = Object.assign(ttsCfg, savedTts);
+    var savedBgm = loadJSON(bgmKey, null);
+    if (savedBgm) {
+      if (typeof savedBgm.file === 'string') bgm.file = savedBgm.file;
+      if (savedBgm.vol !== undefined && !isNaN(Number(savedBgm.vol))) bgm.vol = clamp(Number(savedBgm.vol), 0, 100);
+    }
     if (settings.family === 'custom') settings.family = 'serif';  // font is session-only
 
     applySettings();

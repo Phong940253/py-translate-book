@@ -455,6 +455,58 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("rd-panel-ann", body)
         self.assertIn("rd-selpop", body)
 
+    def test_read_page_bootstraps_background_music(self):
+        """The reader gets a music endpoint + its own controls in the TTS panel."""
+        path = self._reader_epub()
+        with self._warm_noop():
+            r = self.client.get("/read?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("musicUrl", body)
+        self.assertIn('id="rd-music-file"', body)
+        self.assertIn('id="rd-music-vol"', body)
+        self.assertIn('id="rd-music-play"', body)
+        self.assertIn('id="rd-music-note"', body)
+
+    def test_music_list_creates_folder_and_filters_extensions(self):
+        music_dir = os.path.join(self.tmp, "music")
+        with mock.patch.object(webui_app, "MUSIC_DIR", music_dir):
+            r = self.client.get("/api/music")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.get_json(), {"files": []})
+            self.assertTrue(os.path.isdir(music_dir), "empty folder is auto-created")
+
+            with open(os.path.join(music_dir, "BGM One.MP3"), "wb") as fh:
+                fh.write(b"\xff\xfb" + b"m" * 32)
+            with open(os.path.join(music_dir, "readme.txt"), "w", encoding="utf-8") as fh:
+                fh.write("not audio")
+            r = self.client.get("/api/music")
+            files = r.get_json()["files"]
+            self.assertEqual([f["name"] for f in files], ["BGM One.MP3"])
+            self.assertEqual(files[0]["url"], "/api/music/BGM%20One.MP3")
+
+    def test_music_file_serves_audio_and_refuses_traversal(self):
+        music_dir = os.path.join(self.tmp, "music")
+        os.makedirs(music_dir, exist_ok=True)
+        payload = b"\xff\xfb" + b"music-bytes" * 8
+        with open(os.path.join(music_dir, "bgm.mp3"), "wb") as fh:
+            fh.write(payload)
+        with open(os.path.join(music_dir, "notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("nope")
+        with open(os.path.join(self.tmp, "outside.mp3"), "wb") as fh:
+            fh.write(b"secret")
+
+        with mock.patch.object(webui_app, "MUSIC_DIR", music_dir):
+            r = self.client.get("/api/music/bgm.mp3")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.data, payload)
+
+            # wrong extension → 404
+            self.assertEqual(self.client.get("/api/music/notes.txt").status_code, 404)
+            # escaping the folder (backslash and slash forms) → 404, never a leak
+            self.assertEqual(self.client.get("/api/music/..%5Coutside.mp3").status_code, 404)
+            self.assertEqual(self.client.get("/api/music/sub/..%2Foutside.mp3").status_code, 404)
+
     def test_reader_search_scans_all_chapters(self):
         path = self._reader_multi_epub("_test_reader_search.epub")
 

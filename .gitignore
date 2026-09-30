@@ -95,3 +95,8 @@ opencode.json
 # =====================
 *.orig
 *.rules.json.bak-*
+
+# =====================
+# Local background-music folder (user's audio files, never committed)
+# =====================
+music/
