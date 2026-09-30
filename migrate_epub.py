@@ -470,14 +470,14 @@ EPUB_FIX = {
     "Tô Miêu Miêu": "Tô Diệu Diệu",
     "Tô Miểu Miểu": "Tô Diệu Diệu",
     "Tô Miệu Miệu": "Tô Diệu Diệu",
-    "Tô Mộ Mộ": "Tô Diệu Diệu",
-    "Tô Mụ Mụ": "Tô Diệu Diệu",
+    "Tô Mộ Mộ": "mẹ Tô",
+    "Tô Mụ Mụ": "mẹ Tô",
     # 小秋 / 楚澜 / 高强 / 曹爽
     "Tiểu Khẩu": "Tiểu Thu",
     "Sở Lam": "Sở Lan",
     "Cao Khương": "Cao Cường",
     "Cao Thường": "Cao Cường",
-    "Cao Sướng": "Tào Sảng",
+    "Cao Sướng": "Cao Cường",
     "Tào Sương": "Tào Sảng",
     # ---- CJK punctuation / kana residue ----
     "rốtはや": "rốt cuộc",
@@ -499,6 +499,102 @@ EPUB_FIX = {
     "Xia": "Hạ",
     "Zheng": "Trịnh",
     "Xu": "Từ",
+    # ---- run-2 glue family (checkpoint chapters; CN source verified) --------
+    # mirrors of rules that existed only in simplified/other variants:
+    "錦程": "Cẩm Trình",                  # Chung錦程 -> Chung Cẩm Trình
+    "Liễu望春": "Liễu Vọng Xuân",
+    "La薇": "La Vi",
+    "thím徐": "Cô Từ",
+    "Thím徐": "Cô Từ",
+    "Lân冬": "Lân Đông",                  # inside Long Lân冬
+    "Lâm黛玉": "Lâm Đại Ngọc",
+    "Trần呈": "Trần Trình",               # 呈 read as trình
+    "Thanh璇": "Thanh Tuyền",             # Lý Thanh璇
+    "Lục曹": "Lục Tào",                   # Lục曹 thị
+    "Lệ姐": "Chị Lệ",
+    "Nam主任": "Nam chủ nhiệm",           # CN男主任 — a role, not a name
+    "连载": "đăng theo kỳ",
+    "\u9023载": "đăng theo kỳ",           # 連载 (traditional) body variant
+    # user-approved choices:
+    "Bạch犀": "Bạch Kê",                  # CN白犀 noodle brand (ch650)
+    "đại ngoại甥": "thằng cháu lớn",      # CN大外甥 (ch741)
+    # remaining name glue:
+    "Lý 博文": "Lý Bắc Văn",
+    "Tiểu秋": "Tiểu Thu",
+    "Tiểu Kh秋": "Tiểu Thu",
+    "Lục窦Tình": "Lục Đậu Tình",
+    "Dật彬": "Dật Bân",
+    "Hoa盈": "Hoa Doanh",                 # 花楹 role in仙剑三
+    "Sảng子": "Sảng tử",
+    "A Tr程": "A Trình",
+    "Tiểu Ph芬": "Tiểu Fin",              # CN小芬芬, pun on Finkel
+    "Tiểu L梨": "Tiểu Lê",
+    "Lương爹": "Bố Lương",
+    "Đại di妈": "Đại dì",                 # CN大姨妈 joke (ch649)
+    "Đông冬": "Đông Đông",                # CN冬冬 reduplication
+    "Đông嘿嘿嘿": "Đông hehehe",
+    "春春": "Xuân Xuân",                  # Liễu Vọng Xuân's nickname
+    "钟宝": "Chung Bảo",                  # chat nicknames (ch491..494)
+    "薇宝": "Vi Bảo",
+    "L骆": "Lạc",                         # matches existing "Cô Lạc"
+    "tiểu蘿lợi": "tiểu loli",             # CN小萝莉
+    "Tào倩倩": "Tào Thiến Thiến",
+    "Đinh婉君": "Đinh Uyển Quân",
+    "Vĩnh\u8cb4": "Vĩnh Quý",             # Trần Vĩnh貴 -> Trần Vĩnh Quý
+    "Đại Băng Ch钟": "Đại Băng Chung",    # canon already ships x12
+    "程 và 薇": "Trình và Vi",
+    "cười憨": "cười hồn",                 # CN憨厚 -> hồn hậu
+    "hình如": "hình như",
+    ",导员Cường": ", cố vấn Cường",       # house style: "của导员" -> "của cố vấn"
+    # remaining word glue:
+    "贴吧": "diễn đàn",
+    "không拿出": "không đưa ra được",
+    "题目": "đề bài",
+    "nghĩ思路": "nghĩ cách giải",
+    "付出": "cống hiến",
+    "吐槽": "chê",                        # house style: "muốn吐槽" -> "muốn chê"
+    "trương\u8abf": "cao điệu",           # trương調 (traditional調)
+    "cao\u8c03": "cao điệu",              # cao调
+    "ghế s沙发": "ghế sofa",
+    "幸灾乐祸 (họa vô đơn chí/vui trên nỗi đau của người khác)":
+        "vui trên nỗi đau của người khác",
+    "thế外桃源": "thế ngoại đào nguyên",
+    "phòng患于未然 (phòng bệnh hơn chữa bệnh)": "phòng bệnh hơn chữa bệnh",
+    "đa tình tự作多情": "tự đa tình",
+    "được交代": "được nêu rõ",
+    "Cô全程 gật đầu": "Suốt buổi cô chỉ gật đầu",
+    "chẳng lẽ一般 đều đại diện cho": "thường có nghĩa là",
+    "cậu复学复.lại": "cậu quay lại",
+    "Truyền T传媒": "Truyền Thông",
+    "tự lập门户": "tự lập nghiệp",
+    "ân o怨 hận": "ân oán thù hận",
+    "đại c舅anh": "anh vợ",
+    "cáo\u8fad": "cáo từ",                # cáo辭 (traditional辞)
+    "tướng phu妻": "tướng vợ chồng",
+    "đại\u8166": "bộ não",                # đại não (traditional腦)
+    "quân训 (quân sự)": "quân sự",
+    # leftovers found by run-2 dry pass:
+    "Thanh S葱": "Thanh Thông",           # 青葱咖啡店 (CN ch458)
+    "Lục thị集团": "tập đoàn Lục thị",     # 陆氏集团 (CN ch469)
+    "phú婆": "phú bà",                    # 小富婆
+    "劳资……蜀道山": "Tao đếm tới ba",      # 蜀道山 = 数到三 (CN ch552)
+    "劳资蜀道山": "Tao đếm tới ba",
+    "“呃……”": "“Ờ……”",
+    "“妙” (Diệu)": "“Diệu”",              # cup label ch707
+    "\"妙\"": "\"Diệu\"",                 # costume labels ch670
+    "口碑": "danh tiếng",                  # CN ch665 口碑发酵
+    "Nông夫山泉 (Nông Phu Sơn Tuyền)": "Nông Phu Sơn Tuyền",  # CN ch774
+    # canon splits backed by ...translated.rules.json (canonical:count vs variant:count):
+    "Lục Đấu Tình": "Lục Đậu Tình",       # 陆窦晴 — 314 vs 9
+    "Lục Tào Thị": "Lục Tào thị",         # 陆曹氏 — 115 vs 0
+    "Đại Thúc": "Đại thúc",               # canonical — 60 vs 0
+    # brand夏一碗面 -> canon "Mì Hạ Nhất Uyển":
+    "mỳ Tô Nhất V碗": "mì Hạ Nhất Uyển",
+    "mì Nhất Uy碗": "mì Hạ Nhất Uyển",
+    "Mì Hạ Nhất V碗": "Mì Hạ Nhất Uyển",
+    "mì Hạ Nhất M碗": "mì Hạ Nhất Uyển",
+    "Hạ Nhất V碗 面": "Mì Hạ Nhất Uyển",
+    '"夏一碗面" (Mì một tô nhà họ Hạ)': '"Mì Hạ Nhất Uyển"',
 }
 REPL.update(EPUB_FIX)
 
