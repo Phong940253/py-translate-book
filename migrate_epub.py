@@ -489,7 +489,7 @@ EPUB_FIX = {
     "Dong": "Đông",
     "Qin": "Tần",
     "Qiang": "Cường",
-    "Li": "Lý",
+    "Li": "Lệ",
     # single-token surnames / roles (word-boundary matched, see _ascii_word_pat)
     "Lu": "Lục",
     "Liu": "Lưu",
@@ -588,6 +588,9 @@ EPUB_FIX = {
     "Lục Đấu Tình": "Lục Đậu Tình",       # 陆窦晴 — 314 vs 9
     "Lục Tào Thị": "Lục Tào thị",         # 陆曹氏 — 115 vs 0
     "Đại Thúc": "Đại thúc",               # canonical — 60 vs 0
+    # same family: ASCII "Long Lian" never fired on "Long Lianyong" because
+    # _ascii_word_pat blocks the trailing "y" — name = CN龙怜冬, canon x696
+    "Long Lianyong": "Long Lân Đông",      # 46 occurrences, ch579..675
     # brand夏一碗面 -> canon "Mì Hạ Nhất Uyển":
     "mỳ Tô Nhất V碗": "mì Hạ Nhất Uyển",
     "mì Nhất Uy碗": "mì Hạ Nhất Uyển",
