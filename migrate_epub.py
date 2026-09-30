@@ -334,6 +334,7 @@ EPUB_FIX = {
     "Trịnh Dĩ Phong": "Trịnh Nhất Phong",
     "Trịnh Dật Phong": "Trịnh Nhất Phong",
     "Trịnh Hữu Phong": "Trịnh Nhất Phong",
+    "Trịnh Hưng Phong": "Trịnh Nhất Phong",   # ch512/600 wrote 兴-style reading
     "Trịnh Tường": "Trịnh Nhất Phong",
     "Trương Wen Jun": "Trương Văn Quân",
     "Trương Li": "Trương Lệ",
