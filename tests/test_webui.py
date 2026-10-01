@@ -1506,6 +1506,10 @@ class TestWebUI(unittest.TestCase):
             'id="diffWrap"',
             'id="diffSource"',
             'id="diffTrans"',
+            'id="rulesChapter"',
+            'id="rulesFilter"',
+            'id="rulesAll"',
+            'id="rulesMeta"',
             'id="log"',
             'id="progress"',
             'id="bar"',
@@ -1520,6 +1524,83 @@ class TestWebUI(unittest.TestCase):
         # An interrupted job offers resume, not stop.
         self.assertIn(f'action="/jobs/{job.id}/resume"', body)
         self.assertNotIn(f'action="/jobs/{job.id}/stop"', body)
+
+    def test_job_rules_endpoint_scopes_to_a_chapter(self):
+        """?chapter=N returns only the characters that chapter's analysis
+        named (the full dictionary + every analysis is ~1MB of JSON)."""
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        rules_path = os.path.splitext(self.out)[0] + ".rules.json"
+        with open(rules_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "characters": {
+                        "Bạch Thanh Hạ": {
+                            "names": ["Bạch Thanh Hạ"],
+                            "calls": {"Lục Viễn Thu": "tôi - anh"},
+                            "pronouns": {},
+                            "notes": "",
+                        },
+                        "Lục Viễn Thu": {
+                            "names": ["Lục Viễn Thu"],
+                            "calls": {"Bạch Thanh Hạ": "em - tôi"},
+                            "pronouns": {},
+                            "notes": "",
+                        },
+                        "Người lạ": {
+                            "names": ["Người lạ"],
+                            "calls": {},
+                            "pronouns": {},
+                            "notes": "",
+                        },
+                    },
+                    "narration_defaults": {"Bạch Thanh Hạ": "hắn"},
+                    "fallback": "tôi - người khác",
+                    "_chapter_analyses": {
+                        "5": (
+                            "1) Characters: Bạch Thanh Hạ, Lục Viễn Thu\n"
+                            "Bạch Thanh Hạ -> Lục Viễn Thu: tôi - anh"
+                        ),
+                    },
+                },
+                fh,
+                ensure_ascii=False,
+            )
+
+        # Full payload (no chapter) — unchanged behaviour.
+        data = self.client.get(f"/api/jobs/{job.id}/rules").get_json()
+        self.assertEqual(
+            set(data["characters"]),
+            {"Bạch Thanh Hạ", "Lục Viễn Thu", "Người lạ"},
+        )
+        self.assertIsNone(data["meta"]["chapter"])
+        self.assertEqual(data["meta"]["total_characters"], 3)
+        self.assertIn("5", data["analyses"])
+
+        # Scoped payload: only chapter 5's characters + only its analysis.
+        data = self.client.get(f"/api/jobs/{job.id}/rules?chapter=5").get_json()
+        self.assertEqual(set(data["characters"]), {"Bạch Thanh Hạ", "Lục Viễn Thu"})
+        self.assertNotIn("Người lạ", data["characters"])
+        self.assertEqual(data["meta"]["chapter"], 5)
+        self.assertEqual(data["meta"]["returned_characters"], 2)
+        self.assertTrue(data["meta"]["has_analysis"])
+        self.assertEqual(set(data["analyses"]), {"5"})
+        self.assertEqual(data["fallback"], "tôi - người khác")
+
+        # A chapter never analysed → empty subset, but still a well-formed 200.
+        data = self.client.get(f"/api/jobs/{job.id}/rules?chapter=999").get_json()
+        self.assertEqual(data["characters"], {})
+        self.assertEqual(data["analyses"], {})
+        self.assertFalse(data["meta"]["has_analysis"])
+        self.assertEqual(data["meta"]["total_characters"], 3)
+
+        # Bad chapter parameter is rejected, not silently ignored.
+        r = self.client.get(f"/api/jobs/{job.id}/rules?chapter=abc")
+        self.assertEqual(r.status_code, 400)
+
+        # Unknown job stays a 404.
+        self.assertEqual(self.client.get("/api/jobs/nope/rules").status_code, 404)
 
     def test_job_view_page_localized(self):
         job = self.registry.create(

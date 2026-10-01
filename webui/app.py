@@ -218,25 +218,66 @@ def api_job_rules(job_id):
         return jsonify({"error": "no output path"}), 404
     rules_path = os.path.splitext(output)[0] + ".rules.json"
     if not os.path.exists(rules_path):
-        return jsonify({"characters": {}, "narration_defaults": {}, "fallback": ""})
+        return jsonify({
+            "characters": {},
+            "narration_defaults": {},
+            "fallback": "",
+            "meta": {
+                "chapter": None,
+                "total_characters": 0,
+                "returned_characters": 0,
+                "has_analysis": False,
+            },
+        })
+    chapter_arg = request.args.get("chapter")
+    chapter: int | None = None
+    if chapter_arg not in (None, ""):
+        try:
+            chapter = int(chapter_arg)
+        except (TypeError, ValueError):
+            return jsonify({"error": "bad chapter"}), 400
+
     try:
         from translator.global_rules import GlobalRulesManager
         mgr = GlobalRulesManager(rules_path)
         mgr.load()
         state = mgr.state
+        only = None
+        analysis = None
+        if chapter is not None:
+            # Scope to the characters this chapter's own analysis named — a
+            # long book accumulates thousands of rules and 1MB of analyses.
+            analysis = mgr.get_raw_analysis(chapter)
+            only = (
+                mgr.chars_in_analysis(analysis, known=set(state.characters))
+                if analysis
+                else set()
+            )
+        chars = {
+            name: {
+                "names": entry.names,
+                "calls": entry.calls,
+                "pronouns": entry.pronouns,
+                "notes": entry.notes,
+            }
+            for name, entry in state.characters.items()
+            if only is None or name in only
+        }
         return jsonify({
-            "characters": {
-                name: {
-                    "names": entry.names,
-                    "calls": entry.calls,
-                    "pronouns": entry.pronouns,
-                    "notes": entry.notes,
-                }
-                for name, entry in state.characters.items()
-            },
+            "characters": chars,
             "narration_defaults": state.narration_defaults,
             "fallback": state.fallback,
-            "analyses": mgr.get_all_analyses(),
+            "analyses": (
+                ({str(chapter): analysis} if analysis else {})
+                if chapter is not None
+                else mgr.get_all_analyses()
+            ),
+            "meta": {
+                "chapter": chapter,
+                "total_characters": len(state.characters),
+                "returned_characters": len(chars),
+                "has_analysis": analysis is not None,
+            },
         })
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

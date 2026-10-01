@@ -6,7 +6,7 @@
                           refreshed in the background)
    - state/annotations/search, POST/PUT, TTS audio → network only. */
 
-var CACHE = 'pytb-v9';
+var CACHE = 'pytb-v10';
 var KEEP = 240;                       // runtime entries (chapter docs, images)
 var ASSET_RX = /\/static\/|\/manifest\.webmanifest$|\/favicon/;
 var CONTENT_RX = /\/api\/reader\/(meta|toc|doc|chapter|image)\?|\/books\/cover\?|\/api\/library\?/;

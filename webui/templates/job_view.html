@@ -68,6 +68,14 @@ window.APP.jobData = {
     </div>
   </div>
   <div id="rulesView" class="mt" hidden>
+    <div class="rules-filter">
+      <label class="muted small" for="rulesChapter">{{ t('job.rules_chapter') }}</label>
+      <input id="rulesChapter" class="search-input" type="number" min="1" step="1"
+             inputmode="numeric" autocomplete="off">
+      <button id="rulesFilter" type="button" class="btn btn-ghost btn-sm">{{ t('job.rules_apply') }}</button>
+      <button id="rulesAll" type="button" class="btn btn-ghost btn-sm">{{ t('job.rules_all') }}</button>
+      <span id="rulesMeta" class="muted small"></span>
+    </div>
     <div id="rulesContent" class="rules-container"></div>
   </div>
 </section>

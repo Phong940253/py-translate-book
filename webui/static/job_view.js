@@ -217,11 +217,14 @@
 
   // ── Rules view ─────────────────────────────────────────────────
   var rulesContent = document.getElementById('rulesContent');
+  var rulesMeta = document.getElementById('rulesMeta');
   var rulesLoaded = false;
+  var rulesChapter = null;   // null → every chapter (payload can be 1MB+)
 
   function fetchRules() {
     if (!data.id || rulesLoaded) return;
     var url = '/api/jobs/' + data.id + '/rules';
+    if (rulesChapter !== null) url += '?chapter=' + encodeURIComponent(rulesChapter);
     var xhr = new XMLHttpRequest();
     xhr.open('GET', url);
     xhr.onload = function () {
@@ -236,6 +239,16 @@
     xhr.send();
   }
 
+  // Re-fetch with (or without) a chapter scope: characters that chapter's
+  // analysis named + that one analysis, instead of the whole dictionary.
+  function setRulesChapter(chapter) {
+    rulesChapter = chapter;
+    rulesLoaded = false;
+    var input = document.getElementById('rulesChapter');
+    if (input) input.value = chapter === null ? '' : String(chapter);
+    fetchRules();
+  }
+
   function renderRules(rules) {
     if (!rulesContent) return;
     rulesContent.textContent = '';
@@ -244,12 +257,27 @@
     var narration = rules.narration_defaults || {};
     var fallback = rules.fallback || '';
     var analyses = rules.analyses || {};
+    var meta = rules.meta || {};
+
+    if (rulesMeta) {
+      var bits = [];
+      if (meta.chapter !== null && meta.chapter !== undefined) {
+        bits.push('chapter ' + meta.chapter);
+      }
+      if (meta.returned_characters !== undefined) {
+        bits.push(meta.returned_characters + '/' + meta.total_characters + ' chars');
+      }
+      if (meta.chapter && meta.has_analysis === false) bits.push('no analysis yet');
+      rulesMeta.textContent = bits.join(' · ');
+    }
 
     // Empty state
     if (Object.keys(chars).length === 0) {
       var empty = document.createElement('p');
       empty.className = 'muted';
-      empty.textContent = 'No rules yet — rules are generated as chapters are translated.';
+      empty.textContent = (rulesChapter !== null)
+        ? 'No rules recorded for chapter ' + rulesChapter + '.'
+        : 'No rules yet — rules are generated as chapters are translated.';
       rulesContent.appendChild(empty);
       return;
     }
@@ -368,6 +396,20 @@
     document.getElementById('btnRules').addEventListener('click', function () {
       show('rules');
       fetchRules();
+    });
+  }
+
+  if (document.getElementById('rulesFilter')) {
+    var rulesChapterInput = document.getElementById('rulesChapter');
+    document.getElementById('rulesFilter').addEventListener('click', function () {
+      var value = parseInt(rulesChapterInput.value, 10);
+      setRulesChapter(isNaN(value) || value < 1 ? null : value);
+    });
+    document.getElementById('rulesAll').addEventListener('click', function () {
+      setRulesChapter(null);
+    });
+    rulesChapterInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') document.getElementById('rulesFilter').click();
     });
   }
 

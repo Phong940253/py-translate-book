@@ -242,6 +242,15 @@ class Translator:
         self.rules_max_chars = max(
             200, int(consistency_config.get("rules_max_chars", 1200))
         )
+        # <CHAPTER_RULES> budget: the accumulated dictionary grows with every
+        # chapter (78k+ characters on a long book) — cap it and, when a
+        # chapter's own analysis says who is in it, render only those.
+        self.rules_prompt_max_chars = max(
+            200, int(consistency_config.get("rules_prompt_max_chars", 12000))
+        )
+        self.rules_filter_by_chapter = bool(
+            consistency_config.get("rules_filter_by_chapter", True)
+        )
         self.cache_chapter_rules = bool(consistency_config.get("cache_chapter_rules", True))
 
         # Global cross-chapter rules manager (persists character dictionary
@@ -840,29 +849,51 @@ class Translator:
     ) -> str:
         """Analyze chapter for addressing rules and merge into global state.
 
-        Returns the merged global rules text (for prompt injection).
-        If global_rules is disabled, returns chapter-local rules only.
+        Returns the prompt text to inject for this chapter: the characters
+        its own analysis found, inside ``rules_prompt_max_chars``.  A stored
+        analysis whose content hash matches skips the analysis LLM call.
         """
         if not self.consistency_enabled:
             return ""
 
+        chapter_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
+
         if not hasattr(self.engine, "analyze_chapter_consistency"):
             log_consistency_event("SKIP_ANALYSIS", "Engine does not support chapter analysis")
-            return ""
+            return self._render_chapter_rules(chapter_number)
 
-        chapter_hash = hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()
+        # Same chapter text analysed before → reuse it, no LLM call needed.
+        if self.global_rules and self.global_rules.has_analysis(chapter_number, chapter_hash):
+            stored = self.global_rules.get_analysis(chapter_number)
+            log_consistency_event(
+                "ANALYSIS_REUSED",
+                f"chapter={chapter_number} hash={chapter_hash[:12]}",
+            )
+            if self.cache_chapter_rules:
+                self._chapter_rules_cache[chapter_hash] = stored
+            return self._render_chapter_rules(chapter_number)
+
         if self.cache_chapter_rules and chapter_hash in self._chapter_rules_cache:
             log_consistency_event("RULES_CACHE_HIT", chapter_hash[:12])
-            return self._chapter_rules_cache[chapter_hash]
+            cached = self._chapter_rules_cache[chapter_hash]
+            if cached and self.global_rules and self.global_rules.get_analysis(
+                chapter_number
+            ) != cached:
+                self.global_rules.merge_from_analysis(
+                    cached, chapter_number, content_hash=chapter_hash
+                )
+                self.global_rules.save()
+            return self._render_chapter_rules(chapter_number)
 
         # Build context: include existing global rules so the LLM knows
-        # what has already been established for prior chapters.
+        # what has already been established for prior chapters — budgeted,
+        # the full dictionary can dwarf the chapter excerpt itself.
         existing_context = ""
         if self.global_rules and self.global_rules.character_count > 0:
             existing_context = (
                 "\n\nEXISTING GLOBAL RULES (from previous chapters — "
                 "keep these and only ADD new information):\n"
-                + self.global_rules.to_prompt_text()
+                + self.global_rules.to_prompt_text(budget=self.rules_prompt_max_chars)
             )
 
         excerpt = content[: self.analysis_max_chars]
@@ -880,20 +911,54 @@ class Translator:
 
                 # Merge into global rules (cross-chapter memory)
                 if self.global_rules:
-                    self.global_rules.merge_from_analysis(rules, chapter_number)
+                    self.global_rules.merge_from_analysis(
+                        rules, chapter_number, content_hash=chapter_hash
+                    )
                     self.global_rules.save()
                     log_consistency_event(
                         "GLOBAL_RULES_MERGED",
                         f"chapter={chapter_number} chars={self.global_rules.character_count}",
                     )
-                    # Return the accumulated global rules, not just this chapter's
-                    return self.global_rules.to_prompt_text()
-
-            return rules
+            # Same render on every path (fresh, cached, failed) so the prompt
+            # and the translation cache key stay identical across runs.
+            return self._render_chapter_rules(chapter_number)
         except Exception as error:
             logging.warning(f"Chapter analysis failed, fallback to normal translation: {error}")
             log_consistency_event("ANALYSIS_FAILED", str(error))
+            return self._render_chapter_rules(chapter_number)
+
+    def _render_chapter_rules(self, chapter_number: int | None = None) -> str:
+        """<CHAPTER_RULES> text for one chapter.
+
+        Scoped to the characters its own analysis named (rules about anyone
+        else are noise for this chapter) and capped at
+        ``rules_prompt_max_chars``; with no analysis available the budgeted
+        full dictionary is used so a chapter is never left without rules.
+        """
+        if not self.global_rules or self.global_rules.character_count == 0:
             return ""
+
+        only = None
+        if self.rules_filter_by_chapter and chapter_number is not None:
+            analysis = self.global_rules.get_analysis(chapter_number)
+            if analysis:
+                only = self.global_rules.chars_in_analysis(analysis) or None
+
+        text = self.global_rules.to_prompt_text(
+            only=only, budget=self.rules_prompt_max_chars
+        )
+        if text and only:
+            log_consistency_event(
+                "RULES_PROMPT",
+                f"chapter={chapter_number} chars={len(text)} scoped=yes "
+                f"global={len(self.global_rules.to_prompt_text())}",
+            )
+        elif text:
+            log_consistency_event(
+                "RULES_PROMPT",
+                f"chapter={chapter_number} chars={len(text)} scoped=no",
+            )
+        return text
 
     def _collect_previous_translated(self, translated: list[str], index: int) -> list[str]:
         if not self.consistency_enabled or self.previous_translated_window <= 0:

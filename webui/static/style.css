@@ -345,6 +345,8 @@ textarea.code {
 
 /* ── rules view ─────────────────────────────────────────────── */
 .rules-container { max-height: 400px; overflow-y: auto; }
+.rules-filter { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.rules-filter .search-input { width: 7.5em; }
 .rules-container h3 { margin: var(--sp-3) 0 var(--sp-1); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); }
 .rules-chars { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .rules-char-card {
