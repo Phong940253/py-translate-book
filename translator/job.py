@@ -59,7 +59,24 @@ def _save_checkpoint(checkpoint_path: str, checkpoint_data: dict) -> None:
     os.replace(temp_path, checkpoint_path)
 
 
-def _restore_existing_output_content(input_book, output_path: str) -> None:
+def _restore_existing_output_content(
+    input_book,
+    output_path: str,
+    translate_from: Optional[int] = None,
+    translate_to: Optional[int] = None,
+) -> None:
+    """Copy chapter documents from the existing output EPUB into ``input_book``.
+
+    ``translate_from``/``translate_to`` (1-based, inclusive) mark the chapters
+    this run is about to translate: those keep the ORIGINAL text of the input
+    epub, every other chapter (already finished, or outside the selected range)
+    is taken from the output file so a later ``save_epub`` does not wipe it.
+
+    The output copy of a chapter that still has to be done can be interrupted,
+    over-limit or simply bad — translating from it would feed the model an
+    already-translated text, so the diff pane shows the book compared with
+    itself and the untranslated/echo guard retries forever.
+    """
     if not os.path.exists(output_path):
         return
 
@@ -74,12 +91,34 @@ def _restore_existing_output_content(input_book, output_path: str) -> None:
     input_chapters = list(iter_chapters(input_book))
     output_chapters = list(iter_chapters(output_book))
 
+    # 0-based [first, last) of the chapters to be translated — never restored.
+    # No bounds given at all → nothing is pending, so restore everything.
+    if translate_from is None and translate_to is None:
+        first, last = 0, 0
+    else:
+        first = 0 if translate_from is None else max(0, int(translate_from) - 1)
+        last = (
+            len(input_chapters)
+            if translate_to is None
+            else max(0, int(translate_to))
+        )
+
     restored = 0
-    for input_item, output_item in zip(input_chapters, output_chapters):
+    for index, (input_item, output_item) in enumerate(
+        zip(input_chapters, output_chapters)
+    ):
+        if first <= index < last:
+            continue  # still to translate → keep the source text
         input_item.content = output_item.content
         restored += 1
 
-    logging.info("Restored %s chapter documents from existing output EPUB", restored)
+    logging.info(
+        "Restored %s chapter documents from existing output EPUB "
+        "(left chapters %s-%s untouched)",
+        restored,
+        translate_from,
+        translate_to,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +406,24 @@ def run_translation(
 
     last_completed_chapter = int(checkpoint_data.get("last_completed_chapter", 0) or 0)
 
-    if resume_enabled and last_completed_chapter >= start and os.path.exists(output):
-        _restore_existing_output_content(book, output)
-
     effective_start = (
         max(start, last_completed_chapter + 1) if resume_enabled else start
     )
+
+    # Reuse what the output file already holds — but only for chapters this
+    # run does NOT translate. The chapters from effective_start on must be
+    # read from the original input epub: their copy in the output can be
+    # truncated/half-written (interrupted job, limit hit) or an older, worse
+    # translation, and translating from that copy would diff the translation
+    # against itself and loop the echo guard forever.
+    if resume_enabled and last_completed_chapter >= start and os.path.exists(output):
+        _restore_existing_output_content(
+            book,
+            output,
+            translate_from=effective_start,
+            translate_to=end,
+        )
+
     selected_chapters = chapters[effective_start - 1:end]
 
     if resume_enabled and effective_start > start:

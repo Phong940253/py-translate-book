@@ -5,6 +5,7 @@ orchestration (chapter loop, save_epub, checkpoint, stats, progress_cb) works.
 """
 
 import io
+import json
 import os
 import shutil
 import sys
@@ -16,7 +17,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ebooklib import epub
 import ebooklib
 
-from translator.job import run_translation, _default_checkpoint_file, _load_checkpoint
+from translator.job import (
+    run_translation,
+    _default_checkpoint_file,
+    _load_checkpoint,
+    _restore_existing_output_content,
+)
+from translator.epub_utils import iter_chapters
 from translator.engines.base import TranslationEngine
 
 
@@ -136,6 +143,125 @@ class TestRunTranslationCore(unittest.TestCase):
         # effective_start = 3 (last_completed + 1) > end(2) -> nothing to do,
         # so engine.translated stays 0.
         self.assertEqual(engine.translated, 0)
+
+
+class RecordingEngine(TranslationEngine):
+    """Engine that remembers every source text it was handed."""
+
+    def __init__(self):
+        super().__init__(from_lang="EN", to_lang="VI")
+        self.seen = []
+
+    def supports_batch(self):
+        return False
+
+    def translate(self, text):
+        self.seen.append(text)
+        return text.replace("Hello", "Xin chào").replace("world", "thế giới")
+
+
+class TestResumeTranslatesFromTheOriginal(unittest.TestCase):
+    """A resumed run must read the chapters it still has to do from the INPUT.
+
+    The output file may hold an interrupted / over-limit / simply bad copy of
+    such a chapter (that is why the checkpoint gets reopened to redo it), and
+    translating from that copy compares the book with itself: the diff pane
+    shows an identical pair and the untranslated/echo guard loops forever.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.src = os.path.join(self.tmp, "in.epub")
+        self.out = os.path.join(self.tmp, "out.epub")
+        _make_epub(self.src, n_chapters=3)
+
+    def _chapters(self, path):
+        return list(iter_chapters(epub.read_epub(path)))
+
+    def _content(self, item):
+        return item.content.decode("utf-8")
+
+    def _run(self, engine):
+        return run_translation(
+            config={},
+            input=self.src,
+            output=self.out,
+            engine="openai",
+            engine_obj=engine,
+            from_chapter=1,
+            to_chapter=3,
+        )
+
+    def _set_last_completed(self, chapter):
+        cp = _default_checkpoint_file(self.out)
+        data = _load_checkpoint(cp)
+        data["last_completed_chapter"] = chapter
+        data.pop("completed", None)
+        with open(cp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+
+    def test_restore_keeps_the_source_of_chapters_still_to_do(self):
+        self._run(StubEngine())          # output now holds a translated copy
+        book = epub.read_epub(self.src)
+        before = {c.file_name: self._content(c) for c in iter_chapters(book)}
+        self.assertIn("Hello", before["ch3.xhtml"])
+
+        # chapter 3 is still to be translated → it must keep the source text
+        _restore_existing_output_content(
+            book, self.out, translate_from=3, translate_to=3
+        )
+        after = {c.file_name: self._content(c) for c in iter_chapters(book)}
+
+        self.assertIn("Xin chào", after["ch1.xhtml"])   # finished → output copy
+        self.assertIn("Xin chào", after["ch2.xhtml"])   # out of range → kept
+        self.assertEqual(after["ch3.xhtml"], before["ch3.xhtml"])  # untouched
+        self.assertNotIn("Xin chào", after["ch3.xhtml"])
+
+    def test_restore_without_a_range_still_restores_everything(self):
+        self._run(StubEngine())
+        book = epub.read_epub(self.src)
+        _restore_existing_output_content(book, self.out)
+        # only the story chapters — the nav document is never translated
+        restored = [
+            c for c in iter_chapters(book) if c.file_name.startswith("ch")
+        ]
+        self.assertEqual(len(restored), 3)
+        for chapter in restored:
+            self.assertIn("Xin chào", self._content(chapter))
+
+    def test_resumed_chapter_is_translated_from_the_input_epub(self):
+        self._run(StubEngine())          # full run: all 3 chapters translated
+        # Output is ahead of the checkpoint (the user reopened it to redo
+        # chapter 3, whose copy in the output is bad) — the real situation.
+        self._set_last_completed(2)
+
+        engine = RecordingEngine()
+        self._run(engine)
+
+        # The engine saw the original text, never the stored translation.
+        self.assertEqual(len(engine.seen), 1)
+        self.assertIn("Hello world chapter 3", engine.seen[0])
+        self.assertNotIn("Xin chào", engine.seen[0])
+
+        # ...and the chapters kept out of this run were not reverted to the
+        # source language by the save that follows.
+        stored = {c.file_name: self._content(c) for c in self._chapters(self.out)}
+        self.assertIn("Xin chào", stored["ch1.xhtml"])
+        self.assertIn("Xin chào", stored["ch2.xhtml"])
+        self.assertIn("Xin chào", stored["ch3.xhtml"])  # chapter 3 redone
+
+        # The engine actually produced output for that one chapter.
+        self.assertIn("chapter 3", engine.seen[0])
+
+    def test_resumed_chapter_is_not_the_stored_translation(self):
+        """Regression: before the fix the restored copy became the source."""
+        self._run(StubEngine())
+        self._set_last_completed(2)
+        engine = RecordingEngine()
+        self._run(engine)
+        for text in engine.seen:
+            self.assertNotIn("<p>Xin chào world chapter 3", text)
 
 
 if __name__ == "__main__":
