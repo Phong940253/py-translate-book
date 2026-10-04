@@ -13,7 +13,12 @@ from .html_utils import extract_html_content, split_html, split_html_with_metada
 from .logging_utils import log_text, log_consistency_event
 from .global_rules import GlobalRulesManager
 
-DEFAULT_MAX_TRIES = 30
+# Retry budget per chunk.  0 (the default) means UNLIMITED: a chunk is
+# retried until it translates or the caller asks to stop — a bad output is
+# never written just because a budget ran out.  A positive value bounds the
+# structural failures only; an echo/pinyin output still bypasses it
+# (see _UntranslatedOutput).
+DEFAULT_MAX_TRIES = 0
 REQUEST_TIMEOUT = 2
 BACKOFF_MULTIPLIER = 1.5
 MAX_BACKOFF_SECONDS = 60
@@ -35,10 +40,14 @@ UNTRANSLATED_CJK_MAX_REMAIN_RATIO = 0.05
 # Language-agnostic echo check (also catches EN->VI echoes of English text).
 UNTRANSLATED_ECHO_MIN_VISIBLE_CHARS = 50
 UNTRANSLATED_ECHO_MAX_SIMILARITY = 0.97
-# Untranslated failures retry indefinitely (user choice: never accept an
+# By default a chunk retries indefinitely (user choice: never accept an
 # echo into the output), but every Nth consecutive failure is recorded for
 # manual review so stuck chunks stay visible instead of burning silently.
 UNTRANSLATED_MANUAL_QUEUE_EVERY = 50
+# Repeated WebAI HTTP 500 silent aborts also retry (skipping the chunk would
+# write the source text into the output); this caps how many of them are
+# appended to the manual-review queue per chunk.
+HTTP500_MANUAL_RECORDS_PER_CHUNK = 3
 # Pinyin failures retry the same way, but a form the glossary cannot correct
 # (repair gave nothing, or the engine cannot repair at all) must not spin
 # forever: after this many consecutive failures it is accepted into the
@@ -229,6 +238,9 @@ class Translator:
         self.split_tag = split_tag
         self.illustration_manager = illustration_manager
         self.fallback_max_chunk_size = max(500, int(fallback_max_chunk_size))
+        # 0/None → self.max_tries = 0 → unlimited retries (never give up on a
+        # chunk); a positive value bounds structural failures only — an echo
+        # or pinyin output still bypasses it (see _UntranslatedOutput).
         if max_tries is None:
             self.max_tries = DEFAULT_MAX_TRIES
         else:
@@ -652,6 +664,7 @@ class Translator:
 
         attempt = 1
         specific_http500_abort_count = 0
+        http500_manual_records = 0
         untranslated_streak = 0
         last_untranslated = False
         last_pinyin = False
@@ -736,7 +749,9 @@ class Translator:
                 return result
 
             except Exception as e:
-                max_tries_label = "inf" if self.max_tries is None else str(self.max_tries)
+                # 0/None = unlimited, so the label says "inf" (the UI only
+                # shows the attempt number, never a denominator).
+                max_tries_label = "inf" if not self.max_tries else str(self.max_tries)
                 logging.warning(
                     f"Chunk failed (attempt {attempt}/{max_tries_label}): {e}"
                 )
@@ -821,28 +836,38 @@ class Translator:
                 if self._is_google_silent_abort_http500_error(e):
                     specific_http500_abort_count += 1
                     if specific_http500_abort_count >= 3:
-                        self.stats["manual_review_skips"] += 1
-                        self._record_manual_translation_task(
-                            source_text=text,
-                            prepared_prompt=prepared_input,
-                            last_attempt_prompt=text_to_translate,
-                            error_message=str(e),
-                            attempt=attempt,
-                            chapter_number=chapter_number,
-                            chapter_file_name=chapter_file_name,
-                            chapter_title=chapter_title,
-                            chunk_index=chunk_index,
-                            total_chunks=total_chunks,
-                            chunk_path=chunk_path,
-                        )
+                        # Never skip the chunk (that would write the source
+                        # language into the output): surface it so a dead
+                        # engine stays visible, then start a new group of 3
+                        # and keep retrying.  Only the first few groups are
+                        # appended to the review queue — a permanently broken
+                        # engine must not grow that file without bound.
+                        specific_http500_abort_count = 0
+                        if http500_manual_records < HTTP500_MANUAL_RECORDS_PER_CHUNK:
+                            http500_manual_records += 1
+                            self.stats["manual_review_skips"] += 1
+                            self._record_manual_translation_task(
+                                source_text=text,
+                                prepared_prompt=prepared_input,
+                                last_attempt_prompt=text_to_translate,
+                                error_message=str(e),
+                                attempt=attempt,
+                                chapter_number=chapter_number,
+                                chapter_file_name=chapter_file_name,
+                                chapter_title=chapter_title,
+                                chunk_index=chunk_index,
+                                total_chunks=total_chunks,
+                                chunk_path=chunk_path,
+                            )
                         logging.error(
-                            "Skipping chunk after 3 repeated WebAI HTTP 500 silent-abort errors"
+                            "Repeated WebAI HTTP 500 silent-abort errors "
+                            "(attempt %s) — keep retrying",
+                            attempt,
                         )
-                        break
 
                 if (
                     not last_untranslated
-                    and self.max_tries is not None
+                    and self.max_tries
                     and attempt >= self.max_tries
                 ):
                     break

@@ -1,7 +1,8 @@
 """Offline unit tests for translator.translator (no AI calls).
 
 Covers:
-  TC-1   : retry is bounded by max_tries / DEFAULT_MAX_TRIES (no infinite hang).
+  TC-1   : retries are unlimited by default (max_tries=0 → never give up);
+           an explicit positive max_tries still bounds structural failures.
   TC-2..5: _has_html_structure_mismatch tolerates paragraph merges but still
            rejects dropped structural tags and gross content loss.
   TC-9   : _split_oversized_chunk never splits an HTML tag in half.
@@ -54,8 +55,10 @@ class FakeEngine(TranslationEngine):
 
 
 class TestRetryCap(unittest.TestCase):
-    def test_default_cap_is_30(self):
-        self.assertEqual(DEFAULT_MAX_TRIES, 30)
+    def test_default_is_unlimited(self):
+        # 0 = unlimited: a chunk is retried until it translates or the job is
+        # stopped — the source text is never written just to make progress.
+        self.assertEqual(DEFAULT_MAX_TRIES, 0)
 
     def test_retry_bounded(self):
         soup = BeautifulSoup(
@@ -73,13 +76,36 @@ class TestRetryCap(unittest.TestCase):
         # giving up keeps the original text
         self.assertIn("Hello world test chunk here", out)
 
-    def test_zero_max_tries_falls_back_to_default(self):
+    def test_zero_max_tries_means_unlimited(self):
         t = Translator(
             FakeEngine("good"),
             max_tries=0,
             consistency_config={},
         )
-        self.assertEqual(t.max_tries, DEFAULT_MAX_TRIES)
+        self.assertEqual(t.max_tries, DEFAULT_MAX_TRIES)  # 0 = no cap
+        self.assertFalse(t.max_tries)
+
+    def test_default_never_falls_back_to_source_text(self):
+        # Unlimited by default: an always-broken output must not cause the
+        # original (Chinese) chunk to be written — the only way out is an
+        # explicit stop of the job.
+        t = Translator(
+            FakeEngine("empty"),
+            html_structure_min_similarity=0.7,
+            consistency_config={},
+        )
+        with mock.patch("time.sleep"):
+            with self.assertRaises(_TranslationStopped):
+                t.translate_html(
+                    BeautifulSoup(
+                        "<html><body><p>Hello world test chunk here</p></body></html>",
+                        "html.parser",
+                    ),
+                    chapter_number=1,
+                    should_stop=lambda: t.engine.calls >= 5,
+                )
+        self.assertEqual(t.engine.calls, 5)
+        self.assertEqual(t.stats["failed_chunks"], 0)
 
 
 SRC = (
