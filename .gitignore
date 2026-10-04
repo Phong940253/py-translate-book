@@ -95,6 +95,7 @@ opencode.json
 # =====================
 *.orig
 *.rules.json.bak-*
+*.epub.bak-*
 
 # =====================
 # Local background-music folder (user's audio files, never committed)

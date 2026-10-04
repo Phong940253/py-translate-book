@@ -19,7 +19,13 @@ from ebooklib import epub
 
 from translator.translator import Translator, _TranslationStopped
 from translator.html_utils import detect_split_tag
-from translator.epub_utils import iter_chapters, load_soup, save_epub
+from translator.epub_utils import (
+    iter_chapters,
+    load_soup,
+    normalize_names_in_book,
+    normalize_names_in_html,
+    save_epub,
+)
 from translator.discord_notifier import DiscordNotifier
 from translator.illustration import IllustrationManager
 
@@ -471,6 +477,13 @@ def run_translation(
 
     cb = cb_with_stats
 
+    def _name_map() -> dict:
+        """Current surface -> canonical spelling map.  Rebuilt per chapter so
+        glossary entries learned from a chapter's analysis apply from the
+        next chapter onwards."""
+        manager = getattr(translator, "global_rules", None)
+        return manager.mapping() if manager else {}
+
     cb(
         "job_started",
         {
@@ -513,6 +526,14 @@ def run_translation(
                 zip(selected_chapters, translated_chapters), start=0
             ):
                 chapter_number = effective_start + offset
+                translated, fixed_names = normalize_names_in_html(
+                    translated, _name_map()
+                )
+                if fixed_names:
+                    logging.info(
+                        "Chapter %s: normalized %d name occurrences",
+                        chapter_number, fixed_names,
+                    )
                 item.content = translated.encode("utf-8")
                 save_epub(book, output, source_path=input)
 
@@ -556,6 +577,14 @@ def run_translation(
                         {"index": i, "total": n, "chapter": ch},
                     ),
                 )
+                translated, fixed_names = normalize_names_in_html(
+                    translated, _name_map()
+                )
+                if fixed_names:
+                    logging.info(
+                        "Chapter %s: normalized %d name occurrences",
+                        chapter_number, fixed_names,
+                    )
                 item.content = translated.encode("utf-8")
                 save_epub(book, output, source_path=input)
 
@@ -572,6 +601,11 @@ def run_translation(
                     )
                 cb("chapter_done", {"chapter_number": chapter_number})
 
+        # Self-heal pass: chapters restored from a previous run (or written
+        # before the glossary existed) get the canonical spellings too.
+        fixed_total = normalize_names_in_book(book, _name_map())
+        if fixed_total:
+            logging.info("Normalized %d name occurrences across the book", fixed_total)
         save_epub(book, output, source_path=input)
         logging.info("Saved translated EPUB to %s", output)
 

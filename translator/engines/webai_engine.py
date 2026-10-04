@@ -115,6 +115,25 @@ class WebAIEngine(TranslationEngine):
         log_text("WEBAI_CONSISTENCY_ANALYSIS_OUTPUT", output)
         return output
 
+    def repair_names(self, pending_names: list[str], excerpt: str) -> str:
+        """Turn pinyin/unknown names into Chinese=Vietnamese glossary pairs."""
+        if not pending_names:
+            return ""
+        prompt = self.name_repair_prompt(pending_names, excerpt)
+        log_text("WEBAI_NAME_REPAIR_INPUT", prompt)
+
+        repair_system_prompt = (
+            "You are a Chinese-to-Vietnamese character-name consistency assistant. "
+            "Return only the requested mapping lines, plain text, no markdown."
+        )
+        output = self._translate_with_system_prompt(
+            repair_system_prompt,
+            prompt,
+            temperature=DEFAULT_ANALYSIS_TEMPERATURE,
+        )
+        log_text("WEBAI_NAME_REPAIR_OUTPUT", output)
+        return output
+
     def _translate_with_system_prompt(
         self,
         system_prompt: str,

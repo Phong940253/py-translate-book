@@ -39,6 +39,12 @@ UNTRANSLATED_ECHO_MAX_SIMILARITY = 0.97
 # echo into the output), but every Nth consecutive failure is recorded for
 # manual review so stuck chunks stay visible instead of burning silently.
 UNTRANSLATED_MANUAL_QUEUE_EVERY = 50
+# Pinyin failures retry the same way, but a form the glossary cannot correct
+# (repair gave nothing, or the engine cannot repair at all) must not spin
+# forever: after this many consecutive failures it is accepted into the
+# whitelist.  A wrong-but-legible name beats a hung job, and the whitelist
+# only ever grows from names we already tried to fix.
+PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER = 3
 
 
 class _UntranslatedOutput(ValueError):
@@ -48,6 +54,19 @@ class _UntranslatedOutput(ValueError):
     indefinitely (until success or an explicit stop), so an echo can never
     slip into the output by exhausting the retry budget.
     """
+
+
+class _PinyinOutput(_UntranslatedOutput):
+    """Person names written as pinyin/romanized Chinese.
+
+    Same never-accept policy as an echo (it *is* a piece of the source
+    language reaching the reader); ``names`` are the offending forms so the
+    retry prompt can show their known corrections inline.
+    """
+
+    def __init__(self, message: str, names: list[str] | None = None):
+        super().__init__(message)
+        self.names = list(names or [])
 
 # Tags whose boundaries are allowed to change between source and translated
 # output (paragraphs and page-anchor markers). Their presence/count is not
@@ -221,6 +240,9 @@ class Translator:
         )
         self._translation_cache: dict[str, str] = {}
         self._chapter_rules_cache: dict[str, str] = {}
+        # Names already offered to the repair pass this run (never re-pay
+        # for the same pinyin form on every chapter).
+        self._name_repair_attempted: set[str] = set()
 
         consistency_config = consistency_config or {}
         self.consistency_enabled = bool(consistency_config.get("enabled", False))
@@ -250,6 +272,19 @@ class Translator:
         )
         self.rules_filter_by_chapter = bool(
             consistency_config.get("rules_filter_by_chapter", True)
+        )
+        # Name glossary block (Chinese -> Vietnamese) prepended to
+        # <CHAPTER_RULES>; its slice is reserved inside the rules budget so a
+        # chapter always knows how its names are spelled.
+        self.glossary_prompt_max_chars = max(
+            200, int(consistency_config.get("glossary_prompt_max_chars", 2500))
+        )
+        # Pinyin leaked into the output is treated like untranslated source:
+        # reject the chunk and retry — first with the known correction, and,
+        # when the engine supports it, repairing the glossary on the way.
+        self.pinyin_check = bool(consistency_config.get("pinyin_check", True))
+        self.repair_pinyin_names = bool(
+            consistency_config.get("repair_pinyin_names", True)
         )
         self.cache_chapter_rules = bool(consistency_config.get("cache_chapter_rules", True))
 
@@ -619,6 +654,9 @@ class Translator:
         specific_http500_abort_count = 0
         untranslated_streak = 0
         last_untranslated = False
+        last_pinyin = False
+        pinyin_corrections: dict[str, str] = {}
+        pinyin_unknown_streak = 0
         result = None
         dt_ms = None
         last_error = None
@@ -629,12 +667,20 @@ class Translator:
                 if attempt == 1:
                     text_to_translate = prepared_input
                 else:
+                    if last_pinyin:
+                        reason = "pinyin"
+                    elif last_untranslated:
+                        reason = "untranslated"
+                    else:
+                        reason = "structure"
                     text_to_translate = self._build_retry_input(
                         prepared_input,
-                        reason="untranslated" if last_untranslated else "structure",
+                        reason=reason,
                         to_lang=getattr(self.engine, "to_lang", "") or "",
+                        corrections=pinyin_corrections if last_pinyin else None,
                     )
                 last_untranslated = False
+                last_pinyin = False
                 if (
                     attempt == 1
                     and self.consistency_enabled
@@ -667,6 +713,13 @@ class Translator:
                     raise _UntranslatedOutput(
                         "Model output left source text untranslated"
                     )
+                pinyin_hits = self._detect_pinyin_names(text, result)
+                if pinyin_hits:
+                    raise _PinyinOutput(
+                        "Model output used pinyin for names: "
+                        + ", ".join(pinyin_hits),
+                        pinyin_hits,
+                    )
 
                 log_text("AI_RESPONSE", result)
                 self.stats["chunks_translated"] += 1
@@ -689,6 +742,34 @@ class Translator:
                 )
                 last_error = str(e)
                 last_untranslated = isinstance(e, _UntranslatedOutput)
+                last_pinyin = isinstance(e, _PinyinOutput)
+                if last_pinyin and self.global_rules is not None:
+                    # fresh look: the repair pass may have just learned it
+                    pinyin_corrections = self.global_rules.pinyin_fixes(e.names)
+                    unknown = [
+                        name for name in e.names
+                        if name not in pinyin_corrections
+                    ]
+                    if unknown:
+                        pinyin_unknown_streak += 1
+                        if (
+                            pinyin_unknown_streak
+                            >= PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER
+                        ):
+                            for name in unknown:
+                                self.global_rules.add_to_whitelist(name)
+                            self.global_rules.save()
+                            log_consistency_event(
+                                "PINYIN_WHITELISTED",
+                                ", ".join(unknown[:8]),
+                            )
+                            logging.warning(
+                                "No known correction for pinyin names %s — "
+                                "whitelisted after %d attempts",
+                                unknown, pinyin_unknown_streak,
+                            )
+                    else:
+                        pinyin_unknown_streak = 0
                 # Surface the failed attempt on the live monitor (so a structural
                 # mismatch like a dropped koboSpan id is visible before give-up).
                 self.stats["current_chunk"] = {
@@ -860,7 +941,7 @@ class Translator:
 
         if not hasattr(self.engine, "analyze_chapter_consistency"):
             log_consistency_event("SKIP_ANALYSIS", "Engine does not support chapter analysis")
-            return self._render_chapter_rules(chapter_number)
+            return self._render_chapter_rules(chapter_number, content)
 
         # Same chapter text analysed before → reuse it, no LLM call needed.
         if self.global_rules and self.global_rules.has_analysis(chapter_number, chapter_hash):
@@ -871,7 +952,7 @@ class Translator:
             )
             if self.cache_chapter_rules:
                 self._chapter_rules_cache[chapter_hash] = stored
-            return self._render_chapter_rules(chapter_number)
+            return self._render_chapter_rules(chapter_number, content)
 
         if self.cache_chapter_rules and chapter_hash in self._chapter_rules_cache:
             log_consistency_event("RULES_CACHE_HIT", chapter_hash[:12])
@@ -883,17 +964,29 @@ class Translator:
                     cached, chapter_number, content_hash=chapter_hash
                 )
                 self.global_rules.save()
-            return self._render_chapter_rules(chapter_number)
+            return self._render_chapter_rules(chapter_number, content)
 
         # Build context: include existing global rules so the LLM knows
         # what has already been established for prior chapters — budgeted,
-        # the full dictionary can dwarf the chapter excerpt itself.
+        # the full dictionary can dwarf the chapter excerpt itself.  The
+        # name glossary goes first so new chapters reuse established
+        # spellings instead of inventing another reading.
         existing_context = ""
         if self.global_rules and self.global_rules.character_count > 0:
+            glossary_context = self.global_rules.glossary_text(
+                content, budget=self.glossary_prompt_max_chars
+            )
+            rules_context = self.global_rules.to_prompt_text(
+                budget=max(
+                    200, self.rules_prompt_max_chars - len(glossary_context)
+                )
+            )
             existing_context = (
+                ("\n\n" + glossary_context) if glossary_context else ""
+            ) + (
                 "\n\nEXISTING GLOBAL RULES (from previous chapters — "
                 "keep these and only ADD new information):\n"
-                + self.global_rules.to_prompt_text(budget=self.rules_prompt_max_chars)
+                + rules_context
             )
 
         excerpt = content[: self.analysis_max_chars]
@@ -919,23 +1012,64 @@ class Translator:
                         "GLOBAL_RULES_MERGED",
                         f"chapter={chapter_number} chars={self.global_rules.character_count}",
                     )
+                    # Names the analysis produced that we refuse to memorise
+                    # (pinyin/Chinese with no mapping) get one repair call.
+                    self._maybe_repair_pending_names(excerpt)
             # Same render on every path (fresh, cached, failed) so the prompt
             # and the translation cache key stay identical across runs.
-            return self._render_chapter_rules(chapter_number)
+            return self._render_chapter_rules(chapter_number, content)
         except Exception as error:
             logging.warning(f"Chapter analysis failed, fallback to normal translation: {error}")
             log_consistency_event("ANALYSIS_FAILED", str(error))
-            return self._render_chapter_rules(chapter_number)
+            return self._render_chapter_rules(chapter_number, content)
 
-    def _render_chapter_rules(self, chapter_number: int | None = None) -> str:
+    def _maybe_repair_pending_names(self, excerpt: str) -> dict[str, str]:
+        """Ask the engine to turn unknown Chinese/pinyin names into
+        ``Chinese=Vietnamese`` glossary pairs — once per name per run.
+
+        Returns the corrections that are applicable to a retry prompt."""
+        if not self.repair_pinyin_names or not self.global_rules:
+            return {}
+        if not hasattr(self.engine, "repair_names"):
+            return {}
+        todo = [
+            name for name in self.global_rules.pending
+            if name and name not in self._name_repair_attempted
+        ]
+        if not todo:
+            return {}
+        self._name_repair_attempted.update(todo)
+        try:
+            reply = self.engine.repair_names(todo[:12], excerpt) or ""
+        except Exception as error:
+            logging.warning("Name repair failed: %s", error)
+            log_consistency_event("NAME_REPAIR_FAILED", str(error))
+            return {}
+        if not reply.strip():
+            return {}
+        fixes = self.global_rules.apply_repair(reply)
+        self.global_rules.save()
+        log_consistency_event(
+            "NAME_REPAIR",
+            f"asked={min(len(todo), 12)} fixes={len(fixes)} "
+            f"whitelist={len(self.global_rules.whitelist)}",
+        )
+        return fixes
+
+    def _render_chapter_rules(
+        self,
+        chapter_number: int | None = None,
+        source_text: str | None = None,
+    ) -> str:
         """<CHAPTER_RULES> text for one chapter.
 
-        Scoped to the characters its own analysis named (rules about anyone
-        else are noise for this chapter) and capped at
+        Opens with the name glossary (only the Chinese forms this chapter's
+        source actually uses), then the characters its own analysis named
+        (rules about anyone else are noise for this chapter), all capped at
         ``rules_prompt_max_chars``; with no analysis available the budgeted
         full dictionary is used so a chapter is never left without rules.
         """
-        if not self.global_rules or self.global_rules.character_count == 0:
+        if not self.global_rules:
             return ""
 
         only = None
@@ -944,21 +1078,28 @@ class Translator:
             if analysis:
                 only = self.global_rules.chars_in_analysis(analysis) or None
 
-        text = self.global_rules.to_prompt_text(
-            only=only, budget=self.rules_prompt_max_chars
+        glossary = self.global_rules.glossary_text(
+            source_text or "", budget=self.glossary_prompt_max_chars
         )
-        if text and only:
+        glossary_block = f"{glossary}\n" if glossary else ""
+        remaining = max(0, self.rules_prompt_max_chars - len(glossary_block))
+        text = self.global_rules.to_prompt_text(only=only, budget=remaining)
+        combined = f"{glossary_block}{text}".strip()
+
+        if combined and only:
             log_consistency_event(
                 "RULES_PROMPT",
-                f"chapter={chapter_number} chars={len(text)} scoped=yes "
+                f"chapter={chapter_number} chars={len(combined)} scoped=yes "
+                f"glossary={len(glossary_block)} "
                 f"global={len(self.global_rules.to_prompt_text())}",
             )
-        elif text:
+        elif combined:
             log_consistency_event(
                 "RULES_PROMPT",
-                f"chapter={chapter_number} chars={len(text)} scoped=no",
+                f"chapter={chapter_number} chars={len(combined)} scoped=no "
+                f"glossary={len(glossary_block)}",
             )
-        return text
+        return combined
 
     def _collect_previous_translated(self, translated: list[str], index: int) -> list[str]:
         if not self.consistency_enabled or self.previous_translated_window <= 0:
@@ -1044,7 +1185,33 @@ class Translator:
         return f"ctx::{digest}"
 
     @staticmethod
-    def _build_retry_input(text: str, reason: str = "structure", to_lang: str = "") -> str:
+    def _build_retry_input(
+        text: str,
+        reason: str = "structure",
+        to_lang: str = "",
+        corrections: dict[str, str] | None = None,
+    ) -> str:
+        if reason == "pinyin":
+            lang = to_lang or "the target language"
+            correction_block = ""
+            if corrections:
+                correction_block = "NAME CORRECTIONS (mandatory):\n" + "".join(
+                    f"  {bad} -> {good}\n" for bad, good in corrections.items()
+                )
+            retry_prefix = (
+                "Previous output REJECTED: person names were written as pinyin "
+                "/ romanized Chinese, which is forbidden. "
+                f"{correction_block}"
+                "Rewrite EVERY person name in natural Vietnamese (Hán-Việt "
+                "reading) — for example Bai Qing Xia must become Bạch Thanh Hạ. "
+                "Keep nicknames (Tiểu Hạ, Hạ Hạ, Thu Thu) exactly as they are. "
+                f"Translate only visible text nodes into {lang} and keep all "
+                "HTML tags, attributes, entities, URLs, and code-like tokens "
+                "unchanged. Output translated content only with original HTML "
+                "preserved.\n\n"
+                "Input:\n"
+            )
+            return f"{retry_prefix}{text}"
         if reason == "untranslated":
             lang = to_lang or "the target language"
             retry_prefix = (
@@ -1177,6 +1344,31 @@ class Translator:
                 self.html_structure_min_similarity,
             )
         return mismatch
+
+    def _detect_pinyin_names(self, source_text: str, output_text: str) -> list[str]:
+        """Person names written as pinyin in a translated chunk.
+
+        Only Chinese-source chunks are checked (elsewhere pinyin cannot be a
+        leak), and every hit is parked as pending plus offered to the repair
+        pass once per run — the retry then carries the correction, and later
+        chapters get it through the glossary block."""
+        if not self.pinyin_check or self.global_rules is None:
+            return []
+        if not output_text:
+            return []
+        source_visible = HTML_TAG_PATTERN.sub("", source_text or "")
+        if not _CJK_RE.search(source_visible):
+            return []                      # not a Chinese source at all
+        hits = self.global_rules.detect_pinyin_names(
+            HTML_TAG_PATTERN.sub("", output_text)
+        )
+        if not hits:
+            return []
+        for name in hits:
+            self.global_rules.add_pending(name, "pinyin")
+        log_consistency_event("PINYIN_DETECTED", ", ".join(hits[:8]))
+        self._maybe_repair_pending_names(source_visible)
+        return hits
 
     @staticmethod
     def _has_untranslated_content(source_text: str, output_text: str) -> bool:

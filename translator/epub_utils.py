@@ -167,6 +167,61 @@ def _atomic_write_epub(path, book):
                 pass
 
 
+_NAME_SURFACE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, int]:
+    """Rewrite variant/pinyin spellings to the canonical name.
+
+    Longest surface first (``Long Lệ Đông`` before any shorter overlap) and
+    Vietnamese-only: a surface or replacement carrying Chinese is skipped so
+    the source text and the kept ``第N章`` headings stay untouched.
+    Returns ``(text, replacement_count)``."""
+    if not html or not mapping:
+        return html, 0
+    text = html
+    total = 0
+    for surface in sorted(mapping, key=len, reverse=True):
+        canonical = mapping.get(surface)
+        if not surface or not canonical or surface == canonical:
+            continue
+        if _NAME_SURFACE_RE.search(surface) or _NAME_SURFACE_RE.search(canonical):
+            continue
+        if surface not in text:
+            continue
+        count = text.count(surface)
+        text = text.replace(surface, canonical)
+        total += count
+    return text, total
+
+
+def normalize_names_in_book(book, mapping: dict[str, str]) -> int:
+    """Apply :func:`normalize_names_in_html` to every text document of an
+    already-loaded book (binary assets and CSS are never touched).
+
+    Returns the total number of replacements."""
+    if not mapping:
+        return 0
+    total = 0
+    for item in book.get_items():
+        media_type = (getattr(item, "media_type", "") or "").lower()
+        if "html" not in media_type and "xml" not in media_type:
+            continue
+        content = getattr(item, "content", None)
+        if not content:
+            continue
+        text = (
+            content.decode("utf-8", errors="ignore")
+            if isinstance(content, (bytes, bytearray))
+            else str(content)
+        )
+        new_text, count = normalize_names_in_html(text, mapping)
+        if count:
+            item.content = new_text.encode("utf-8")
+            total += count
+    return total
+
+
 def save_epub(book, path, source_path=None):
     if source_path is None:
         normalize_book_toc(book)

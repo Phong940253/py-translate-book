@@ -93,3 +93,22 @@ class GeminiEngine(TranslationEngine):
 
         log_text("GEMINI_CONSISTENCY_ANALYSIS_OUTPUT", output)
         return output
+
+    def repair_names(self, pending_names: list[str], excerpt: str) -> str:
+        """Turn pinyin/unknown names into Chinese=Vietnamese glossary pairs."""
+        if not pending_names:
+            return ""
+        prompt = self.name_repair_prompt(pending_names, excerpt)
+        log_text("GEMINI_NAME_REPAIR_INPUT", prompt)
+
+        response = self.analysis_model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": DEFAULT_ANALYSIS_MAX_OUTPUT_TOKENS,
+            },
+            safety_settings=self.safety,
+        )
+        output = (response.text or "").strip()
+        log_text("GEMINI_NAME_REPAIR_OUTPUT", output)
+        return output

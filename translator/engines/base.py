@@ -88,9 +88,11 @@ class TranslationEngine(ABC):
         return (
             "Analyze this chapter excerpt and create concise Vietnamese rules for consistent forms of address.\n"
             "Output plain text only, no markdown, no code fences.\n"
-            "Output must be in Vietnamese only: no Chinese characters, no pinyin/romanized Chinese.\n"
+            "Output in Vietnamese: no pinyin/romanized Chinese anywhere. The ONLY Chinese\n"
+            "allowed is the source name on the left of '=' in section 1 — it keeps every\n"
+            "chapter spelling this person's name the same way.\n"
             "NAME FORM (critical): write every character name in natural Vietnamese (Hán-Việt reading).\n"
-            "  Example: 白清夏 -> Bạch Thanh Hạ, 陆远秋 -> Lục Viễn Thu.\n"
+            "  Example pair: 白清夏=Bạch Thanh Hạ, 陆远秋=Lục Viễn Thu.\n"
             "  NEVER output pinyin transliterations such as 'Bai Qing Xia' or 'Lu Yuan Qiu' —\n"
             "  they are not Vietnamese words and readers cannot understand them.\n"
             "  If a character has no name, use a short Vietnamese role label (e.g. 'bà bán hàng', 'tài xế taxi').\n"
@@ -98,9 +100,11 @@ class TranslationEngine(ABC):
             "  A nickname is its own identity form: NEVER replace it with the person's full name,\n"
             "  and never replace a full name with a nickname unless the source does.\n"
             "Required output sections exactly in this order:\n"
-            "1) Characters: comma-separated Vietnamese names.\n"
+            "1) Characters: comma-separated 'Chinese=Vietnamese' pairs "
+            "(e.g. 白清夏=Bạch Thanh Hạ). If the Chinese form is not visible,\n"
+            "   write just the Vietnamese name.\n"
             "2) Address rules: one mapping per line as 'Speaker A -> Addressee B: xung ho',\n"
-            "   using exactly the same Vietnamese names as in section 1.\n"
+            "   using exactly the same names as in section 1 (Chinese or Vietnamese form).\n"
             "3) Narration/inner monologue defaults: one short line for first-person and second-person fallback when speaker is unclear.\n"
             "4) Default fallback: one short line for ambiguous cases.\n"
             "Rules must be role-specific: do not mix first-person self-reference with second-person address forms.\n"
@@ -108,6 +112,31 @@ class TranslationEngine(ABC):
             "Chapter excerpt:\n"
             f"{chapter_excerpt}"
         )
+
+    def name_repair_prompt(self, pending_names: list[str], excerpt: str) -> str:
+        """Prompt for the one-off pass that turns detected pinyin/unknown
+        Chinese names into glossary entries (Chinese + Vietnamese pair)."""
+        listed = "\n".join(f"  - {name}" for name in pending_names)
+        return (
+            "These romanized (pinyin) or unknown forms were written for a Chinese novel:\n"
+            f"{listed}\n\n"
+            "For each one, find the matching Chinese in the excerpt below and give the\n"
+            "natural Vietnamese (Hán-Việt) name. Output one line per form, no markdown:\n"
+            "  <form> -> <Chinese> = <Vietnamese>\n"
+            "Example: Bai Qing Xia -> 白清夏 = Bạch Thanh Hạ\n"
+            "If a form is NOT a person name (place, brand, sound, nickname to keep as-is),\n"
+            "output instead:\n"
+            "  KEEP: <form>\n"
+            "Vietnamese names only — never pinyin.\n\n"
+            "Excerpt:\n"
+            f"{excerpt}"
+        )
+
+    def repair_names(self, pending_names: list[str], excerpt: str) -> str:
+        """Best-effort name repair.  Engines that support chapter analysis
+        override this with their analysis channel; others return "" (the
+        caller then just parks the names and reports them)."""
+        return ""
 
     def system_prompt(self) -> str:
         if self.custom_prompt:
