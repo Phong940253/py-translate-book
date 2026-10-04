@@ -213,6 +213,68 @@ def _repair_wrapper_balance(source: str, out: str) -> str:
             if end == -1:
                 break
             result = result[:idx] + result[end + 1:]
+    return _repair_surplus_closes(source, result)
+
+
+def _tag_name_of(raw: str) -> str:
+    """Lower-cased tag name of a raw tag match (``</P >`` -> ``p``)."""
+    match = _TAG_NAME_RE.match(raw or "")
+    return match.group(2).lower() if match else ""
+
+
+def _tag_balance(text: str) -> dict[str, list[int]]:
+    """Per-tag open/close counts; self-closing tags count as neither."""
+    counts: dict[str, list[int]] = {}
+    for raw in HTML_TAG_PATTERN.findall(text or ""):
+        name = _tag_name_of(raw)
+        if not name:
+            continue
+        entry = counts.setdefault(name, [0, 0])
+        if raw.startswith("</"):
+            entry[1] += 1
+        elif not raw.endswith("/>"):
+            entry[0] += 1
+    return counts
+
+
+def _repair_surplus_closes(source: str, out: str) -> str:
+    """Drop closing tags the model emitted without a matching opening tag.
+
+    Paragraph (and other block) boundaries are excluded from the structural
+    check, so a stray extra ``</p>`` used to pass every guard and be written
+    into the epub as ill-formed XHTML — which then fails to render.  Strip the
+    surplus instead of retrying a chunk that is otherwise perfect.
+
+    The source chunk is the authoritative balance:
+
+    * source balanced for the tag → the output must balance itself too;
+    * source split mid-element → it keeps the closing tag the previous chunk
+      opened, so the output may hold exactly the closes the source holds.
+    """
+    if not out:
+        return out
+    src_counts = _tag_balance(source)
+    result = out
+    repaired: dict[str, int] = {}
+    for name, (out_open, out_close) in _tag_balance(out).items():
+        src_open, src_close = src_counts.get(name, [0, 0])
+        target = out_open if src_open == src_close else src_close
+        excess = out_close - target
+        if excess <= 0:
+            continue
+        pattern = re.compile(rf"</{re.escape(name)}\s*>", re.IGNORECASE)
+        for _ in range(excess):
+            matches = list(pattern.finditer(result))
+            if not matches:
+                break
+            last = matches[-1]
+            result = result[:last.start()] + result[last.end():]
+            repaired[name] = repaired.get(name, 0) + 1
+    if repaired:
+        logging.warning(
+            "Auto-repaired surplus closing tags: %s",
+            ", ".join(f"{k}\u00d7{v}" for k, v in sorted(repaired.items())),
+        )
     return result
 
 

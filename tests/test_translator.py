@@ -182,6 +182,61 @@ class TestWrapperRepair(unittest.TestCase):
         self.assertNotIn("<div>", repaired)
         self.assertNotIn("<section>", repaired)
 
+    # --- surplus closes on tags the structural guard ignores (chapter 5 case)
+
+    def test_repair_strips_surplus_paragraph_close(self):
+        # Real chapter-5 output: one extra trailing </p>. <p> is excluded from
+        # the structural guard, so without this repair it ships straight into
+        # the epub as ill-formed XHTML and the chapter stops rendering.
+        src = '<h2>第5章 脱了给我康康</h2><p>甲。</p><p>乙。</p>'
+        out = '<h2>Chương 5</h2><p>Một.</p><p>Hai.</p></p>'
+        repaired = _repair_wrapper_balance(src, out)
+        self.assertEqual(repaired, '<h2>Chương 5</h2><p>Một.</p><p>Hai.</p>')
+        self.assertFalse(self.t._has_html_structure_mismatch(src, repaired))
+
+    def test_repair_keeps_legitimate_extra_paragraph_pair(self):
+        # Splitting one source paragraph into two changes the counts but stays
+        # balanced — that is a legal rewrite, not a surplus close.
+        src = '<p>a</p><p>b</p>'
+        out = '<p>a</p><p>b1</p><p>b2</p>'
+        self.assertEqual(_repair_wrapper_balance(src, out), out)
+
+    def test_repair_keeps_close_inherited_from_previous_chunk(self):
+        # This chunk opens nothing and inherits its </p> from the chunk before
+        # it: the source's own count (here: one close) is the target.
+        src = 'tiếp tục</p>'
+        out = 'tiếp tục</p>'
+        self.assertEqual(_repair_wrapper_balance(src, out), out)
+        # ...and an extra one beyond the source's is still stripped.
+        out2 = 'tiếp tục</p></p>'
+        self.assertEqual(_repair_wrapper_balance(src, out2), 'tiếp tục</p>')
+
+    def test_repair_does_not_confuse_p_with_lookalike_tags(self):
+        # </pre> starts with "</p" — the match must be exact.
+        src = '<p>a</p>'
+        out = '<p>a</p><pre>q</pre></p>'
+        self.assertEqual(
+            _repair_wrapper_balance(src, out), '<p>a</p><pre>q</pre>'
+        )
+
+    def test_translate_chunk_repairs_surplus_paragraph_close(self):
+        # End-to-end: the extra </p> must neither trigger a retry nor reach
+        # the returned translation.
+        src = '<p>Hello world test chunk</p><p>Second paragraph</p>'
+
+        class SurplusPCloseEngine(FakeEngine):
+            def translate(self, text):
+                self.calls += 1
+                return (text.replace("Hello world test chunk", "Xin chào thế giới")
+                            .replace("Second paragraph", "Đoạn thứ hai") + "</p>")
+
+        t = Translator(SurplusPCloseEngine(), html_structure_min_similarity=0.7,
+                       consistency_config={})
+        out = t._translate_chunk(src, chapter_number=5)
+        self.assertEqual(t.engine.calls, 1)  # no retry
+        self.assertTrue(out.endswith("</p>"))
+        self.assertFalse(out.endswith("</p></p>"))
+
     def test_real_leaf_tag_drop_still_rejected(self):
         # Dropping a real <em> (leaf structural tag) is genuine content loss.
         src = '<p><span>a</span><em><span>b</span></em><span>c</span></p>'
