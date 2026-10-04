@@ -53,6 +53,19 @@ _PINYIN_SYLLABLES = set(
     """.split()
 )
 
+# Pinyin syllables spelled exactly like an ordinary Vietnamese syllable once
+# the diacritics are dropped (``sa`` = sa/sà, ``ca`` = cà, ``ma`` = mà …).
+# On their own they prove nothing: a lone one is how a Hán-Việt reading such
+# as ``Gia Sa`` (王家沙, a Shanghai shop) or ``Ca Sinh`` (蔡生) ends up
+# mistaken for pinyin.  A mixed candidate only counts with a syllable no
+# Vietnamese spelling uses — ``Qiu``, ``Qing``, ``Kong``.
+_VN_COMMON_SYLLABLES = set(
+    """
+    a an ba bo ca cha da ga ha hai ia la ma na nga nha pa sa ta va xa
+    """.split()
+)
+_VN_COMMON_PINYIN = _PINYIN_SYLLABLES & _VN_COMMON_SYLLABLES
+
 # Capitalized ASCII name-like run, 2-3 words: "Bai Qing Xia", "Anh Qiu".
 # Diacritics are excluded on purpose — a Vietnamese name written properly
 # (Bạch Thanh Hạ) never matches, a pinyin name always does.
@@ -625,9 +638,16 @@ class GlobalRulesManager:
         """Is this Latin name probably pinyin/romanised Chinese?
 
         True when *every* token is a pinyin syllable (``Bai Qing Xia``) — the
-        conservative test — or when it carries a pinyin syllable that no
-        sanctioned Vietnamese name uses (``Anh Qiu``: ``Qiu`` never occurs in
-        a Vietnamese spelling, ``Hai``/``Quan`` do, so ``Hai An`` passes).
+        conservative test — or when, on top of any Vietnamese-looking tokens,
+        it carries a pinyin syllable that no Vietnamese spelling can use
+        (``Anh Qiu``: ``Qiu`` never occurs in a Vietnamese spelling, while
+        ``Hai``/``Quan`` do).
+
+        A lone *weak* syllable — one spelled exactly like an ordinary
+        Vietnamese syllable (``sa``, ``ca``, ``ma``) — is not evidence at
+        all: ``Gia Sa`` (王家沙) and ``Ca Sinh`` (蔡生) are Hán-Việt, not
+        pinyin, and flagging them sends the retry loop a correction that
+        rewrites a shop into a monk's robe (``cà sa``).
         """
         text = (value or "").strip()
         if not text or has_cjk(text):
@@ -644,8 +664,13 @@ class GlobalRulesManager:
             return False
         if len(pinyin_hits) == len(tokens):
             return True
+        strong_hits = [
+            tok for tok in pinyin_hits if tok.lower() not in _VN_COMMON_PINYIN
+        ]
+        if not strong_hits:
+            return False
         known_tokens, _ = self._known_vn_tokens_locked()
-        return any(tok.lower() not in known_tokens for tok in pinyin_hits)
+        return any(tok.lower() not in known_tokens for tok in strong_hits)
 
     def _resolve_target_locked(self, target: str) -> str | None:
         """Resolve one addressee; ``"A, B"`` composites resolve part by part."""

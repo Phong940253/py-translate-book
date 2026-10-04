@@ -229,6 +229,22 @@ class TestPinyinGates(unittest.TestCase):
         # 'Bai' alone is too weak a signal to reject a chapter over
         self.assertEqual(self.mgr.detect_pinyin_names("Bai cười."), [])
 
+    def test_hanviet_readings_are_not_flagged_as_pinyin(self):
+        # 'Gia Sa' = Hán-Việt of 王家沙 (a Shanghai shop) and 'Ca Sinh' of
+        # 蔡生: only 'sa'/'ca' look pinyin, and both are ordinary Vietnamese
+        # syllables too — flagging them fed the retry a correction that
+        # rewrote the shop into a monk's robe (cà sa).
+        text = "Cậu thấy tiệm lâu đời Vương Gia Sa ở Nam Kinh Tây."
+        self.assertEqual(self.mgr.detect_pinyin_names(text), [])
+        self.assertEqual(self.mgr.detect_pinyin_names("Nhân vật Ca Sinh đi."), [])
+
+    def test_real_leaks_still_flagged_beside_hanviet_runs(self):
+        # an exotic syllable (Qiu) or an all-pinyin run still raises it
+        text = "Gặp Anh Qiu ở tiệm Vương Gia Sa, rồi gọi thêm Bai Qing Xia."
+        self.assertEqual(
+            self.mgr.detect_pinyin_names(text), ["Anh Qiu", "Bai Qing Xia"]
+        )
+
 
 class TestGlossaryText(unittest.TestCase):
     """NR-6 / NR-7"""
