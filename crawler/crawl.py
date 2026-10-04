@@ -65,6 +65,12 @@ def main():
     ap.add_argument("--to", dest="to_ch", type=int, default=None, help="1-based end inclusive")
     ap.add_argument("--delay", type=float, default=1.2, help="seconds between requests")
     ap.add_argument("--workdir", default=None, help="raw/progress dir (default data/<bid>)")
+    ap.add_argument(
+        "--title",
+        default=None,
+        help="override book title (chapters.json + epub filename), e.g. the "
+        "original title when the source renamed the book",
+    )
     ap.add_argument("-o", "--output", default=None, help="output epub path")
     ap.add_argument("--no-epub", action="store_true", help="skip epub, keep raw only")
     ap.add_argument("--reset", action="store_true", help="ignore checkpoint, recrawl")
@@ -93,7 +99,11 @@ def main():
     try:
         if args.rebuild_only:
             meta = _load_json(os.path.join(workdir, "chapters.json"), {})
-            book_title = meta.get("title", str(args.bid))
+            book_title = args.title or meta.get("title", str(args.bid))
+            if args.title and meta.get("title") != args.title:
+                # keep the renamed title across rebuilds
+                meta["title"] = args.title
+                _save_json(os.path.join(workdir, "chapters.json"), meta)
             author = meta.get("author", "")
             toc = meta.get("chapters", [])
             # pick up any raw/*.txt not listed in chapters.json (manually appended)
@@ -113,6 +123,11 @@ def main():
         else:
             print(f"Fetching TOC ({args.source}) bid={args.bid} ...")
             book_title, author, toc = src.fetch_toc(session, args.bid)
+            source_title = book_title
+            if args.title:
+                book_title = args.title
+                if source_title != book_title:
+                    print(f"(source title: {source_title})")
             print(f"Book: {book_title} | Author: {author} | Chapters: {len(toc)}")
             # Preserve manually appended chapters (e.g. from another mirror)
             # that the fresh TOC does not list.
@@ -122,10 +137,10 @@ def main():
                 if c["ordernum"] not in known_orders:
                     toc.append(c)
             toc.sort(key=lambda c: int(c["ordernum"]))
-            _save_json(
-                os.path.join(workdir, "chapters.json"),
-                {"title": book_title, "author": author, "chapters": toc},
-            )
+            meta = {"title": book_title, "author": author, "chapters": toc}
+            if args.title and source_title != book_title:
+                meta["source_title"] = source_title
+            _save_json(os.path.join(workdir, "chapters.json"), meta)
 
         if args.rebuild_only:
             selected = []

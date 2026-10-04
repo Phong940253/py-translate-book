@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ebooklib import epub as _epub
 
+from crawler import crawl as crawl_cli
 from crawler import ixdzs, shu69
 from crawler.to_epub import build_epub
 
@@ -303,6 +304,57 @@ class TestBuildEpub(unittest.TestCase):
             ]
             self.assertEqual(len(docs), 2)
             self.assertIn("江海市", docs[0].content.decode("utf-8"))
+
+
+class TestCliTitleOverride(unittest.TestCase):
+    """--title renames the book when the source itself renamed it."""
+
+    def _run_rebuild(self, workdir, title=None):
+        argv = ["crawl", "--source", "ixdzs", "--bid", "999", "--workdir", workdir, "--rebuild-only"]
+        if title is not None:
+            argv += ["--title", title]
+        with patch.object(sys, "argv", argv):
+            crawl_cli.main()
+
+    def test_rebuild_uses_overridden_title(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "raw"))
+            with open(os.path.join(d, "raw", "0001.txt"), "w", encoding="utf-8") as f:
+                f.write("第1章 开始\n　　正文一段。\n")
+            meta = {
+                "title": "旧书名",
+                "author": "作者",
+                "chapters": [{"ordernum": "1", "title": "第1章 开始", "url": "u"}],
+            }
+            with open(os.path.join(d, "chapters.json"), "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+
+            self._run_rebuild(d, title="新书名")
+
+            self.assertTrue(os.path.exists(os.path.join(d, "新书名.epub")))
+            with open(os.path.join(d, "chapters.json"), encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(saved["title"], "新书名")
+            # override must not lose chapter metadata
+            self.assertEqual(saved["author"], "作者")
+            self.assertEqual(saved["chapters"][0]["ordernum"], "1")
+
+    def test_rebuild_without_title_keeps_existing_title(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "raw"))
+            with open(os.path.join(d, "raw", "0001.txt"), "w", encoding="utf-8") as f:
+                f.write("第1章 开始\n　　正文一段。\n")
+            meta = {
+                "title": "旧书名",
+                "author": "作者",
+                "chapters": [{"ordernum": "1", "title": "第1章 开始", "url": "u"}],
+            }
+            with open(os.path.join(d, "chapters.json"), "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+
+            self._run_rebuild(d)
+
+            self.assertTrue(os.path.exists(os.path.join(d, "旧书名.epub")))
 
 
 if __name__ == "__main__":
