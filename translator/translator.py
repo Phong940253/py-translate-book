@@ -44,6 +44,15 @@ UNTRANSLATED_ECHO_MAX_SIMILARITY = 0.97
 # echo into the output), but every Nth consecutive failure is recorded for
 # manual review so stuck chunks stay visible instead of burning silently.
 UNTRANSLATED_MANUAL_QUEUE_EVERY = 50
+# A chunk that keeps echoing the source is split after a few identical
+# failures: a whole chapter is copied back verbatim far more often than a
+# smaller piece of it (measured ~80-100% echo for a full chapter against
+# under 10% for its halves), so smaller parts usually escape the copy loop.
+# Parts are retried exactly the same way, so an echo still never reaches the
+# output book.
+ECHO_SPLIT_AFTER_ATTEMPTS = 3
+ECHO_SPLIT_MIN_CHARS = 800
+ECHO_SPLIT_MAX_DEPTH = 3
 # Repeated WebAI HTTP 500 silent aborts also retry (skipping the chunk would
 # write the source text into the output); this caps how many of them are
 # appended to the manual-review queue per chunk.
@@ -376,6 +385,7 @@ class Translator:
             "cache_hits": 0,
             "fallback_split_events": 0,
             "fallback_generated_parts": 0,
+            "echo_split_events": 0,
             "batch_submitted": 0,
             "batch_results": 0,
             "failed_chunks": 0,
@@ -650,6 +660,7 @@ class Translator:
         chapter_title: str | None = None,
         should_stop: Callable[[], bool] | None = None,
         progress_callback: Callable[[int, int, int | None], None] | None = None,
+        echo_split_depth: int = 0,
     ) -> str:
         if self._is_tag_only_chunk(text):
             logging.info("Skipping translation for tag-only chunk")
@@ -672,44 +683,17 @@ class Translator:
                 logging.info(
                     f"Oversized chunk ({len(text)} chars) split into {len(fallback_parts)} fallback parts"
                 )
-                translated_parts = []
-                for part_index, part in enumerate(fallback_parts, start=1):
-                    if self.consistency_enabled and self.previous_translated_window > 0:
-                        start = max(0, len(translated_parts) - self.previous_translated_window)
-                        fallback_previous = [
-                            p for p in translated_parts[start:] if p.strip()
-                        ]
-                    else:
-                        fallback_previous = []
-
-                    fallback_next = [
-                        fb for fb in fallback_parts[part_index:part_index + self.next_source_window]
-                        if fb.strip()
-                    ]
-                    translated_part = self._translate_chunk(
-                        part,
-                        chapter_rules=chapter_rules,
-                        previous_translated=fallback_previous,
-                        next_source=fallback_next,
-                        chunk_index=part_index,
-                        total_chunks=len(fallback_parts),
-                        chunk_path=(
-                            f"{chunk_path}.{part_index}"
-                            if chunk_path
-                            else str(part_index)
-                        ),
-                        chapter_number=chapter_number,
-                        chapter_file_name=chapter_file_name,
-                        chapter_title=chapter_title,
-                        progress_callback=progress_callback,
-                    )
-                    translated_parts.append(translated_part)
-                merged = "".join(translated_parts)
-                log_text("AI_RESPONSE", merged)
-                self.stats["chunks_translated"] += 1
-                self.stats["source_chars"] += len(text)
-                self.stats["translated_chars"] += len(merged or "")
-                return merged
+                return self._translate_parts(
+                    fallback_parts,
+                    chapter_rules=chapter_rules,
+                    chunk_path=chunk_path,
+                    chapter_number=chapter_number,
+                    chapter_file_name=chapter_file_name,
+                    chapter_title=chapter_title,
+                    should_stop=should_stop,
+                    progress_callback=progress_callback,
+                    echo_split_depth=echo_split_depth,
+                )
 
         prepared_input = self.engine.build_contextual_input(
             current_chunk=text,
@@ -870,6 +854,36 @@ class Translator:
                     # consecutive failure so stuck chunks stay visible instead
                     # of burning API calls silently.
                     untranslated_streak += 1
+                    if (
+                        untranslated_streak >= ECHO_SPLIT_AFTER_ATTEMPTS
+                        and echo_split_depth < ECHO_SPLIT_MAX_DEPTH
+                        and len(text) >= ECHO_SPLIT_MIN_CHARS * 2
+                    ):
+                        # Retry prompt/temperature variations do not break a
+                        # copy loop, but a smaller request does — hand each
+                        # half to its own retry loop (which may split again).
+                        echo_parts = self._split_oversized_chunk(
+                            text,
+                            max_size=max(ECHO_SPLIT_MIN_CHARS, len(text) // 2),
+                        )
+                        if len(echo_parts) > 1:
+                            logging.warning(
+                                f"Chunk echoed the source {untranslated_streak} times "
+                                f"({len(text)} chars) — splitting into {len(echo_parts)} "
+                                "parts and retrying each"
+                            )
+                            self.stats["echo_split_events"] += 1
+                            return self._translate_parts(
+                                echo_parts,
+                                chapter_rules=chapter_rules,
+                                chunk_path=chunk_path,
+                                chapter_number=chapter_number,
+                                chapter_file_name=chapter_file_name,
+                                chapter_title=chapter_title,
+                                should_stop=should_stop,
+                                progress_callback=progress_callback,
+                                echo_split_depth=echo_split_depth,
+                            )
                     if untranslated_streak % UNTRANSLATED_MANUAL_QUEUE_EVERY == 0:
                         self._record_manual_translation_task(
                             source_text=text,
@@ -960,6 +974,69 @@ class Translator:
         if progress_callback is not None:
             progress_callback(chunk_index, total_chunks, chapter_number)
         return text
+
+    def _translate_parts(
+        self,
+        parts: list[str],
+        *,
+        chapter_rules: str,
+        chunk_path: str | None,
+        chapter_number: int | None,
+        chapter_file_name: str | None,
+        chapter_title: str | None,
+        should_stop: Callable[[], bool] | None,
+        progress_callback: Callable[[int, int, int | None], None] | None,
+        echo_split_depth: int,
+    ) -> str:
+        """Translate each part of a split chunk and glue the results back.
+
+        Parts keep the same context the single-chunk request had: the parts
+        already translated feed the previous-translated window, the parts
+        still ahead feed the next-source window.  ``should_stop`` is handed
+        down so a stopped job aborts between parts instead of finishing a
+        split it no longer wants.
+        """
+        translated_parts: list[str] = []
+        for part_index, part in enumerate(parts, start=1):
+            if self.consistency_enabled and self.previous_translated_window > 0:
+                start = max(0, len(translated_parts) - self.previous_translated_window)
+                part_previous = [
+                    p for p in translated_parts[start:] if p.strip()
+                ]
+            else:
+                part_previous = []
+
+            part_next = [
+                fb for fb in parts[part_index:part_index + self.next_source_window]
+                if fb.strip()
+            ]
+            translated_parts.append(
+                self._translate_chunk(
+                    part,
+                    chapter_rules=chapter_rules,
+                    previous_translated=part_previous,
+                    next_source=part_next,
+                    chunk_index=part_index,
+                    total_chunks=len(parts),
+                    chunk_path=(
+                        f"{chunk_path}.{part_index}"
+                        if chunk_path
+                        else str(part_index)
+                    ),
+                    chapter_number=chapter_number,
+                    chapter_file_name=chapter_file_name,
+                    chapter_title=chapter_title,
+                    should_stop=should_stop,
+                    progress_callback=progress_callback,
+                    echo_split_depth=echo_split_depth + 1,
+                )
+            )
+        merged = "".join(translated_parts)
+        log_text("AI_RESPONSE", merged)
+        self.stats["chunks_translated"] += 1
+        self.stats["source_chars"] += sum(len(part) for part in parts)
+        self.stats["translated_chars"] += len(merged or "")
+        return merged
 
     @staticmethod
     def _is_google_silent_abort_http500_error(error: Exception) -> bool:

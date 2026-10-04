@@ -521,5 +521,120 @@ class TestUntranslatedRetryLoop(unittest.TestCase):
         self.assertEqual(eng.calls, 7)
 
 
+class SizeEchoEngine(TranslationEngine):
+    """Copy-mode above a CJK size threshold: exactly what a 'lite' model does
+    when a whole chapter is handed over in one request, while the same text in
+    smaller pieces gets translated."""
+
+    def __init__(self, echo_above_cjk=1200):
+        super().__init__(from_lang="ZH", to_lang="VI")
+        self.echo_above_cjk = echo_above_cjk
+        self.calls = 0
+
+    def supports_batch(self):
+        return False
+
+    @staticmethod
+    def _vi_segment(length: int) -> str:
+        """Vietnamese filler of the same length (length guards stay happy)."""
+        base = "nội dung bản dịch tiếng Việt "
+        reps = max(1, (length // len(base)) + 1)
+        return (base * reps)[:length]
+
+    def translate(self, text):
+        self.calls += 1
+        visible = re.sub(r"<[^>]+>", "", text)
+        if len(re.findall(r"[\u4e00-\u9fff]", visible)) > self.echo_above_cjk:
+            return text  # echo the source instead of translating
+        # translate every text node (including one that does not follow a tag)
+        return "".join(
+            piece if piece.startswith("<") else self._vi_segment(len(piece))
+            for piece in re.split(r"(<[^>]+>)", text)
+        )
+
+
+class TestEchoSplit(unittest.TestCase):
+    """A chunk that keeps echoing is split in half and each part retried."""
+
+    PARA = "<p>" + "测试段落内容继续写下去" * 30 + "</p>"  # 330 CJK chars each
+    BIG = "<h2>第43章 测试章节</h2>" + PARA * 6
+
+    def test_big_enough_to_be_split(self):
+        import translator.translator as tr_mod
+
+        self.assertGreaterEqual(len(self.BIG), tr_mod.ECHO_SPLIT_MIN_CHARS * 2)
+        # the engine only copies the *whole* chapter (its CJK count); any part
+        # is bounded by the split size, so the fixture exercises one split
+        self.assertGreater(len(re.findall(r"[\u4e00-\u9fff]", self.BIG)), 1900)
+
+    def test_large_echoing_chunk_is_split_then_translated(self):
+        eng = SizeEchoEngine(echo_above_cjk=1900)  # only the whole chunk echoes
+        t = Translator(eng, consistency_config={})
+        with mock.patch("time.sleep"):
+            out = t._translate_chunk(
+                self.BIG,
+                chapter_number=43,
+                should_stop=lambda: eng.calls >= 20,  # fail loudly, never hang
+            )
+        self.assertEqual(t.stats["echo_split_events"], 1)
+        # 3 echoing attempts on the whole chunk, then one call per part
+        self.assertGreaterEqual(eng.calls, 5)
+        self.assertNotRegex(out, r"[\u4e00-\u9fff]")
+        self.assertEqual(out.count("<p>"), self.BIG.count("<p>"))
+        self.assertIn("bản dịch tiếng Việt", out)
+
+    def test_small_chunk_keeps_retrying_without_splitting(self):
+        soup = BeautifulSoup(
+            "<html><body><p>"
+            "小块中文内容虽然不大但是足够触发未翻译检测因此会一直重试下去"
+            "</p></body></html>",
+            "html.parser",
+        )
+        eng = SizeEchoEngine(echo_above_cjk=0)  # always copy-mode
+        t = Translator(eng, consistency_config={})
+        with mock.patch("time.sleep"):
+            with self.assertRaises(_TranslationStopped):
+                t.translate_html(
+                    soup,
+                    chapter_number=1,
+                    should_stop=lambda: eng.calls >= 6,
+                )
+        self.assertEqual(t.stats["echo_split_events"], 0)
+        self.assertEqual(eng.calls, 6)
+
+    def test_split_hands_should_stop_to_each_part(self):
+        eng = SizeEchoEngine(echo_above_cjk=1200)
+        t = Translator(eng, consistency_config={})
+        with mock.patch("time.sleep"):
+            with self.assertRaises(_TranslationStopped):
+                t._translate_chunk(
+                    self.BIG,
+                    chapter_number=43,
+                    should_stop=lambda: eng.calls >= 4,
+                )
+        self.assertEqual(t.stats["echo_split_events"], 1)
+        self.assertEqual(eng.calls, 4)  # stopped between parts, not mid-book
+
+    def test_split_is_bounded_and_source_is_never_returned(self):
+        import translator.translator as tr_mod
+
+        huge = "<h2>第43章 测试章节</h2>" + self.PARA * 21  # ~7000 chars
+        eng = SizeEchoEngine(echo_above_cjk=0)  # echoes everything
+        t = Translator(eng, consistency_config={})
+        with mock.patch("time.sleep"):
+            with self.assertRaises(_TranslationStopped):
+                t._translate_chunk(
+                    huge,
+                    chapter_number=43,
+                    should_stop=lambda: eng.calls >= 30,
+                )
+        self.assertGreaterEqual(t.stats["echo_split_events"], 1)
+        # depth-capped: at most 1 + 2 + 4 splits before pieces are small
+        self.assertLessEqual(
+            t.stats["echo_split_events"],
+            sum(2 ** d for d in range(tr_mod.ECHO_SPLIT_MAX_DEPTH)),
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
