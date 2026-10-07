@@ -252,19 +252,17 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
 .rd-node-go.is-muted { opacity: 0.55; }
 
 /* ------------------------------------------------------------------ stage */
+/* The stage shares the app's theme tokens, so the page theme can never
+   disagree with the global theme (bg/text below come from reader.js). */
 .rd-stage {
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   overflow: hidden;
   min-height: 320px;
+  background: var(--bg);
   transition: background var(--t-fast) var(--ease);
 }
-.rd-stage[data-theme="light"] { background: #ffffff; }
-.rd-stage[data-theme="sepia"] { background: #f7ecd7; }
-.rd-stage[data-theme="dark"]  { background: #14171c; }
-.rd-stage[data-theme="black"] { background: #000000; }
-.rd-stage[data-theme="system"] { background: var(--surface-2); }
 
 #rd-frame {
   display: block;

@@ -157,13 +157,14 @@ window.APP.reader = {
         <button id="rd-tts-stop" type="button" class="btn btn-ghost btn-sm" hidden>{{ icon('stop') }} {{ t('read.stop') }}</button>
       </div>
       <div id="rd-tts-note" class="muted small" aria-live="polite"></div>
+      <div id="rd-tts-bg-hint" class="muted small">{{ t('read.tts_bg_hint') }}</div>
       <div class="rd-field">
         <span>{{ t('read.music') }}</span>
         <select id="rd-music-file" class="rd-select"></select>
       </div>
       <label class="rd-field">
         <span>{{ t('read.music_vol') }} <b id="rd-music-vol-v"></b></span>
-        <input id="rd-music-vol" type="range" min="0" max="100" step="5" value="25">
+        <input id="rd-music-vol" type="range" min="0" max="100" step="1" value="25">
       </label>
       <div class="rd-field rd-actions">
         <button id="rd-music-play" type="button" class="btn btn-ghost btn-sm" aria-pressed="false">{{ icon('play') }} <span id="rd-music-play-l">{{ t('read.music_play') }}</span></button>

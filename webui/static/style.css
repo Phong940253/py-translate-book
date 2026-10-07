@@ -4,6 +4,7 @@
    Dark is the default; light remaps the SAME variables via [data-theme].
    ------------------------------------------------------------------------ */
 :root {
+  color-scheme: dark;
   --bg: oklch(0.165 0.012 250);
   --surface: oklch(0.20 0.014 250);
   --surface-2: oklch(0.24 0.015 250);
@@ -33,6 +34,7 @@
 }
 
 html[data-theme="light"] {
+  color-scheme: light;
   --bg: oklch(0.965 0.004 250);
   --surface: oklch(1 0 0);
   --surface-2: oklch(0.94 0.005 250);
@@ -51,6 +53,60 @@ html[data-theme="light"] {
   --overlay: oklch(0.20 0.02 250 / 0.42);
   --shadow-lg: 0 8px 30px oklch(0.16 0.02 250 / 0.14);
 }
+
+/* Sepia (giấy cổ) — the reader's paper tone, promoted to a full app theme. */
+html[data-theme="sepia"] {
+  color-scheme: light;
+  --bg: oklch(0.933 0.030 85);
+  --surface: oklch(0.961 0.024 85);
+  --surface-2: oklch(0.906 0.034 85);
+  --border: oklch(0.862 0.043 85);
+  --border-strong: oklch(0.780 0.055 88);
+  --text: oklch(0.285 0.030 70);
+  --text-2: oklch(0.465 0.040 72);
+  --text-3: oklch(0.585 0.035 75);
+  --accent: oklch(0.470 0.100 195);
+  --accent-contrast: oklch(0.990 0 0);
+  --ok: oklch(0.470 0.100 155);
+  --warn: oklch(0.540 0.100 70);
+  --err: oklch(0.540 0.170 25);
+  --info: oklch(0.480 0.100 255);
+  --code-bg: oklch(0.900 0.035 85);
+  --overlay: oklch(0.300 0.030 70 / 0.35);
+  --shadow-lg: 0 8px 30px oklch(0.350 0.030 70 / 0.20);
+}
+
+/* Black (OLED) — true black canvas, lifted greys for chrome. */
+html[data-theme="black"] {
+  color-scheme: dark;
+  --bg: oklch(0 0 0);
+  --surface: oklch(0.070 0 0);
+  --surface-2: oklch(0.130 0 0);
+  --border: oklch(0.220 0 0);
+  --border-strong: oklch(0.320 0 0);
+  --text: oklch(0.840 0 0);
+  --text-2: oklch(0.650 0 0);
+  --text-3: oklch(0.470 0 0);
+  --code-bg: oklch(0.050 0 0);
+  --overlay: oklch(0 0 0 / 0.70);
+  --shadow-lg: 0 8px 32px oklch(0 0 0 / 0.60);
+}
+
+/* Custom — chrome takes the reader's own bg/fg pair; everything else is
+   mixed from them so surfaces/borders/text stay legible on any pair. */
+html[data-theme="custom"] {
+  --bg: var(--custom-bg, oklch(0.165 0.012 250));
+  --text: var(--custom-fg, oklch(0.920 0.008 250));
+  --surface: color-mix(in srgb, var(--bg) 92%, var(--text));
+  --surface-2: color-mix(in srgb, var(--bg) 86%, var(--text));
+  --border: color-mix(in srgb, var(--bg) 78%, var(--text));
+  --border-strong: color-mix(in srgb, var(--bg) 64%, var(--text));
+  --text-2: color-mix(in srgb, var(--text) 84%, var(--bg));
+  --text-3: color-mix(in srgb, var(--text) 64%, var(--bg));
+  --code-bg: color-mix(in srgb, var(--bg) 94%, var(--text));
+  --overlay: color-mix(in srgb, var(--bg) 40%, transparent);
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
@@ -156,10 +212,57 @@ body.nav-open .topbar { z-index: 70; }
 .lang-btn:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .lang-btn.active { background: var(--accent); color: var(--accent-contrast); }
 
-/* Theme toggle: show the icon of the theme you can switch TO. */
+/* Theme menu: the icon reflects the scheme you are ON's opposite target
+   (dark chrome offers the sun, light chrome offers the moon). */
 #theme-toggle .ic { display: inline-flex; }
-html[data-theme="dark"]  #theme-toggle .ic-moon { display: none; }
-html[data-theme="light"] #theme-toggle .ic-sun  { display: none; }
+html[data-scheme="dark"] #theme-toggle .ic-moon { display: none; }
+html[data-scheme="light"] #theme-toggle .ic-sun { display: none; }
+
+/* ------------------------------------------------------ theme menu (global) */
+.theme-menu { position: relative; }
+.theme-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 90;
+  min-width: 208px; padding: var(--sp-2);
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); box-shadow: var(--shadow-lg);
+}
+.theme-pop[hidden] { display: none; }
+.theme-opt { justify-content: flex-start; width: 100%; gap: var(--sp-2); }
+.theme-opt[aria-checked="true"] {
+  background: color-mix(in oklch, var(--accent) 16%, var(--surface));
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+}
+.theme-dot {
+  width: 14px; height: 14px; border-radius: 4px; flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+}
+.theme-opt[aria-checked="true"] .theme-dot { outline: 2px solid var(--accent); outline-offset: 1px; }
+.theme-dot[data-dot="light"]  { background: #ffffff; }
+.theme-dot[data-dot="sepia"]  { background: #f7ecd7; }
+.theme-dot[data-dot="dark"]   { background: #14171c; }
+.theme-dot[data-dot="black"]  { background: #000000; }
+.theme-dot[data-dot="system"] { background: linear-gradient(135deg, #fff 0 50%, #14171c 50% 100%); }
+.theme-dot[data-dot="custom"] {
+  background: linear-gradient(135deg, var(--custom-bg, #101418) 0 50%,
+                                      var(--custom-fg, #d7dbe0) 50% 100%);
+}
+.theme-custom-row {
+  display: flex; gap: var(--sp-3); margin-top: var(--sp-1);
+  padding-top: var(--sp-2); border-top: 1px solid var(--border);
+}
+.theme-custom-row[hidden] { display: none; }
+.theme-custom-row label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.theme-custom-row input[type="color"] {
+  width: 48px; height: 26px; padding: 0; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+/* the open popover must paint above sticky page chrome (e.g. reader bar z30) */
+body.theme-open .topbar { z-index: 70; }
 
 /* ---------------------------------------------------------------- buttons */
 .btn {

@@ -21,6 +21,7 @@ TRANSLATIONS = {
         "nav.keys": "API Keys",
         "nav.images": "Ảnh",
         "nav.menu": "Menu",
+        "app.theme": "Chủ đề",
         "footer.local": "Local only · 127.0.0.1:5000",
         # books / library
         "books.title": "Thư viện EPUB",
@@ -269,7 +270,7 @@ TRANSLATIONS = {
         "read.font_size": "Cỡ chữ",
         "read.line_height": "Giãn dòng",
         "read.width": "Bề rộng trang",
-        "read.page_theme": "Nền trang",
+        "read.page_theme": "Chủ đề",
         "read.theme_light": "Sáng",
         "read.theme_sepia": "Giấy cổ",
         "read.theme_dark": "Tối",
@@ -306,6 +307,7 @@ TRANSLATIONS = {
         "read.tts_finished": "Đã đọc hết sách.",
         "read.tts_speaking": "Chương {ch} · đoạn {i}/{total}",
         "read.tts_play_fail": "Không phát được audio.",
+        "read.tts_bg_hint": "Tắt màn hình vẫn đọc tiếp. Nếu bị dừng: Chrome → Pin → Cho phép chạy nền (Không hạn chế).",
         "read.test_text": "Đây là giọng đọc thử. Chào bạn, quyển sách đang được mở.",
         # reading UI (P1)
         "read.mode": "Kiểu đọc",
@@ -374,6 +376,7 @@ TRANSLATIONS = {
         "nav.keys": "API Keys",
         "nav.images": "Images",
         "nav.menu": "Menu",
+        "app.theme": "Theme",
         "footer.local": "Local only · 127.0.0.1:5000",
         # books / library
         "books.title": "EPUB Library",
@@ -622,7 +625,7 @@ TRANSLATIONS = {
         "read.font_size": "Font size",
         "read.line_height": "Line height",
         "read.width": "Page width",
-        "read.page_theme": "Page theme",
+        "read.page_theme": "Theme",
         "read.theme_light": "Light",
         "read.theme_sepia": "Sepia",
         "read.theme_dark": "Dark",
@@ -659,6 +662,7 @@ TRANSLATIONS = {
         "read.tts_finished": "Finished the whole book.",
         "read.tts_speaking": "Chapter {ch} · paragraph {i}/{total}",
         "read.tts_play_fail": "Could not play the audio.",
+        "read.tts_bg_hint": "Audio keeps reading with the screen off. If it stops: Android Settings → Apps → Chrome → Battery → Unrestricted.",
         "read.test_text": "This is a voice test. Hello — your book is now open.",
         # reading UI (P1)
         "read.mode": "Reading mode",

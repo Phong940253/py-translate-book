@@ -59,7 +59,6 @@
   var DEFAULTS = {
     family: 'serif', size: 18, lh: 1.75, width: 760, ls: 0, margin: 24,
     align: 'left', breakWords: false, overrideFont: false,
-    theme: 'dark', customBg: '#101418', customFg: '#d7dbe0',
     mode: 'scroll', cols: 1
   };
   var state = {
@@ -136,32 +135,44 @@
     });
   }
 
-  /* ------------------------------------------------ appearance / theming */
-  var THEMES = {
-    light: { fg: '#1b1e22', bg: '#ffffff', scheme: 'light' },
-    sepia: { fg: '#3d2f1c', bg: '#f7ecd7', scheme: 'light' },
-    dark: { fg: '#d7dbe0', bg: '#14171c', scheme: 'dark' },
-    black: { fg: '#cfcfcf', bg: '#000000', scheme: 'dark' }
-  };
-
+  /* ------------------------------------------------ appearance / theming
+     The page theme IS the global theme: colours come from the app's own
+     tokens (--bg / --text under html[data-theme]), so the chrome and the
+     reading surface can never disagree. app.js resolves 'system'/'custom'
+     and fires `themechange` whenever the global theme moves. */
+  function globalTheme() {
+    return document.documentElement.getAttribute('data-theme') || 'dark';
+  }
+  function globalThemePref() {
+    return window.themePref ? window.themePref() : globalTheme();
+  }
+  function rootVar(name, fallback) {
+    try {
+      var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      if (v && v.trim()) return v.trim();
+    } catch (e) { /* no computed style */ }
+    return fallback;
+  }
   function themeColors() {
-    var k = settings.theme;
-    if (k === 'system') {
-      var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      k = dark ? 'dark' : 'light';
-    }
-    if (k === 'custom') {
-      var bg = settings.customBg || '#101418';
-      var fg = settings.customFg || '#d7dbe0';
-      var lum = function (hex) {
-        var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-        if (!m) return 0;
-        var v = parseInt(m[1], 16);
-        return (0.2126 * ((v >> 16) & 255) + 0.7152 * ((v >> 8) & 255) + 0.0722 * (v & 255)) / 255;
-      };
-      return { fg: fg, bg: bg, scheme: lum(bg) < 0.5 ? 'dark' : 'light' };
-    }
-    return THEMES[k] || THEMES.dark;
+    var k = globalTheme();
+    return {
+      bg: rootVar('--bg', k === 'custom' ? '#101418' : '#14171c'),
+      fg: rootVar('--text', '#d7dbe0'),
+      scheme: document.documentElement.getAttribute('data-scheme') ||
+        ((k === 'light' || k === 'sepia') ? 'light' : 'dark')
+    };
+  }
+  /* The custom pair belongs to the global theme, not to a single book. */
+  function customColors() {
+    var bg = null, fg = null;
+    try { bg = localStorage.getItem('theme.bg'); fg = localStorage.getItem('theme.fg'); } catch (e) {}
+    return { bg: bg || '#101418', fg: fg || '#d7dbe0' };
+  }
+  /* Pre-sync saves kept a per-book theme; it lives globally now (and is only
+     dropped in memory — the next save writes the cleaned shape). */
+  var LEGACY_THEME_KEYS = ['theme', 'customBg', 'customFg'];
+  function dropLegacyTheme() {
+    LEGACY_THEME_KEYS.forEach(function (k) { delete settings[k]; });
   }
 
   function familyValue() {
@@ -214,13 +225,14 @@
     setLabel('rd-set-margin-v', settings.margin + 'px');
     var ow = el('rd-set-ow'); if (ow) ow.checked = !!settings.breakWords;
     var ov = el('rd-set-override'); if (ov) ov.checked = !!settings.overrideFont;
-    pressGroup('.rd-theme', 'theme', settings.theme);
+    pressGroup('.rd-theme', 'theme', globalThemePref());
     pressGroup('.rd-align', 'align', settings.align);
     pressGroup('.rd-mode', 'mode', settings.mode);
     pressGroup('.rd-cols', 'cols', String(settings.cols));
-    var cc = el('rd-custom-colors'); if (cc) cc.hidden = settings.theme !== 'custom';
-    setVal('rd-set-bg', settings.customBg);
-    setVal('rd-set-fg', settings.customFg);
+    var cc = el('rd-custom-colors'); if (cc) cc.hidden = globalThemePref() !== 'custom';
+    var ccCol = customColors();
+    setVal('rd-set-bg', ccCol.bg);
+    setVal('rd-set-fg', ccCol.fg);
 
     var rd = el('rd');
     if (rd) {
@@ -233,8 +245,9 @@
     if (pn) pn.hidden = settings.mode !== 'page';
     var stage = el('rd-stage');
     if (stage) {
-      stage.setAttribute('data-theme', settings.theme);
-      stage.style.background = settings.theme === 'custom' ? (settings.customBg || '') : '';
+      // background comes from var(--bg) in reader.css → always the global theme
+      stage.setAttribute('data-theme', globalTheme());
+      stage.style.background = '';
     }
     if (fdoc) pushVars(fdoc);
     if (state.frameReady) {
@@ -372,7 +385,10 @@
       scroll: opts.scroll !== false
     };
     showLoading(true);
-    setChromeAway(false);   // fresh chapter → toolbar/header back in view
+    // fresh chapter → toolbar/header back in view; EXCEPT a read-aloud
+    // auto-advance (quiet), which must keep idle-hidden bars hidden — the
+    // user isn't touching the screen, nothing deliberate happened
+    if (!opts.quiet) setChromeAway(false);
     chromeReset();
     return Promise.all([fetchDoc(n), fetchChap(n)]).then(function (r) {
       if (token !== state.token) return null;
@@ -2171,7 +2187,8 @@
      where it left off. */
 
   var player = {
-    ctx: null, gain: null, timer: 0, rate: 1,
+    ctx: null, dest: null, gain: null, timer: 0, rate: 1,
+    direct: false, // fallback: gain wired to the raw destination (no <audio>)
     q: [],        // decoded, not yet scheduled: {buf, s, e, final}
     wins: [],     // scheduled windows: {src, buf, s, e, final, t0, t1, n}
     nextT: 0,     // ctx time where the next piece starts
@@ -2182,8 +2199,15 @@
     if (player.ctx) return player.ctx;
     var AC = window.AudioContext || window.webkitAudioContext;
     player.ctx = new AC();
+    // The graph feeds a hidden <audio> element (NOT the raw destination):
+    // Android Chrome/Firefox only keep a tab's audio alive with the screen
+    // off while a media element is playing — a bare AudioContext gets
+    // suspended, the prefetch queue stops with it, and playback dries up.
+    // The same element gives the page a Media Session (lock screen + headset
+    // buttons). See ttsOut()/mediaSync() below.
+    player.dest = player.ctx.createMediaStreamDestination();
     player.gain = player.ctx.createGain();
-    player.gain.connect(player.ctx.destination);
+    player.gain.connect(player.dest);
     player.rate = ttsCfg.rate;
     return player.ctx;
   }
@@ -2413,9 +2437,17 @@
      invalidates older chains via pfGen. */
   var TTS_QUEUE = 10;
 
+  /* Backgrounded (screen off): synthesize DEEPER so playback outlives any
+     timer throttling while the screen is dark —16 paragraphs is also the
+     audioFor cache cap, so nothing extra is retained. */
+  function queueDepth() {
+    var hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    return hidden ? Math.max(TTS_QUEUE, 16) : TTS_QUEUE;
+  }
+
   function prefetchCurrent(i) {
     var gen = ++speak.pfGen;
-    var ch = state.ch, idx = i + 1, left = TTS_QUEUE;
+    var ch = state.ch, idx = i + 1, left = queueDepth();
     var total = (state.meta && state.meta.total) || 0;
     var its = state.items;
 
@@ -2510,7 +2542,7 @@
       var next = state.chapter && state.chapter.next;
       if (!next) { speakDone(); return; }
       // keep reading: advance chapters without stopping the session
-      loadChapter(next, { item: 0, push: true }).then(function () {
+      loadChapter(next, { item: 0, push: true, quiet: true }).then(function () {
         if (token !== speak.token || !speak.on) return;
         speak.i = 0;
         speakStep();
@@ -2527,6 +2559,7 @@
     clearSent();
     speakNote(fmt('read.tts_speaking', { ch: state.ch, i: speak.i + 1, total: state.items.length }));
     ttsStatus(i18n('read.tts_synthesizing'));
+    mediaSync();   // paragraph/chapter moved → lock-screen position + title
 
     var idx = speak.i, k = cacheKey(state.ch, idx);
     var cached = speak.groups[k];
@@ -2594,6 +2627,7 @@
     var ctx = playerCtx();          // called from a click → context allowed
     if (ctx.state === 'suspended') { var r = ctx.resume(); if (r && r.catch) r.catch(noop); }
     playerReset();
+    ttsOut(true);                   // start the <audio> inside the activation
     speak.on = true;
     speak.paused = false;
     speak.token++;
@@ -2607,6 +2641,7 @@
     jumpTransport();
     if (!player.timer) player.timer = setInterval(onSpeakTime, 80);
     markSpeaking();
+    mediaSync();
     speakStep();
   }
 
@@ -2614,17 +2649,21 @@
     if (!speak.on) return;
     speak.paused = true;
     if (player.ctx) { var r = player.ctx.suspend(); if (r && r.catch) r.catch(noop); }
+    ttsOut(false);
     var pause = el('rd-tts-pause'), play = el('rd-tts-play');
     if (pause) pause.hidden = true;
     if (play) play.hidden = false;
     jumpTransport();
     ttsStatus(i18n('read.tts_paused'));
     speakNote(i18n('read.tts_paused_note'));
+    mediaSync();
   }
 
   function speakResume() {
     if (!speak.on) return;
     speak.paused = false;
+    ttsOut(true);
+    mediaSync();
     var play = el('rd-tts-play'), pause = el('rd-tts-pause');
     if (play) play.hidden = true;
     if (pause) pause.hidden = false;
@@ -2650,6 +2689,7 @@
     if (speak.ac) { try { speak.ac.abort(); } catch (e) { /* closed */ } speak.ac = null; }
     playerReset();
     if (player.timer) { clearInterval(player.timer); player.timer = 0; }
+    ttsOut(false);
     clearSent();
     var play = el('rd-tts-play'), pause = el('rd-tts-pause'), stop = el('rd-tts-stop');
     if (play) play.hidden = false;
@@ -2659,6 +2699,7 @@
     ttsStatus(tts.state === 'ready' ? fmt('read.tts_ready_n', { n: tts.voices.length }) : ttsStatusText());
     if (updateNote !== false) speakNote('');
     markSpeaking();
+    mediaSync();
   }
 
   function ttsStatusText() {
@@ -2675,6 +2716,126 @@
     if (speak.on) speakStop(true);
   }
 
+  /* -------------------------------------------------------- media plumbing
+     Sound leaves through a hidden <audio> element fed by a
+     MediaStreamAudioDestinationNode (see playerCtx()) — a playing media
+     element is what Android Chrome/Firefox keeps alive with the screen off,
+     and it feeds the Media Session (lock screen / headset controls). If the
+     browser refuses play() (no user activation, e.g. a lock-screen resume)
+     the source falls back to its raw AudioContext destination so sound is
+     never lost — at the cost of screen-off survival until the next gesture. */
+
+  function mediaEl(id) {
+    var e = document.getElementById(id);
+    if (!e) {
+      e = document.createElement('audio');
+      e.id = id;
+      e.setAttribute('aria-hidden', 'true');
+      e.preload = 'auto';
+      e.hidden = true;
+      document.body.appendChild(e);
+    }
+    return e;
+  }
+
+  function ttsOut(on) {
+    var e;
+    try { e = mediaEl('rd-audio'); } catch (err) { return; }
+    if (!player.ctx || !player.dest) return;
+    if (e.srcObject !== player.dest.stream) e.srcObject = player.dest.stream;
+    if (on) {
+      var p = e.play();
+      if (p && p.then) p.then(function () { ttsDirect(false); }, function () { ttsDirect(true); });
+    } else if (!e.paused) {
+      e.pause();
+    }
+  }
+
+  function ttsDirect(yes) {
+    if (!player.ctx || !player.gain || yes === !!player.direct) return;
+    player.direct = yes;
+    if (yes) player.gain.connect(player.ctx.destination);
+    else { try { player.gain.disconnect(player.ctx.destination); } catch (e) { /* not wired */ } }
+  }
+
+  /* -------------------------------------------------------- Media Session
+     ONE session for the page: the lock screen / notification / headset
+     buttons drive the read-aloud (book + author + cover as metadata), and
+     Android classifies the page as media playback — the reason the OS keeps
+     the audio running after the screen turns off. */
+  var media = { hs: false };
+
+  function msOk() { return typeof navigator !== 'undefined' && 'mediaSession' in navigator; }
+
+  function mediaArtwork() {
+    var m = state.meta;
+    if (!m || !m.path) return [];
+    var base = (window.APP && APP.coverUrl) || '/books/cover';
+    return [{ src: base + '?path=' + encodeURIComponent(m.path), sizes: '512x512', type: 'image/jpeg' }];
+  }
+
+  function mediaHandlers() {
+    if (media.hs || !msOk()) return;
+    media.hs = true;
+    var defs = {
+      play: function () { if (speak.on) speakResume(); else speakStart(); },
+      pause: function () { if (speak.on && !speak.paused) speakPause(); },
+      stop: function () { if (speak.on) speakStop(true); },
+      // same granularity as the bottom-bar jump buttons: paragraph back/forth
+      previoustrack: function () { stepItemTts(-1); },
+      nexttrack: function () { stepItemTts(1); }
+    };
+    Object.keys(defs).forEach(function (a) {
+      try { navigator.mediaSession.setActionHandler(a, defs[a]); } catch (e) { /* unsupported */ }
+    });
+  }
+
+  function mediaPos() {
+    if (!msOk() || !navigator.mediaSession.setPositionState) return;
+    try {
+      if (!speak.on) { navigator.mediaSession.setPositionState(); return; }
+      var items = state.items || [], chars = 0, before = 0;
+      for (var i = 0; i < items.length; i++) {
+        var t = (items[i] && items[i].text) || '';
+        if (i < speak.i) before += t.length;
+        chars += t.length;
+      }
+      // same constant as etaText():1300 chars/min at rate 1, scaled by rate
+      var rate = Math.max(0.25, ttsCfg.rate || 1);
+      var per = 1300 * rate;
+      var dur = Math.round((chars / per) * 60);
+      if (!dur) return;
+      navigator.mediaSession.setPositionState({
+        duration: dur,
+        position: Math.min(dur, Math.round((before / per) * 60)),
+        playbackRate: rate
+      });
+    } catch (e) { /* invalid state */ }
+  }
+
+  function mediaSync() {
+    if (!msOk()) return;
+    var active = speak.on || bgm.on;
+    try {
+      if (active && window.MediaMetadata) {
+        var m = state.meta || {};
+        var ch = (m.chapters && m.chapters[state.ch - 1]) || null;
+        navigator.mediaSession.metadata = new MediaMetadata(
+          speak.on
+            ? { title: m.title || '', artist: m.author || '',
+                album: (ch && chapterLabel(ch)) || '', artwork: mediaArtwork() }
+            : { title: bgm.file || '', artist: i18n('read.music'),
+                album: m.title || '', artwork: mediaArtwork() });
+      } else {
+        navigator.mediaSession.metadata = null;
+      }
+      navigator.mediaSession.playbackState =
+        speak.on ? (speak.paused ? 'paused' : 'playing')
+                 : (bgm.on ? 'playing' : 'none');
+      mediaPos();
+    } catch (e) { /* old browsers */ }
+  }
+
   /* ------------------------------------------------------ background music
      The soundtrack runs on its OWN AudioContext (never the TTS player's):
      pause / stop / speed changes of the read-aloud cannot touch it, so on a
@@ -2683,7 +2844,8 @@
      gain node below the voice (default 25%) and the loop is scheduled at
      playbackRate 1.0 — the read-speed slider never changes its tempo. */
   var bgmKey = 'rd.bgm';
-  var bgm = { ctx: null, gain: null, src: null, buf: null, bufFile: null,
+  var bgm = { ctx: null, gain: null, dest: null, direct: false,
+    src: null, buf: null, bufFile: null,
     on: false, want: false, loading: false, file: null, vol: 25, files: [] };
 
   function bgmSave() { saveJSON(bgmKey, { file: bgm.file, vol: bgm.vol }); }
@@ -2708,8 +2870,33 @@
     bgm.ctx = new AC();
     bgm.gain = bgm.ctx.createGain();
     bgm.gain.gain.value = bgm.vol / 100;
-    bgm.gain.connect(bgm.ctx.destination);
+    // Same trick as the read-aloud: out through a hidden <audio> element so
+    // music-only playback also counts as media playback (survives screen off,
+    // shows a lock-screen card). Its OWN context — the read-aloud's pause/
+    // resume must never touch the soundtrack.
+    bgm.dest = bgm.ctx.createMediaStreamDestination();
+    bgm.gain.connect(bgm.dest);
     return bgm.ctx;
+  }
+
+  function bgmOut(on) {
+    var e;
+    try { e = mediaEl('rd-audio-bgm'); } catch (err) { return; }
+    if (!bgm.ctx || !bgm.dest) return;
+    if (e.srcObject !== bgm.dest.stream) e.srcObject = bgm.dest.stream;
+    if (on) {
+      var p = e.play();
+      if (p && p.then) p.then(function () { bgmDirect(false); }, function () { bgmDirect(true); });
+    } else if (!e.paused) {
+      e.pause();
+    }
+  }
+
+  function bgmDirect(yes) {
+    if (!bgm.ctx || !bgm.gain || yes === !!bgm.direct) return;
+    bgm.direct = yes;
+    if (yes) bgm.gain.connect(bgm.ctx.destination);
+    else { try { bgm.gain.disconnect(bgm.ctx.destination); } catch (e) { /* not wired */ } }
   }
 
   function bgmUrl(name) {
@@ -2768,6 +2955,8 @@
     bgm.loading = false;
     bgmRender();
     bgmNote('');
+    bgmOut(true);
+    mediaSync();
   }
 
   function bgmPlay() {
@@ -2808,6 +2997,8 @@
     if (bgm.src) { try { bgm.src.stop(0); } catch (e) { /* already ended */ } bgm.src = null; }
     bgm.on = false;
     bgmRender();
+    bgmOut(false);
+    mediaSync();
   }
 
   function bgmToggle() {
@@ -3217,8 +3408,9 @@
     });
     qsa('.rd-theme').forEach(function (b) {
       b.addEventListener('click', function () {
-        settings.theme = b.dataset.theme;
-        saveSettings(); applySettings();
+        // page theme == global theme: this button dresses the whole app
+        if (window.setTheme) window.setTheme(b.dataset.theme);
+        applySettings();
       });
     });
     qsa('.rd-align').forEach(function (b) {
@@ -3257,8 +3449,14 @@
     var ov = el('rd-set-override');
     if (ov) ov.addEventListener('change', function () { settings.overrideFont = this.checked; saveSettings(); applySettings(); });
     var bg = el('rd-set-bg'), fg = el('rd-set-fg');
-    if (bg) bg.addEventListener('input', function () { settings.customBg = this.value; saveSettings(); applySettings(); });
-    if (fg) fg.addEventListener('input', function () { settings.customFg = this.value; saveSettings(); applySettings(); });
+    var pushColors = function () {
+      // writing the GLOBAL custom pair — the stage and the app share it
+      if (window.setThemeColors) window.setThemeColors(bg && bg.value, fg && fg.value);
+      if (window.setTheme && globalThemePref() !== 'custom') window.setTheme('custom');
+      applySettings();
+    };
+    if (bg) bg.addEventListener('input', pushColors);
+    if (fg) fg.addEventListener('input', pushColors);
     var reset = el('rd-set-reset');
     if (reset) reset.addEventListener('click', function () {
       settings = Object.assign({}, DEFAULTS);
@@ -3384,14 +3582,34 @@
     document.addEventListener('webkitfullscreenchange', onFsChange);
     window.addEventListener('pagehide', function () { flushSidecar(true); });
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'hidden') flushSidecar(true);
+      if (document.visibilityState === 'hidden') {
+        flushSidecar(true);
+        // Screen off: buffer deeper — the prefetch chain must outlive timer
+        // throttling (the playing <audio> element is what keeps the tab
+        // classified as media playback in the background).
+        if (speak.on && !speak.paused) prefetchCurrent(speak.i);
+        return;
+      }
+      // Back to the foreground: re-arm audio + session (play() may need the
+      // gesture we just got, contexts may have been suspended by the OS).
+      if (player.ctx && speak.on && !speak.paused) {
+        var r = player.ctx.resume();
+        if (r && r.catch) r.catch(noop);
+        ttsOut(true);
+      }
+      mediaSync();
     });
     if (window.matchMedia) {
       var mq = window.matchMedia('(prefers-color-scheme: dark)');
-      var onMq = function () { if (settings.theme === 'system') applySettings(); };
+      var onMq = function () { if (globalThemePref() === 'system') applySettings(); };
       if (mq.addEventListener) mq.addEventListener('change', onMq);
       else if (mq.addListener) mq.addListener(onMq);
     }
+    // the global theme drives the page theme: re-push vars on every change
+    document.addEventListener('themechange', applySettings);
+    window.addEventListener('storage', function (e) {
+      if (e.key === 'theme' || e.key === 'theme.bg' || e.key === 'theme.fg') applySettings();
+    });
     window.addEventListener('popstate', function (ev) {
       var n = ev.state && ev.state.rdCh;
       if (!n || !state.meta) return;
@@ -3451,6 +3669,7 @@
       if (savedBgm.vol !== undefined && !isNaN(Number(savedBgm.vol))) bgm.vol = clamp(Number(savedBgm.vol), 0, 100);
     }
     if (settings.family === 'custom') settings.family = 'serif';  // font is session-only
+    dropLegacyTheme();
 
     applySettings();
     bindStatic();
@@ -3471,6 +3690,7 @@
       if (remote && remote.settings) {
         settings = Object.assign({}, settings, remote.settings);
         if (settings.family === 'custom') settings.family = 'serif';
+        dropLegacyTheme();
         saveJSON(setKey, settings);
       }
       applySettings();
@@ -3487,5 +3707,6 @@
     });
 
     warmVoices();
+    mediaHandlers();   // lock-screen / headset buttons before first play
   });
 })();

@@ -1474,6 +1474,95 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("toggleTheme", body)
         self.assertIn('data-theme="dark"', body)
 
+    def test_global_theme_menu_lists_every_theme(self):
+        # The topbar menu is the single place to pick a theme; the reader's
+        # page theme follows it (see test_theme_is_one_source_of_truth).
+        r = self.client.get("/")
+        body = r.get_data(as_text=True)
+        self.assertIn('id="theme-pop"', body)
+        self.assertIn("toggleThemeMenu", body)
+        for name in ("light", "sepia", "dark", "black", "system", "custom"):
+            self.assertIn(f'data-gtheme="{name}"', body)
+        # custom pair lives with the global theme, not per book
+        self.assertIn('id="theme-custom-row"', body)
+        self.assertIn('id="theme-bg"', body)
+        self.assertIn('id="theme-fg"', body)
+        # labels resolve for both locales
+        self.assertIn("Giấy cổ", body)
+        self.client.set_cookie("lang", "en")
+        body_en = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Sepia", body_en)
+
+    def test_theme_is_one_source_of_truth(self):
+        def read(*parts):
+            with open(os.path.join(PROJECT_ROOT, "webui", *parts), encoding="utf-8") as fh:
+                return fh.read()
+
+        style = read("static", "style.css")
+        # every global theme remaps the app tokens (sepia/black/custom added);
+        # dark is the :root default, the rest are explicit overrides
+        self.assertRegex(style, r":root \{\s*\n\s*color-scheme: dark;")
+        for name in ("light", "sepia", "black", "custom"):
+            self.assertIn(f'html[data-theme="{name}"]', style)
+        self.assertIn("color-scheme", style)
+        self.assertIn("--custom-bg", style)
+
+        # the reading stage paints with those same tokens
+        reader_css = read("static", "reader.css")
+        stage = reader_css.split(".rd-stage {", 1)[1].split("}", 1)[0]
+        self.assertIn("var(--bg", stage)
+        for hexval in ("#ffffff", "#f7ecd7", "#14171c", "#000000"):
+            self.assertNotIn(hexval, reader_css)
+
+        app_js = read("static", "app.js")
+        for needle in ("function setTheme(", "function themePref(",
+                       "function applyTheme(", "themechange"):
+            self.assertIn(needle, app_js)
+
+        reader_js = read("static", "reader.js")
+        # the reader subscribes to the global theme instead of keeping its own
+        self.assertIn("'themechange'", reader_js)
+        self.assertIn("globalThemePref()", reader_js)
+        self.assertNotIn("settings.theme", reader_js)
+
+    def test_media_session_background_audio(self):
+        # Screen-off playback: both sound sources leave through hidden <audio>
+        # elements fed by MediaStream destinations (a playing media element is
+        # what Android keeps alive in the background — a bare AudioContext is
+        # suspended and the prefetch queue dies with it), and a Media Session
+        # drives the lock-screen / headset controls.
+        def read(*parts):
+            with open(os.path.join(PROJECT_ROOT, "webui", *parts), encoding="utf-8") as fh:
+                return fh.read()
+
+        js = read("static", "reader.js")
+        for needle in ("createMediaStreamDestination", "srcObject", "ttsOut(true)",
+                       "bgmOut(true)", "'mediaSession'", "setActionHandler",
+                       "playbackState", "setPositionState", "MediaMetadata",
+                       "queueDepth"):
+            self.assertIn(needle, js)
+        # refused play() falls back to the raw destination: never silent
+        self.assertIn("player.gain.connect(player.ctx.destination)", js)
+        self.assertIn("bgm.gain.connect(bgm.ctx.destination)", js)
+
+        html = read("templates", "reader.html")
+        self.assertIn('id="rd-tts-bg-hint"', html)
+
+        from webui import i18n as wui_i18n
+
+        for lang in ("vi", "en"):
+            self.assertIn("read.tts_bg_hint", wui_i18n.TRANSLATIONS[lang])
+
+    def test_read_aloud_keeps_idle_hidden_bars_hidden(self):
+        # After 10s idle the bars retract; a read-aloud auto-advance into the
+        # next chapter is NOT a deliberate act and must not reveal them again
+        # (loadChapter only calls setChromeAway(false) for non-quiet loads).
+        with open(os.path.join(PROJECT_ROOT, "webui", "static", "reader.js"),
+                  encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("if (!opts.quiet) setChromeAway(false)", js)
+        self.assertIn("loadChapter(next, { item: 0, push: true, quiet: true })", js)
+
     def test_job_view_page_renders(self):
         # The job view HTML must expose every element job_view.js wires up, and
         # keep the no-inline-handler / no-emoji contract (component of the

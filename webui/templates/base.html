@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="{{ locale }}" data-theme="dark">
+<html lang="{{ locale }}" data-theme="dark" data-scheme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,13 +11,34 @@
   {% block extra_head %}{% endblock %}
   <script>
     // Apply the saved/preferred theme before first paint to avoid a flash.
+    // One source of truth: localStorage 'theme' = light|sepia|dark|black|system|custom
+    // (null/unknown == system). data-theme carries the RESOLVED value; the reader
+    // reads the same tokens, so its page theme is always in sync with this one.
     (function () {
+      var NAMES = ['light', 'sepia', 'dark', 'black', 'system', 'custom'];
+      var root = document.documentElement;
       var t = null;
       try { t = localStorage.getItem('theme'); } catch (e) {}
-      if (t !== 'light' && t !== 'dark') {
-        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      if (NAMES.indexOf(t) < 0) t = 'system';
+      var light = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+      var r = t === 'system' ? (light ? 'light' : 'dark') : t;
+      var scheme = (r === 'light' || r === 'sepia') ? 'light' : 'dark';
+      if (r === 'custom') {
+        var lum = function (hex) {
+          var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+          if (!m) return 0;
+          var v = parseInt(m[1], 16);
+          return (0.2126 * ((v >> 16) & 255) + 0.7152 * ((v >> 8) & 255) + 0.0722 * (v & 255)) / 255;
+        };
+        var bg = null, fg = null;
+        try { bg = localStorage.getItem('theme.bg'); fg = localStorage.getItem('theme.fg'); } catch (e) {}
+        if (bg) root.style.setProperty('--custom-bg', bg);
+        if (fg) root.style.setProperty('--custom-fg', fg);
+        scheme = lum(bg || '#101418') < 0.5 ? 'dark' : 'light';
+        try { root.style.colorScheme = scheme; } catch (e) {}
       }
-      document.documentElement.setAttribute('data-theme', t);
+      root.setAttribute('data-theme', r);
+      root.setAttribute('data-scheme', scheme);
     })();
   </script>
   <script>
@@ -55,10 +76,27 @@
         <a class="lang-btn {{ 'active' if locale == 'vi' }}" data-lang="vi" href="/set-lang/vi">VI</a>
         <a class="lang-btn {{ 'active' if locale == 'en' }}" data-lang="en" href="/set-lang/en">EN</a>
       </div>
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-sm icon-btn" title="Theme" onclick="toggleTheme()">
-        <span class="ic ic-sun">{{ icon('sun') }}</span>
-        <span class="ic ic-moon">{{ icon('moon') }}</span>
-      </button>
+      <div class="theme-menu" id="theme-menu">
+        <button type="button" id="theme-toggle" class="btn btn-ghost btn-sm icon-btn"
+                title="{{ t('app.theme') }}" aria-label="{{ t('app.theme') }}"
+                aria-haspopup="true" aria-expanded="false" aria-controls="theme-pop"
+                onclick="toggleThemeMenu(event)">
+          <span class="ic ic-sun">{{ icon('sun') }}</span>
+          <span class="ic ic-moon">{{ icon('moon') }}</span>
+        </button>
+        <div class="theme-pop" id="theme-pop" hidden role="group" aria-label="{{ t('app.theme') }}">
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="light" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="light"></span>{{ t('read.theme_light') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="sepia" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="sepia"></span>{{ t('read.theme_sepia') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="dark" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="dark"></span>{{ t('read.theme_dark') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="black" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="black"></span>{{ t('read.theme_black') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="system" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="system"></span>{{ t('read.theme_system') }}</button>
+          <button type="button" class="btn btn-ghost btn-sm theme-opt" data-gtheme="custom" aria-checked="false" role="menuitemradio"><span class="theme-dot" data-dot="custom"></span>{{ t('read.theme_custom') }}</button>
+          <div class="theme-custom-row" id="theme-custom-row" hidden>
+            <label>{{ t('read.bg_color') }}<input type="color" id="theme-bg" value="#101418"></label>
+            <label>{{ t('read.fg_color') }}<input type="color" id="theme-fg" value="#d7dbe0"></label>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
   <main>

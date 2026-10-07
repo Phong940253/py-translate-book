@@ -123,14 +123,171 @@
     _pv.path = null;
   }
 
-  /* ------------------------------------------------------- theme toggle */
-  function toggleTheme() {
+  /* -------------------------------------------------- theme (global, single
+     source of truth). The whole chrome — and the reader's page theme, which
+     listens for `themechange` — is driven from here, so a page can never
+     disagree with the app about light/dark/paper/black/custom. */
+  var THEME_NAMES = ['light', 'sepia', 'dark', 'black', 'system', 'custom'];
+
+  function themePref() {
+    var t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    return THEME_NAMES.indexOf(t) >= 0 ? t : 'system';
+  }
+  window.themePref = themePref;
+
+  function prefersLight() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+  }
+
+  function resolveTheme(t) {
+    if (t === 'system' || THEME_NAMES.indexOf(t) < 0) return prefersLight() ? 'light' : 'dark';
+    return t;
+  }
+
+  function storedColors() {
+    var bg = null, fg = null;
+    try { bg = localStorage.getItem('theme.bg'); fg = localStorage.getItem('theme.fg'); } catch (e) {}
+    return { bg: bg || '#101418', fg: fg || '#d7dbe0' };
+  }
+
+  function lum(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return 0;
+    var v = parseInt(m[1], 16);
+    return (0.2126 * ((v >> 16) & 255) + 0.7152 * ((v >> 8) & 255) + 0.0722 * (v & 255)) / 255;
+  }
+
+  function each(sel, fn) {
+    Array.prototype.forEach.call(document.querySelectorAll(sel), fn);
+  }
+
+  function applyTheme() {
     var root = document.documentElement;
-    var next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-    root.setAttribute('data-theme', next);
-    try { localStorage.setItem('theme', next); } catch (e) {}
+    var name = themePref();
+    var resolved = resolveTheme(name);
+    var scheme;
+    if (name === 'custom') {
+      var c = storedColors();
+      root.style.setProperty('--custom-bg', c.bg);
+      root.style.setProperty('--custom-fg', c.fg);
+      scheme = lum(c.bg) < 0.5 ? 'dark' : 'light';
+      root.style.colorScheme = scheme;          // CSS has no custom rule for it
+    } else {
+      root.style.removeProperty('--custom-bg');
+      root.style.removeProperty('--custom-fg');
+      root.style.removeProperty('color-scheme'); // let the theme rules own it
+      scheme = (resolved === 'light' || resolved === 'sepia') ? 'light' : 'dark';
+    }
+    root.setAttribute('data-theme', resolved);
+    root.setAttribute('data-scheme', scheme);
+
+    each('.theme-opt', function (b) {
+      b.setAttribute('aria-checked', String(b.dataset.gtheme === name));
+    });
+    var row = document.getElementById('theme-custom-row');
+    if (row) row.hidden = name !== 'custom';
+    if (name === 'custom') {
+      var cc = storedColors();
+      var bi = document.getElementById('theme-bg'), fi = document.getElementById('theme-fg');
+      if (bi && bi.value !== cc.bg) bi.value = cc.bg;
+      if (fi && fi.value !== cc.fg) fi.value = cc.fg;
+    }
+
+    // PWA address-bar tint follows the active scheme.
+    each('meta[name="theme-color"]', function (m) {
+      var dark = (m.getAttribute('media') || '').indexOf('dark') >= 0;
+      if (dark === (scheme === 'dark')) {
+        m.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim() || m.content);
+      }
+    });
+
+    try {
+      document.dispatchEvent(new CustomEvent('themechange', {
+        detail: { name: name, theme: resolved, scheme: scheme }
+      }));
+    } catch (e) { /* CustomEvent unsupported */ }
+  }
+  window.applyTheme = applyTheme;
+
+  function setTheme(name) {
+    if (THEME_NAMES.indexOf(name) < 0) return;
+    try { localStorage.setItem('theme', name); } catch (e) {}
+    applyTheme();
+    openThemeMenu(false);
+  }
+  window.setTheme = setTheme;
+
+  /* Reader (and the menu itself) write the custom pair through here. */
+  function setThemeColors(bg, fg) {
+    try {
+      if (bg) localStorage.setItem('theme.bg', bg);
+      if (fg) localStorage.setItem('theme.fg', fg);
+    } catch (e) {}
+    applyTheme();
+  }
+  window.setThemeColors = setThemeColors;
+
+  function openThemeMenu(open) {
+    var pop = document.getElementById('theme-pop');
+    if (!pop) return;
+    pop.hidden = !open;
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.setAttribute('aria-expanded', String(!!open));
+    document.body.classList.toggle('theme-open', !!open);
+  }
+
+  function toggleThemeMenu(ev) {
+    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+    var pop = document.getElementById('theme-pop');
+    openThemeMenu(!!(pop && pop.hidden));
+  }
+  window.toggleThemeMenu = toggleThemeMenu;
+
+  /* Legacy quick flip: light <-> dark (kept for callers/tests). */
+  function toggleTheme() {
+    setTheme(resolveTheme(themePref()) === 'light' ? 'dark' : 'light');
   }
   window.toggleTheme = toggleTheme;
+
+  function wireThemeMenu() {
+    applyTheme();
+    var pop = document.getElementById('theme-pop');
+    if (!pop) return;
+
+    pop.addEventListener('click', function (ev) {
+      var b = ev.target.closest('.theme-opt');
+      if (b && b.dataset.gtheme) setTheme(b.dataset.gtheme);
+    });
+
+    var bi = document.getElementById('theme-bg');
+    var fi = document.getElementById('theme-fg');
+    var onColor = function () {
+      setThemeColors(bi && bi.value, fi && fi.value);
+      if (themePref() !== 'custom') setTheme('custom');
+    };
+    if (bi) bi.addEventListener('input', onColor);
+    if (fi) fi.addEventListener('input', onColor);
+
+    document.addEventListener('click', function (ev) {
+      var menu = document.getElementById('theme-menu');
+      if (menu && !menu.contains(ev.target)) openThemeMenu(false);
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') openThemeMenu(false);
+    });
+    // other tabs change the theme
+    window.addEventListener('storage', function (e) {
+      if (e.key === 'theme' || e.key === 'theme.bg' || e.key === 'theme.fg') applyTheme();
+    });
+    // OS light/dark flips while we follow the system
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var onMq = function () { if (themePref() === 'system') applyTheme(); };
+      if (mq.addEventListener) mq.addEventListener('change', onMq);
+      else if (mq.addListener) mq.addListener(onMq);
+    }
+  }
 
   /* ------------------------------------------------------ library render */
   var LIB = {
@@ -286,6 +443,8 @@
 
   /* ------------------------------------------------------ page wiring */
   document.addEventListener('DOMContentLoaded', function () {
+    wireThemeMenu();
+
     // Library list (books page) and mini-grid (dashboard).
     var el = document.getElementById('lib');
     if (el) { LIB.el = el; LIB.chapters = true; load(false); }
