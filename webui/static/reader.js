@@ -2242,9 +2242,9 @@
     var out = new Float32Array(target + F);
     var aPrev = 0;
 
-    function corr(xi, yi) {                    // normalized, decimated
+    function corr(xi, yi, step) {              // normalized correlation
       var sxy = 0, sxx = 0, syy = 0;
-      for (var i = 0; i < X; i += D) {
+      for (var i = 0; i < X; i += step) {
         var a = x[xi + i], b = x[yi + i];
         sxy += a * b; sxx += a * a; syy += b * b;
       }
@@ -2261,14 +2261,28 @@
       if (k > 0) {
         // WSOLA: pick the candidate whose head lines up with the previous
         // segment's tail, so repositioned segments stay phase-continuous.
+        // Two-stage: coarse scan at D, then a full-resolution refine around
+        // the winner (the decimated pass alone quantized the lag to 4-sample
+        // steps and could settle a half-period-misaligned candidate — audible
+        // as cancellation dips in the voice). Pure silence has no match at
+        // all (-Infinity) and stays on the nominal time map.
         var tgt = aPrev + Hs, best = -Infinity, bestO = 0;
         for (var o = -search; o <= search; o += D) {
           var c = nominal + o;
           if (c < 0 || c + X > len) continue;
-          var sc = corr(c, tgt);
+          var sc = corr(c, tgt, D);
           if (sc > best) { best = sc; bestO = o; }
         }
-        if (best > -Infinity) a = nominal + bestO;
+        if (best > -Infinity) {
+          var rBest = -Infinity, rO = bestO;
+          for (var o2 = bestO - D; o2 <= bestO + D; o2++) {
+            var c2 = nominal + o2;
+            if (c2 < 0 || c2 + X > len) continue;
+            var s2 = corr(c2, tgt, 1);
+            if (s2 > rBest) { rBest = s2; rO = o2; }
+          }
+          a = nominal + rO;
+        }
       }
       if (a < 0) a = 0;
       if (a + F > len) a = Math.max(0, len - F);
@@ -3526,10 +3540,22 @@
       ttsStatus(i18n('read.tts_synthesizing'));
       ttsPost(i18n('read.test_text')).then(function (r) {
         ttsStatus(i18n('read.tts_playing'));
-        var audio = new Audio(URL.createObjectURL(r.blob));
-        audio.playbackRate = ttsCfg.rate;
-        audio.onended = function () { ttsStatus(fmt('read.tts_ready_n', { n: tts.voices.length })); };
-        audio.play();
+        // Play the sample through the SAME pitch-preserving stretch as the
+        // read-aloud. An <audio>.playbackRate resamples the pitch (chipmunk
+        // at x1.5) wherever preservesPitch is missing — exactly the "speed
+        // changes the voice" bug, heard through the button meant to check
+        // the voice.
+        return r.blob.arrayBuffer().then(function (ab) {
+          var ctx = playerCtx();
+          if (ctx.state === 'suspended') { var r0 = ctx.resume(); if (r0 && r0.catch) r0.catch(noop); }
+          return ctx.decodeAudioData(ab).then(function (b) {
+            var src = ctx.createBufferSource();
+            src.buffer = stretched(b, ttsCfg.rate);
+            src.connect(ctx.destination);
+            src.onended = function () { ttsStatus(fmt('read.tts_ready_n', { n: tts.voices.length })); };
+            src.start();
+          });
+        });
       }).catch(function (e) {
         ttsStatus(i18n('read.tts_error') + ' ' + e.message, 'error');
       });

@@ -1555,6 +1555,121 @@ class TestWebUI(unittest.TestCase):
         for lang in ("vi", "en"):
             self.assertIn("read.tts_bg_hint", wui_i18n.TRANSLATIONS[lang])
 
+    def test_read_aloud_speed_keeps_the_voice(self):
+        # Reported: x1.00 read with the right voice, any other speed changed
+        # it. wsola() is the ONLY thing that runs at rate != 1 (stretched()
+        # hands x1.00 the untouched buffer), so drive the real function —
+        # extracted from reader.js and executed under node — through a voiced
+        # 120 Hz signal and pin what "keeps the voice" means:
+        #   - exact duration (len / rate),
+        #   - pitch preserved: a resampler moves f0 by 12*log2(rate) semitones
+        #     (+25% in Hz at x1.25, +50% at x1.5) — the chipmunk bug,
+        #   - envelope tracks the time map (no dropped or echoed chunks).
+        # Plus the wiring needles: stretch before scheduling, and the
+        # test-voice button must not go through <audio>.playbackRate, which
+        # shifts the pitch on every browser without preservesPitch.
+        import re
+        import shutil
+        import subprocess
+        import tempfile
+        import wave
+
+        import numpy as np
+
+        with open(os.path.join(PROJECT_ROOT, "webui", "static", "reader.js"),
+                  encoding="utf-8") as fh:
+            js = fh.read()
+
+        self.assertIn("stretched(p.buf, player.rate)", js)   # stretch -> schedule
+        self.assertIn("Math.abs(rate - 1) < 0.005", js)      # x1.00: zero DSP
+        self.assertNotIn("audio.playbackRate = ttsCfg.rate", js)
+
+        found = re.search(r"function wsola\(x, rate, sr\) \{.*?\n  \}", js, re.S)
+        self.assertIsNotNone(found, "wsola() must stay in reader.js")
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+
+        harness = found.group(0) + r"""
+const fs = require('fs'), path = require('path');
+const sr = 48000, n = sr * 2, x = new Float32Array(n);
+for (let i = 0; i < n; i++) {
+  const t = i / sr;
+  const saw = 2 * ((t * 120) % 1) - 1;                  // 120 Hz voiced pulse
+  const env = 0.35 + 0.65 * Math.abs(Math.sin(2 * Math.PI * t));  // slow swell
+  x[i] = 0.8 * env * saw;
+}
+function writeWav(p, f32) {
+  const buf = Buffer.alloc(44 + f32.length * 2);
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + f32.length * 2, 4); buf.write('WAVE', 8);
+  buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22); buf.writeUInt32LE(sr, 24); buf.writeUInt32LE(sr * 2, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write('data', 36); buf.writeUInt32LE(f32.length * 2, 40);
+  for (let i = 0; i < f32.length; i++) {
+    const v = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32767)));
+    buf.writeInt16LE(v, 44 + i * 2);
+  }
+  fs.writeFileSync(p, buf);
+}
+const out = process.argv[2];
+writeWav(path.join(out, 'in.wav'), x);
+[0.75, 1.25, 1.5, 1.75].forEach(function (r) {
+  writeWav(path.join(out, 'r' + r.toFixed(2) + '.wav'), wsola(x, r, sr));
+});
+"""
+
+        def read16(path):
+            with wave.open(path) as w:
+                return np.frombuffer(w.readframes(w.getnframes()),
+                                     dtype="<i2").astype(np.float64) / 32768.0
+
+        def f0_of(a):
+            # autocorrelation peak over the middle half of the signal
+            seg = a[len(a) // 4: 3 * len(a) // 4]
+            seg = seg - seg.mean()
+            nfft = 1 << (2 * len(seg)).bit_length()
+            spec = np.fft.rfft(seg, nfft)
+            ac = np.fft.irfft(spec * np.conj(spec))[:len(seg)]
+            ac = ac / (ac[0] + 1e-12)
+            lo, hi = int(48000 / 300), int(48000 / 70)   # 70..300 Hz search
+            return 48000 / (lo + int(np.argmax(ac[lo:hi])))
+
+        def env_db(a):
+            h = 480                                     # 10 ms frames
+            m = (len(a) // h) * h
+            return 20 * np.log10(np.sqrt((a[:m].reshape(-1, h) ** 2).mean(1)) + 1e-12)
+
+        with tempfile.TemporaryDirectory() as td:
+            hp = os.path.join(td, "h.js")
+            with open(hp, "w", encoding="utf-8") as fh:
+                fh.write(harness)
+            subprocess.run([node, hp, td], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            xin = read16(os.path.join(td, "in.wav"))
+            f0_in = f0_of(xin)
+            e_in = env_db(xin)
+            for rate in (0.75, 1.25, 1.5, 1.75):
+                y = read16(os.path.join(td, f"r{rate:.2f}.wav"))
+                self.assertEqual(len(y), round(len(xin) / rate),
+                                 f"x{rate}: stretched length must be len/rate")
+                err = abs(f0_of(y) / f0_in - 1)
+                self.assertLess(
+                    err, 0.02,
+                    f"x{rate}: pitch moved {err * 100:.1f}% — speeding up "
+                    f"must not change the voice (a resampler would read "
+                    f"{rate * 100:.0f}% of the original Hz)")
+                e = env_db(y)
+                idx = np.arange(len(e)) * rate
+                keep = idx < len(e_in) - 1
+                dev = e[keep] - np.interp(idx[keep], np.arange(len(e_in)), e_in)
+                self.assertLess(
+                    float(dev.std()), 2.5,
+                    f"x{rate}: envelope lost track of the time map "
+                    f"({dev.std():.1f} dB) — audio dropped or echoed")
+
     def test_read_aloud_keeps_idle_hidden_bars_hidden(self):
         # After 10s idle the bars retract; a read-aloud auto-advance into the
         # next chapter is NOT a deliberate act and must not reveal them again
