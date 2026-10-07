@@ -950,19 +950,21 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(" ".join(parts).replace(" .", "."), long_text)
         self.assertEqual(reader.split_for_tts("   "), [])
 
-    def test_split_for_tts_keeps_sentences_whole(self):
+    def test_split_for_tts_cuts_at_sentences_and_clauses(self):
         from webui import reader
-        # commas must NOT cut a sentence that fits — clause-level stubs
-        # ("chối phắt:") are what makes the model repeat phrases
+        # the pre-c47d63c cut, restored after an A/B of rendered WAVs picked it
+        # as the original voice: every clause becomes its own infer() call, so
+        # the model resets its intonation the way the listener remembers
         text = "Nghe thấy câu này, Tào Sảng cười, chối phắt: “Làm sao có thể chứ?”"
-        self.assertEqual(reader.split_for_tts(text), [text])
-        # sub-min stubs merge into one piece instead of staying 1-2 words
+        self.assertEqual(reader.split_for_tts(text),
+                         ["Nghe thấy câu này,", "Tào Sảng cười,",
+                          "chối phắt:", "“Làm sao có thể chứ?”"])
         self.assertEqual(reader.split_for_tts("Ừ. Đúng vậy. Không nói gì."),
-                         ["Ừ. Đúng vậy. Không nói gì."])
-        # a lone stub has nothing to borrow from — it stays as-is
+                         ["Ừ.", "Đúng vậy.", "Không nói gì."])
+        # a lone sentence has nothing to cut — it stays as-is
         self.assertEqual(reader.split_for_tts("Ừ."), ["Ừ."])
 
-    def test_split_for_tts_clauses_only_when_sentence_overflows(self):
+    def test_split_for_tts_long_clause_runs_cut_at_spaces(self):
         from webui import reader
         clause = "một hai ba bốn năm sáu bảy tám chín mười mười một"
         text = ", ".join([clause] * 5) + "."

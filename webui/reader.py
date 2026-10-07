@@ -1154,134 +1154,72 @@ def ann_validate(ann, *, total: int) -> dict:
 # --------------------------------------------------------------------------
 
 # One infer call is capped: ONNX blows up ("bad allocation") when a single
-# call is handed several hundred characters at once. Sentences over this cap
-# are cut again (clauses first, then spaces).
+# call is handed several hundred characters at once. Text is cut at sentence
+# and comma boundaries first; any span still over this cap is cut at spaces.
 _CHUNK_CHARS = 180
-# Pieces shorter than this borrow a neighbour before synthesis: the AR model
-# misfires its stop token on 1-2 word stubs and repeats phrases (vieneu
-# merges chunks under 20 chars for the same reason — but only inside one
-# call, so stubs have to be merged here, before infer()).
-_MIN_PIECE = 30
 MAX_TEXT = 6000
 _SAMPLE_RATE = 48_000
-_GAP_SECS = 0.12           # silence between synthesized pieces (must match _to_wav)
+_GAP_SECS = 0.12           # silence between synthesized pieces: _to_wav bakes it
+                           # into the whole-paragraph WAV, reader.js (PLAYER_GAP)
+                           # reproduces it when scheduling streamed pieces
 _CACHE_MAX_ENTRIES = 64
 _CACHE_MAX_BYTES = 64 * 1024 * 1024   # cap the synthesis LRU at 64 MB
 
-# Sentence boundaries first: commas/semicolons only cut when a sentence
-# overflows _CHUNK_CHARS. Fragmenting every clause hands the model context-free
-# stubs ("chối phắt:", "Mẹ kiếp,") — the documented way to make it repeat.
-_SENT_RX = re.compile(r"(?<=[.!?…:])\s+|(?<=[。！？；])")
-_CLAUSE_RX = re.compile(r"(?<=[,;])\s+")
+# Cut after every sentence end AND after every comma/semicolon — the split the
+# reader shipped with. c47d63c narrowed this to sentence-first (clauses only on
+# overflow), which measurably changed the delivery: on a fixed 4-sentence ch373
+# passage the same voice read at ~146 Hz mean pitch instead of ~173 Hz, with
+# piece-to-piece jumps of 188 → 84 Hz (f0 std 40 vs 30), and an A/B of the
+# rendered WAVs picked the pre-c47d63c cut as "the original voice". Clause
+# fragments also keep each infer() call short, where the model resets its
+# intonation the way the listener remembers.
+_SPLIT_RX = re.compile(r"(?<=[.!?…:])\s+|(?<=[。！？；])|(?<=[,;])\s+")
 
 
-def _spans(rx, text):
-    """[(start, end)] cut on rx matches. The matched separator itself belongs
-    to no span: finditer exposes its span, while re.split would swallow it and
-    shift every later offset."""
-    spans, pos = [], 0
-    for m in rx.finditer(text):
-        spans.append((pos, m.start()))
-        pos = m.end()
-    spans.append((pos, len(text)))
-    return spans
-
-
-def _slice(text, s0, s1):
-    """(piece, start, end) for one span — trim-adjusted and guaranteed to be
-    the exact slice ``text[start:end]`` (the offset invariant segs rely on)."""
-    raw = text[s0:s1]
-    work = raw.strip()
-    if not work:
-        return None
-    base = s0 + (len(raw) - len(raw.lstrip()))
-    return work, base, base + len(work)
-
-
-def _cut_long(work, base, limit):
-    """``work`` (already trimmed, at collapsed offset ``base``) → pieces of
-    at most ``limit`` chars, cutting at spaces when even one sentence is too
-    long for a single ONNX call."""
-    out, w, W = [], 0, len(work)
-    while True:
-        if W - w <= limit:
-            sub = work[w:]
-            lead = len(sub) - len(sub.lstrip())
-            sub = sub.strip()
-            if sub:
-                out.append((sub, base + w + lead, base + w + lead + len(sub)))
-            break
-        cut = work.rfind(" ", w, w + limit)
-        if cut < w + limit // 2:
-            cut = w + limit
-        sub = work[w:cut]
-        lead = len(sub) - len(sub.lstrip())
-        sub = sub.strip()
-        if sub:
-            out.append((sub, base + w + lead, base + w + lead + len(sub)))
-        w = cut
-    return out
-
-
-def _merge_short(out, text, limit, min_piece):
-    """Grow sub-``min_piece`` stubs into a neighbour (right first, mirroring
-    vieneu's own merge) while the merged span stays within ``limit``. A lone
-    stub keeps its shape: there is nothing to borrow context from."""
-    out = list(out)
-    changed = True
-    while changed and len(out) > 1:
-        changed = False
-        for i, (piece, s, e) in enumerate(out):
-            if len(piece) >= min_piece:
-                continue
-            for j in (i + 1, i - 1):
-                if not 0 <= j < len(out):
-                    continue
-                s0, e0 = min(s, out[j][1]), max(e, out[j][2])
-                if e0 - s0 <= limit:
-                    lo, hi = (i, j) if j > i else (j, i)
-                    out[lo:hi + 1] = [(text[s0:e0], s0, e0)]
-                    changed = True
-                    break
-            if changed:
-                break
-    return out
-
-
-def split_for_tts_seg(text: str, limit: int = _CHUNK_CHARS,
-                      min_piece: int = _MIN_PIECE):
+def split_for_tts_seg(text: str, limit: int = _CHUNK_CHARS):
     """[(piece, start, end)] — synthesis pieces with offsets into the
-    collapsed text. Sentence boundaries cut first; a clause cut happens only
-    when a sentence overflows ``limit``; sub-``min_piece`` stubs then merge
-    into a neighbour so the model never reads 1-2 words alone."""
+    collapsed text (trim-adjusted), same cut algorithm as split_for_tts.
+
+    Positions come from finditer spans: re.split would discard the matched
+    separators and shift every later offset."""
     text = _collapse(text)
     if not text:
         return []
+    spans, pos = [], 0
+    for m in _SPLIT_RX.finditer(text):
+        spans.append((pos, m.start()))
+        pos = m.end()
+    spans.append((pos, len(text)))
+
     out = []
-    for s0, s1 in _spans(_SENT_RX, text):
-        span = _slice(text, s0, s1)
-        if span is None:
-            continue
-        piece, a, b = span
-        if len(piece) <= limit:
-            out.append(span)
-            continue
-        # one sentence cannot ride in one call → clause cuts, then spaces
-        for c0, c1 in _spans(_CLAUSE_RX, piece):
-            sub = _slice(piece, c0, c1)
-            if sub is None:
-                continue
-            sp, ca, cb = sub
-            if len(sp) <= limit:
-                out.append((sp, a + ca, a + cb))
-            else:
-                out.extend(_cut_long(sp, a + ca, limit) or [])
-    return _merge_short(out, text, limit, min_piece)
+    for s0, s1 in spans:
+        raw = text[s0:s1]
+        work = raw.strip()
+        if work:
+            base = s0 + (len(raw) - len(raw.lstrip()))
+            w, W = 0, len(work)
+            while True:
+                if W - w <= limit:
+                    sub = work[w:]
+                    lead = len(sub) - len(sub.lstrip())
+                    sub = sub.strip()
+                    if sub:
+                        out.append((sub, base + w + lead, base + w + lead + len(sub)))
+                    break
+                cut = work.rfind(" ", w, w + limit)
+                if cut < w + limit // 2:
+                    cut = w + limit
+                sub = work[w:cut]
+                lead = len(sub) - len(sub.lstrip())
+                sub = sub.strip()
+                if sub:
+                    out.append((sub, base + w + lead, base + w + lead + len(sub)))
+                w = cut
+    return out
 
 
 def split_for_tts(text: str, limit: int = _CHUNK_CHARS):
-    """Split into synthesis-sized pieces, breaking on sentence boundaries
-    (clauses/spaces only when a sentence exceeds ``limit``)."""
+    """Split into synthesis-sized pieces, breaking on sentence/punctuation."""
     return [p for p, _, _ in split_for_tts_seg(text, limit)]
 
 

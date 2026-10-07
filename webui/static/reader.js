@@ -2182,9 +2182,13 @@
 
   /* ---------------------------------------------- gapless Web Audio player
      Decoded pieces are scheduled on an AudioContext with exact start times —
-     no element swap, so sentences and paragraphs join with a true 0ms seam.
-     Pause = ctx.suspend() keeps the whole schedule; resume continues exactly
-     where it left off. */
+     no element swap. Pause = ctx.suspend() keeps the whole schedule; resume
+     continues exactly where it left off. Between pieces the schedule leaves
+     PLAYER_GAP of breathing room, matching the 0.12 s that _to_wav bakes into
+     a whole-paragraph WAV (the streaming path used to butt pieces together at
+     0ms, which flattened the delivery). */
+
+  var PLAYER_GAP = 0.12;   // must match _GAP_SECS in webui/reader.py
 
   var player = {
     ctx: null, dest: null, gain: null, timer: 0, rate: 1,
@@ -2315,7 +2319,7 @@
       src.start(t0);
       player.wins.push({ src: src, buf: p.buf, s: p.s, e: p.e, final: p.final,
                          t0: t0, t1: t0 + buf.duration, n: ++player.wseq });
-      player.nextT = t0 + buf.duration;
+      player.nextT = t0 + buf.duration + PLAYER_GAP;
     }
   }
 
