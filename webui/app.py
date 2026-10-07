@@ -6,6 +6,7 @@ Open: http://127.0.0.1:5000
 
 import copy
 import io
+import ipaddress
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from flask import (
     send_file,
     stream_with_context,
 )
+from werkzeug.serving import WSGIRequestHandler
 
 import webui.core_runner as core_runner
 import webui.config_schema as config_schema
@@ -63,6 +65,27 @@ RESERVED_CONFIG_SECTIONS = {
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
+
+
+def _is_lan(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+@app.before_request
+def _lan_only():
+    """The UI can read and rewrite provider keys (config.yaml), so never
+    answer the public internet even when port 5000 ends up forwarded —
+    internet scanners already knock on it (their TLS handshakes log as 400
+    "Bad request version"). LAN/loopback clients pass; set WEBUI_PUBLIC=1
+    if you front the app with a tunnel/VPN of your own."""
+    if os.environ.get("WEBUI_PUBLIC") == "1":
+        return
+    if not _is_lan(request.remote_addr or ""):
+        abort(403)
 registry = JobRegistry()
 
 
@@ -1170,6 +1193,25 @@ def health():
     return {"status": "ok", "jobs": len(registry.jobs)}
 
 
+class _ProbeQuietHandler(WSGIRequestHandler):
+    """Silence non-HTTP probes in the access log. A TLS handshake (or any
+    scanner garbage) reaches the parser as a binary "request line", and
+    werkzeug then prints a 400 ``Bad request version`` plus a line of raw
+    bytes to the console. Every request log path funnels through log() —
+    drop only the ones whose request line does not start with an HTTP
+    method; real requests, their errors and the startup banner keep
+    printing."""
+
+    _METHODS = ("GET ", "POST ", "PUT ", "HEAD ", "DELETE ",
+                "OPTIONS ", "PATCH ", "TRACE ", "CONNECT ")
+
+    def log(self, type, message, *args):
+        line = getattr(self, "requestline", "") or ""
+        if line and not line.startswith(self._METHODS):
+            return
+        super().log(type, message, *args)
+
+
 if __name__ == "__main__":
     # LAN access: bind all interfaces by default so phones/tablets on the same
     # network can open http://<lan-ip>:5000. Set WEBUI_HOST=127.0.0.1 to lock
@@ -1177,4 +1219,5 @@ if __name__ == "__main__":
     host = os.environ.get("WEBUI_HOST", "0.0.0.0")
     scope = "local only" if host in ("127.0.0.1", "localhost") else "LAN reachable"
     print(f"Web UI running at http://127.0.0.1:5000  ({scope})")
-    app.run(host=host, port=5000, debug=False, use_reloader=False, threaded=True)
+    app.run(host=host, port=5000, debug=False, use_reloader=False, threaded=True,
+            request_handler=_ProbeQuietHandler)

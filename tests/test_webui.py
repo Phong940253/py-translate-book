@@ -1584,6 +1584,12 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("Math.abs(rate - 1) < 0.005", js)      # x1.00: zero DSP
         self.assertNotIn("audio.playbackRate = ttsCfg.rate", js)
 
+        with open(os.path.join(PROJECT_ROOT, "webui", "templates", "reader.html"),
+                  encoding="utf-8") as fh:
+            html = fh.read()
+        # the slider must keep reaching x2 (requested range 0.75..2)
+        self.assertIn('id="rd-tts-rate" type="range" min="0.75" max="2"', html)
+
         found = re.search(r"function wsola\(x, rate, sr\) \{.*?\n  \}", js, re.S)
         self.assertIsNotNone(found, "wsola() must stay in reader.js")
 
@@ -1615,7 +1621,7 @@ function writeWav(p, f32) {
 }
 const out = process.argv[2];
 writeWav(path.join(out, 'in.wav'), x);
-[0.75, 1.25, 1.5, 1.75].forEach(function (r) {
+[0.75, 1.25, 1.5, 1.75, 2.0].forEach(function (r) {
   writeWav(path.join(out, 'r' + r.toFixed(2) + '.wav'), wsola(x, r, sr));
 });
 """
@@ -1651,7 +1657,7 @@ writeWav(path.join(out, 'in.wav'), x);
             xin = read16(os.path.join(td, "in.wav"))
             f0_in = f0_of(xin)
             e_in = env_db(xin)
-            for rate in (0.75, 1.25, 1.5, 1.75):
+            for rate in (0.75, 1.25, 1.5, 1.75, 2.0):
                 y = read16(os.path.join(td, f"r{rate:.2f}.wav"))
                 self.assertEqual(len(y), round(len(xin) / rate),
                                  f"x{rate}: stretched length must be len/rate")
@@ -1669,6 +1675,45 @@ writeWav(path.join(out, 'in.wav'), x);
                     float(dev.std()), 2.5,
                     f"x{rate}: envelope lost track of the time map "
                     f"({dev.std():.1f} dB) — audio dropped or echoed")
+
+    def test_public_clients_are_403_and_tls_probes_stay_quiet(self):
+        # The log showed an AWS scanner (18.116.101.220) reaching the port: a
+        # TLS handshake answered with 400 "Bad request version" plus a line of
+        # raw bytes. The UI holds provider keys (config.yaml), so (a) non-LAN
+        # clients never get an answer at all, and (b) non-HTTP request lines
+        # never reach the console log.
+        r = self.client.get("/health",
+                            environ_base={"REMOTE_ADDR": "18.116.101.220"})
+        self.assertEqual(r.status_code, 403)
+        r = self.client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.2"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.client.get("/health").status_code, 200)  # loopback
+
+        # opt-out for a tunnel/VPN of the user's own
+        os.environ["WEBUI_PUBLIC"] = "1"
+        try:
+            r = self.client.get("/health",
+                                environ_base={"REMOTE_ADDR": "18.116.101.220"})
+            self.assertEqual(r.status_code, 200)
+        finally:
+            os.environ.pop("WEBUI_PUBLIC", None)
+
+        from webui.app import _ProbeQuietHandler
+
+        h = object.__new__(_ProbeQuietHandler)
+        h.client_address = ("18.116.101.220", 44321)
+        h.address_string = lambda: "18.116.101.220"
+        # a TLS ClientHello is not an HTTP request line -> logged nowhere
+        h.requestline = "\x16\x03\x01\x00\xee\x01\x00\x00\xea\x03\x03ab"
+        with self.assertNoLogs("werkzeug", level="INFO"):
+            h.log("info", '"%s" %s %s', h.requestline, 400, "-")
+            h.log("error", "code %s, message %s", 400,
+                  "Bad request version ('À\\x14À')")
+        # real requests keep their access log
+        h.requestline = "GET /health HTTP/1.1"
+        with self.assertLogs("werkzeug", level="INFO") as lm:
+            h.log("info", '"%s" %s %s', "GET /health HTTP/1.1", 200, "15")
+        self.assertIn("GET /health", lm.output[0])
 
     def test_read_aloud_keeps_idle_hidden_bars_hidden(self):
         # After 10s idle the bars retract; a read-aloud auto-advance into the
