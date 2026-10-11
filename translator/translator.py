@@ -63,6 +63,13 @@ HTTP500_MANUAL_RECORDS_PER_CHUNK = 3
 # whitelist.  A wrong-but-legible name beats a hung job, and the whitelist
 # only ever grows from names we already tried to fix.
 PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER = 3
+# A pinyin form the glossary CAN correct must not spin either: when the model
+# refuses the SAME correction this many times in a row the mapping is wrong
+# for this context (two names can read alike — 瑶瑶 is legitimately rendered
+# "Dao Dao" while the glossary mapped that form onto 迟笨笨). The mapping is
+# then dropped, the form sanctioned and the chunk retried plainly: a
+# consistent legible name beats a hung job.
+PINYIN_MAPPING_REFUSAL_AFTER = 3
 
 
 class _UntranslatedOutput(ValueError):
@@ -716,6 +723,8 @@ class Translator:
         last_pinyin = False
         pinyin_corrections: dict[str, str] = {}
         pinyin_unknown_streak = 0
+        pinyin_refusal_streak = 0
+        pinyin_refusal_names: tuple[str, ...] | None = None
         result = None
         dt_ms = None
         last_error = None
@@ -804,6 +813,9 @@ class Translator:
                 last_error = str(e)
                 last_untranslated = isinstance(e, _UntranslatedOutput)
                 last_pinyin = isinstance(e, _PinyinOutput)
+                if not last_pinyin:
+                    pinyin_refusal_streak = 0
+                    pinyin_refusal_names = None
                 if last_pinyin and self.global_rules is not None:
                     # fresh look: the repair pass may have just learned it
                     pinyin_corrections = self.global_rules.pinyin_fixes(e.names)
@@ -831,6 +843,42 @@ class Translator:
                             )
                     else:
                         pinyin_unknown_streak = 0
+                        # Every name HAS a correction and the model still
+                        # wrote the flagged form: count consecutive refusals
+                        # of the SAME forms. Three in a row is not a
+                        # translation slip — the glossary is wrong here.
+                        same_names = (
+                            tuple(sorted(e.names)) == pinyin_refusal_names
+                        )
+                        pinyin_refusal_names = tuple(sorted(e.names))
+                        pinyin_refusal_streak = (
+                            pinyin_refusal_streak + 1 if same_names else 1
+                        )
+                        if (
+                            pinyin_refusal_streak
+                            >= PINYIN_MAPPING_REFUSAL_AFTER
+                            and e.names
+                        ):
+                            for name in e.names:
+                                self.global_rules.remove_pinyin_mapping(name)
+                                self.global_rules.add_to_whitelist(name)
+                            self.global_rules.save()
+                            log_consistency_event(
+                                "PINYIN_MAPPING_REJECTED",
+                                ", ".join(e.names[:8]),
+                            )
+                            logging.warning(
+                                "Model refused the glossary correction for %s "
+                                "%d times in a row — mapping dropped, form "
+                                "whitelisted",
+                                e.names, pinyin_refusal_streak,
+                            )
+                            pinyin_refusal_streak = 0
+                            pinyin_refusal_names = None
+                            # Retry as a plain translation pass: with the
+                            # correction gone there is nothing to argue with.
+                            last_pinyin = False
+                            last_untranslated = False
                 # Surface the failed attempt on the live monitor (so a structural
                 # mismatch like a dropped koboSpan id is visible before give-up).
                 self.stats["current_chunk"] = {

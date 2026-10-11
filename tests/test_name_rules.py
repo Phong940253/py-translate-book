@@ -47,6 +47,7 @@ from translator.global_rules import (
     split_name_pair,
 )
 from translator.translator import (
+    PINYIN_MAPPING_REFUSAL_AFTER,
     PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER,
     Translator,
 )
@@ -677,6 +678,35 @@ class TestPinyinRetryLoop(unittest.TestCase):
         self.assertIn("Bai Qing Xia", out)
         self.assertIn("Bai Qing Xia", translator.global_rules.whitelist)
         self.assertNotIn("Bai Qing Xia", translator.global_rules.pending)
+
+    def test_refused_correction_drops_the_mapping_instead_of_hanging(self):
+        # The real "Dao Dao" loop: the glossary CAN correct the flagged form
+        # (it maps it onto another character who reads alike), the model
+        # keeps writing its own form and rejects the correction — 42 attempts
+        # in a row before the job was stopped. Three refusals of the SAME
+        # known correction must drop the mapping and sanction the form.
+        seed = _manager(self.tmp)
+        seed.add_glossary_entry(
+            "Trì Bí Bí", cn="迟笨笨", pinyin="Bai Qing Xia"
+        )
+        seed.save()
+
+        engine = PinyinEngine(bad_times=10 ** 9)      # never changes its mind
+        translator = self._translator(engine)
+        with mock.patch("time.sleep"):
+            out = translator._translate_chunk(self.ZH_SOUP, chapter_number=1)
+
+        self.assertEqual(engine.calls, PINYIN_MAPPING_REFUSAL_AFTER + 1)
+        self.assertIn("Bai Qing Xia", out)          # the model's form lands
+        self.assertIn("Bai Qing Xia", translator.global_rules.whitelist)
+        # the wrong mapping is gone and no repair pass will resurrect it
+        self.assertNotIn(
+            "Bai Qing Xia",
+            translator.global_rules.pinyin_fixes(["Bai Qing Xia"]),
+        )
+        # the final prompt was the plain retry — nothing left to argue with
+        self.assertNotIn("NAME CORRECTIONS", engine.last_inputs[-1])
+        self.assertNotIn("pinyin", engine.last_inputs[-1].split("Input:\n", 1)[0])
 
     def test_pinyin_check_skips_non_chinese_sources(self):
         engine = PinyinEngine(bad_times=10 ** 9)

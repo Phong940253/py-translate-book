@@ -523,6 +523,25 @@ class GlobalRulesManager:
                 self._state.name_whitelist.append(value)
             self._pending_names.pop(value, None)
 
+    def remove_pinyin_mapping(self, name: str) -> None:
+        """Drop a pinyin surface from every glossary group.
+
+        Used when the model refuses the same correction repeatedly: the form
+        was attached to the wrong name (another character happens to read
+        alike — "Dao Dao" is a fair rendering of 瑶瑶, not of 迟笨笨), and
+        keeping the mapping would flag correct output forever.
+        """
+        value = (name or "").strip()
+        if not value:
+            return
+        with self._lock:
+            for entry in self._state.name_glossary:
+                if value in entry["pinyin"]:
+                    entry["pinyin"] = [
+                        p for p in entry["pinyin"] if p != value
+                    ]
+            self._pending_names.pop(value, None)
+
     def add_glossary_entry(
         self,
         canonical: str,
