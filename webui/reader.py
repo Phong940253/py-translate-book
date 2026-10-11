@@ -36,6 +36,8 @@ import nh3
 from bs4 import BeautifulSoup, Tag
 from bs4 import XMLParsedAsHTMLWarning
 
+from webui.books import is_translation_output
+
 # The NCX/XHTML navigation files are XML; html.parser handles them fine (we only
 # read structure) but warns loudly. lxml itself is available for the OPF.
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -375,6 +377,21 @@ _SKELETON = (
     "</head><body></body></html>"
 )
 
+# Content language of a translation output. Translation jobs write the target
+# text but keep the source OPF metadata (dc:language stays "zh"), and the
+# reader used to declare that on the page — the browser then applies CJK font
+# fallback and line-breaking rules to Vietnamese: every accented glyph falls
+# back to another family and the text renders with gaps after each diacritic.
+# Target of the pipeline: main.py --to-lang / webui job param default (VI).
+TARGET_LANG = "vi"
+
+
+def _content_lang(path: str, book_lang: str) -> str:
+    """Language to declare on the chapter page (not in the OPF metadata)."""
+    if is_translation_output(path):
+        return TARGET_LANG
+    return book_lang or ""
+
 
 def _build_page(soup: BeautifulSoup, title: str, lang: str) -> str:
     """Wrap sanitized chapter content in the reader's own document shell."""
@@ -673,7 +690,7 @@ class BookDoc:
         cleaned = _sanitize(text, self.path, n, os.path.dirname(ch["zip"]), self._n_by_zip)
         soup = BeautifulSoup(cleaned, "html.parser")
         items = _extract_items(soup, ch["zip"])
-        page = _build_page(soup, ch["title"], self.language or "")
+        page = _build_page(soup, ch["title"], _content_lang(self.path, self.language))
         return {"items": items, "html": page}
 
     def chapter(self, n):

@@ -680,7 +680,7 @@ class TestWebUI(unittest.TestCase):
         self.assertTrue(r.is_json)
 
     # ------------------------------------------------- reader iframe documents
-    def _reader_rich_epub(self, name="_test_reader_rich.epub"):
+    def _reader_rich_epub(self, name="_test_reader_rich.epub", lang="vi"):
         """2 chapters + image + internal/external/footnote links + CSS."""
         from ebooklib import epub as _epub
 
@@ -688,7 +688,7 @@ class TestWebUI(unittest.TestCase):
         book = _epub.EpubBook()
         book.set_identifier("webui-rich")
         book.set_title("Rich Reader")
-        book.set_language("vi")
+        book.set_language(lang)
         book.add_item(_epub.EpubItem(
             uid="css", file_name="Styles/main.css", media_type="text/css",
             content=b'body{color:#222}.x{background:url(../Images/p.png)}'))
@@ -771,6 +771,61 @@ class TestWebUI(unittest.TestCase):
         bad = self.client.get("/api/reader/doc?path=" + path + "&n=42")
         self.assertEqual(bad.status_code, 400)
         self.assertEqual(bad.mimetype, "text/html")
+
+    def test_reader_doc_declares_the_content_language(self):
+        # A translation output keeps dc:language=zh in the OPF, but the page
+        # shows the TARGET text: declaring zh on Vietnamese makes the browser
+        # apply CJK font fallback per glyph and the diacritics render with
+        # gaps after every accented letter (the "nặ m / chiế n" bug). The
+        # source book keeps its own language; the OPF metadata stays as-is.
+        src = self._reader_rich_epub("_test_reader_src.epub", lang="zh")
+        body = self.client.get("/api/reader/doc?path=" + src + "&n=1").get_data(as_text=True)
+        self.assertIn('<html lang="zh">', body,
+                      "source book keeps its own language on the root")
+
+        out = self._reader_rich_epub("_test_reader_out.translated.epub", lang="zh")
+        body = self.client.get("/api/reader/doc?path=" + out + "&n=1").get_data(as_text=True)
+        self.assertIn('<html lang="vi">', body,
+                      "translated content must be declared as Vietnamese")
+        self.assertNotIn('<html lang="zh">', body)
+        meta = self.client.get("/api/reader/meta?path=" + out).get_json()
+        self.assertEqual(meta["language"], "zh", "OPF metadata must stay untouched")
+
+    def test_reader_toolbar_layout_and_font_guard(self):
+        def read(*parts):
+            with open(os.path.join(PROJECT_ROOT, "webui", *parts), encoding="utf-8") as fh:
+                return fh.read()
+
+        css = read("static", "reader.css")
+        # phone: the action row stays ONE line (sideways scroll) so no button
+        # is stranded alone on a second row, and the bottom bar retracts with
+        # the rest on scroll — except while the read-aloud transport shows
+        self.assertIn("flex-wrap: nowrap", css)
+        self.assertIn("body.chrome-away .rd-jump", css)
+        self.assertIn(":has(.rd-tts-jump:not([hidden]))", css)
+        # the paragraph counter moves into the progress row on the phone
+        self.assertIn("#rd-p-pos-m", css)
+
+        js = read("static", "reader.js")
+        # Vietnamese coverage: Noto (full diacritics) in the reading stacks,
+        # and an uploaded font is probed pixel-by-pixel before it can break
+        # the text (fonts.check() only reports loading state, not glyphs)
+        self.assertIn("'Noto Serif'", js)
+        self.assertIn("function probeCustomFont(", js)
+        self.assertIn("function lacksVietnamese(", js)
+        self.assertIn("read.font_no_vi", js)
+
+        html = read("templates", "reader.html")
+        self.assertIn('id="rd-font-warn"', html)
+        self.assertIn('id="rd-p-pos-m"', html)
+
+        from webui import i18n as wui_i18n
+
+        for lang in ("vi", "en"):
+            self.assertIn("read.font_no_vi", wui_i18n.TRANSLATIONS[lang])
+
+        # reader assets changed → bump so installed PWAs refetch them
+        self.assertIn("'pytb-v13'", read("static", "sw.js"))
 
     def test_reader_res_serves_assets_and_refuses_documents(self):
         path = self._reader_rich_epub("_test_reader_res.epub")

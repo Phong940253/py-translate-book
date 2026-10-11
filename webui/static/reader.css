@@ -61,6 +61,19 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
     transform: translateY(-6px);
     pointer-events: none;
   }
+  /* the bottom jump bar retracts with the rest — except while the read-aloud
+     transport is visible, where pause/stop must stay reachable */
+  .rd-jump { transition: opacity 260ms var(--ease), transform 260ms var(--ease); }
+  body.chrome-away .rd-jump {
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+  }
+  body.chrome-away .rd-jump:has(.rd-tts-jump:not([hidden])) {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
 }
 .rd-group { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .rd-center { flex: 1 1 220px; justify-content: center; }
@@ -298,6 +311,7 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   border-radius: var(--r-full);
 }
 #rd-p-pos { min-width: 170px; text-align: center; }
+#rd-p-pos-m { display: none; }   /* phone: mirrors the counter into the progress row */
 .rd-page-nav { display: inline-flex; align-items: center; gap: 4px; }
 .rd-tts-jump { display: inline-flex; align-items: center; gap: 2px; }
 .rd-tts-jump[hidden] { display: none; }
@@ -503,7 +517,8 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
 }
 
 /* phone: toolbar stacks into compact rows —
-   row 1: chapter nav, row 2: actions, row 3: progress */
+   row 1: chapter nav, row 2: actions (ONE line — scrolls sideways instead of
+   wrapping a lone button onto its own row), row 3: progress + paragraph count */
 @media (max-width: 560px) {
   .rd-bar { gap: 6px; padding: 6px 8px; }
   .rd-group { gap: 6px; }
@@ -511,11 +526,15 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
   .rd-select { flex: 1 1 110px; min-width: 0; max-width: none; }
   .rd-bar > .rd-group:last-child {
     flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: space-between;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    justify-content: flex-start;
     border-top: 1px solid var(--border);
     padding-top: 6px;
   }
+  .rd-bar > .rd-group:last-child::-webkit-scrollbar { display: none; }
+  .rd-bar > .rd-group:last-child > * { flex: 0 0 auto; }
   .rd-center {
     order: 5;
     flex: 1 1 100%;
@@ -525,6 +544,8 @@ textarea.rd-input { resize: vertical; min-height: 44px; }
     padding-top: 6px;
   }
   #rd-pos { display: none; }
+  #rd-p-pos-m { display: inline; }
+  #rd-p-pos { display: none; }
   .rd-progress { max-width: none; flex: 1 1 auto; }
   .rd-tree { max-height: 62vh; }
   .rd-toc-marks button { padding: 7px 12px; }

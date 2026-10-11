@@ -176,6 +176,15 @@ def _strip_translation_marker(fn: str) -> str:
         stem = new
 
 
+def is_translation_output(path: str) -> bool:
+    """True when ``path`` names a translation output (``.translated``,
+    ``-dich``, ``-vn`` … marker suffix). The filename heuristic (priority 3
+    above) — the reader needs it to pick the *content* language, because a
+    translation output keeps the source EPUB's ``dc:language``."""
+    fn = os.path.basename(path)
+    return _strip_translation_marker(fn) != os.path.splitext(fn)[0]
+
+
 def _read_checkpoint(path: str):
     try:
         with open(path, "r", encoding="utf-8") as f:

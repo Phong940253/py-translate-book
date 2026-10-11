@@ -37,6 +37,7 @@ window.APP.reader = {
         <span id="rd-progress-bar"></span>
       </div>
       <span id="rd-eta" class="muted small"></span>
+      <span id="rd-p-pos-m" class="muted small"></span>
     </div>
 
     <div class="rd-group">
@@ -77,6 +78,7 @@ window.APP.reader = {
         <span>{{ t('read.font_upload') }}</span>
         <input id="rd-set-fontfile" type="file" accept=".ttf,.otf,.woff,.woff2,font/*">
       </label>
+      <div id="rd-font-warn" class="muted small" hidden role="status"></div>
       <label class="rd-field">
         <span>{{ t('read.font_size') }} <b id="rd-set-size-v"></b></span>
         <input id="rd-set-size" type="range" min="14" max="30" step="1">

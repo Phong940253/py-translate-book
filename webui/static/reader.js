@@ -176,13 +176,17 @@
   }
 
   function familyValue() {
+    // Noto Serif / Noto Sans ship the full Vietnamese set; devices without
+    // Georgia (phones) must not fall through to a serif whose accented glyphs
+    // are missing — the browser would swap them in one by one and the text
+    // renders with gaps after every diacritic.
     switch (settings.family) {
-      case 'sans': return "'Helvetica Neue', Arial, 'Segoe UI', sans-serif";
+      case 'sans': return "'Helvetica Neue', Arial, 'Segoe UI', 'Noto Sans', sans-serif";
       case 'mono': return "ui-monospace, Consolas, 'Courier New', monospace";
       case 'system': return "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-      case 'dyslexic': return "'OpenDyslexic', 'Comic Sans MS', Verdana, sans-serif";
-      case 'custom': return "'RDUserFont', Georgia, serif";
-      default: return "Georgia, 'Times New Roman', serif";
+      case 'dyslexic': return "'OpenDyslexic', 'Comic Sans MS', Verdana, 'Noto Sans', sans-serif";
+      case 'custom': return "'RDUserFont', Georgia, 'Noto Serif', serif";
+      default: return "Georgia, 'Times New Roman', 'Noto Serif', serif";
     }
   }
 
@@ -690,7 +694,9 @@
     if (!state.meta) return;
     var total = state.meta.total || 1;
     setLabel('rd-pos', fmt('read.position', { ch: state.ch, total: total }));
-    setLabel('rd-p-pos', fmt('read.position_item', { i: state.cur + 1, total: state.items.length || 0 }));
+    var item = fmt('read.position_item', { i: state.cur + 1, total: state.items.length || 0 });
+    setLabel('rd-p-pos', item);
+    setLabel('rd-p-pos-m', item);   // phone: shown in the progress row instead
     var f = chapterFraction();
     var bar = el('rd-progress-bar');
     if (bar) bar.style.width = clamp(f * 100, 0, 100).toFixed(2) + '%';
@@ -800,7 +806,11 @@
   /* ------------------------------------------------------- chapter nav */
   function updateChapterUI() {
     var sel = el('rd-chapter');
-    if (sel) sel.value = String(state.ch);
+    if (sel) {
+      sel.value = String(state.ch);
+      var c = state.meta && state.meta.chapters && state.meta.chapters[state.ch - 1];
+      sel.title = c ? (c.n + '. ' + (c.title || '')) : '';   // full title when clipped
+    }
     var pv = el('rd-prev-ch'), nx = el('rd-next-ch');
     if (pv) pv.disabled = state.ch <= 1;
     if (nx) nx.disabled = !state.meta || state.ch >= state.meta.total;
@@ -866,6 +876,7 @@
       var opt = document.createElement('option');
       opt.value = c.n;
       opt.textContent = chapterLabel(c);
+      opt.title = c.n + '. ' + (c.title || '');
       sel.appendChild(opt);
     });
   }
@@ -3276,24 +3287,99 @@
   }
 
   /* ------------------------------------------------------ font upload */
+  /* A font without the Vietnamese precomposed glyphs (ế ữ ặ ộ ớ ẹ …) forces
+     the browser to substitute those characters one family at a time: the
+     accented letters get different advance widths and the text renders with
+     a gap after every diacritic. Preset stacks fall back to Noto (full
+     Vietnamese); an uploaded font can't — probe it and refuse it. */
+  var VN_PROBE = 'nằm quy tắc sẵt sàng dạ dày bưởi trứng ớợộịụẫỹếữầệđ Đ';
+
+  function fontWarn(msg) {
+    var n = el('rd-font-warn');
+    if (!n) return;
+    n.textContent = msg || '';
+    n.hidden = !msg;
+  }
+
+  /* True when RDUserFont paints the Vietnamese sample exactly like the
+     fallback font — no glyphs of its own for those characters (document
+     fonts.check() only reports loading state, not glyph coverage, so the
+     sample is rendered for real and compared pixel by pixel). */
+  function lacksVietnamese() {
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = 36;
+    var g = cv.getContext('2d');
+    if (!g) return false;
+    var draw = function (font, ch) {
+      g.clearRect(0, 0, 36, 36);
+      g.font = font;
+      g.fillText(ch, 2, 26);
+      return cv.toDataURL();
+    };
+    var same = 0, n = 0;
+    for (var i = 0; i < VN_PROBE.length; i++) {
+      var ch = VN_PROBE.charAt(i);
+      if (ch === ' ') continue;
+      n++;
+      if (draw('26px "RDUserFont"', ch) === draw('26px "__rd_probe_missing__"', ch)) same++;
+    }
+    // Measured against real fonts: full-Vietnamese families paint 0/43
+    // differently from the fallback; MS Gothic already breaks 11/43 and
+    // Korean/Chinese faces ~20/43 (one gap per missing char is the bug).
+    // A fifth of the sample falling back → refuse.
+    return n > 0 && same * 5 >= n;
+  }
+
+  function probeCustomFont(buf) {
+    if (!window.FontFace || !document.fonts) {
+      return Promise.resolve(true);   // very old browser — let it through
+    }
+    try {
+      var ff = new FontFace('RDUserFont', buf.slice(0));
+      return ff.load().then(function (loaded) {
+        try {
+          // replace a previous upload so the probe judges THIS file
+          document.fonts.forEach(function (f) {
+            if (f.family === 'RDUserFont') document.fonts.delete(f);
+          });
+          document.fonts.add(loaded);
+          return !lacksVietnamese();
+        } catch (e) { return true; }
+      }).catch(function () { return false; });   // unreadable/corrupt font
+    } catch (e) { return Promise.resolve(true); }
+  }
+
   function handleFontFile(file) {
     if (!file) return;
     if (!file.arrayBuffer) return;
     file.arrayBuffer().then(function (buf) {
-      fontBuf = buf;
-      settings.family = 'custom';
-      var sel = el('rd-set-family');
-      if (sel && !qs('option[value="custom"]', sel)) {
-        var opt = document.createElement('option');
-        opt.value = 'custom';
-        opt.textContent = file.name;
-        sel.appendChild(opt);
-      } else if (sel) {
-        var existing = qs('option[value="custom"]', sel);
-        if (existing) existing.textContent = file.name;
-      }
-      saveSettings();
-      applySettings();
+      return probeCustomFont(buf).then(function (ok) {
+        if (!ok) {
+          fontBuf = null;
+          if (settings.family === 'custom') settings.family = 'serif';
+          var selBad = el('rd-set-family');
+          if (selBad) selBad.value = settings.family;
+          saveSettings();
+          applySettings();
+          fontWarn(i18n('read.font_no_vi'));
+          return;
+        }
+        fontBuf = buf;
+        settings.family = 'custom';
+        fontWarn('');
+        var sel = el('rd-set-family');
+        if (sel && !qs('option[value="custom"]', sel)) {
+          var opt = document.createElement('option');
+          opt.value = 'custom';
+          opt.textContent = file.name;
+          sel.appendChild(opt);
+        } else if (sel) {
+          var existing = qs('option[value="custom"]', sel);
+          if (existing) existing.textContent = file.name;
+        }
+        saveSettings();
+        applySettings();
+      });
     }).catch(function () { /* unreadable font file */ });
   }
 
@@ -3453,6 +3539,7 @@
     if (fam) fam.addEventListener('change', function () {
       if (this.value === 'custom' && !fontBuf) { this.value = settings.family; return; }
       settings.family = this.value;
+      fontWarn('');
       saveSettings(); applySettings();
     });
     var fontfile = el('rd-set-fontfile');
