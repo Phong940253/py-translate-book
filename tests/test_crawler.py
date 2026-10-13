@@ -5,6 +5,7 @@ Covers:
   TC-C2: fetch_chapter extracts clean paragraphs from article HTML.
   TC-C3: build_epub produces a readable EPUB with one file per chapter.
   TC-C4: shu69 TOC/chapter parsing (69shuba, Cloudflare source).
+  TC-C5: xszj TOC/chapter parsing incl. multi-screen stitching.
 """
 import json
 import os
@@ -18,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ebooklib import epub as _epub
 
 from crawler import crawl as crawl_cli
-from crawler import ixdzs, shu69
+from crawler import ixdzs, shu69, xszj
 from crawler.to_epub import build_epub
 
 
@@ -355,6 +356,162 @@ class TestCliTitleOverride(unittest.TestCase):
             self._run_rebuild(d)
 
             self.assertTrue(os.path.exists(os.path.join(d, "旧书名.epub")))
+
+
+XSZJ_TOC_HTML = """
+<html><head><meta charset="utf-8"></head><body>
+<div id="list"><dl><div id="content_1">
+  <a href="/b/336003/c/1772342" rel="chapter"><dd>第1章 第01章 校花当众送奶茶</dd></a>
+  <a href="/b/336003/c/1772347" rel="chapter"><dd>第2章 第02章 高冷校花居然是未婚妻</dd></a>
+  <a href="/b/336003/c/1772404" rel="chapter"><dd>第10章 校花高冷女神人设要崩了</dd></a>
+</div></dl></div>
+</body></html>
+"""
+
+XSZJ_META_HTML = """
+<html><head><meta charset="utf-8"></head><body>
+<div id="info">
+  <h1>好烦啊，高冷校花天天倒追我</h1>
+  <p>作者：<a href="/z/%E4%B8%80%E5%8F%AA%E5%B0%8F%E6%B0%B4%E4%BA%BA" title="x">一只小水人</a></p>
+</div>
+</body></html>
+"""
+
+XSZJ_CHAPTER_PAGE1 = """
+<html><head><meta charset="utf-8">
+<title>第01章 校花当众送奶茶-好烦啊，高冷校花天天倒追我第1章(1/3)-小说之家</title>
+</head><body>
+<div id="content"><div id="booktxt">
+  <p></p><p>　　“大家快看，苏校花来我们新生晚会了！！”</p>
+  <p>　　虽然这个未婚</p><p>　　：</p>
+</div></div>
+<div class="bottem2"><a rel="prev" href="/b/336003/c/1772342?page=2">下一页</a></div>
+</body></html>
+"""
+
+XSZJ_CHAPTER_PAGE2 = """
+<html><head><meta charset="utf-8">
+<title>第01章 校花当众送奶茶-好烦啊，高冷校花天天倒追我第1章(2/3)-小说之家</title>
+</head><body>
+<div id="content"><div id="booktxt">
+  <p>　　妻张成已经十年没见了，年底就是婚期了。</p>
+  <p>　　众人都看呆了。</p><p>　　：</p>
+</div></div>
+<div class="bottem2"><a rel="prev" href="javascript:void(0);">没有了</a></div>
+</body></html>
+"""
+
+
+class _FakeResp:
+    def __init__(self, text="", payload=None):
+        self.text = text
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeXszjSession:
+    """GET keyed by url (page2 matched by its ?page= suffix)."""
+
+    def __init__(self, responses):
+        self.responses = responses  # list of (needle, html)
+        self.calls = []
+
+    def get(self, url, timeout=20):
+        self.calls.append(url)
+        for needle, html in self.responses:
+            if needle in url:
+                return _FakeResp(text=html)
+        raise AssertionError(f"unexpected url {url}")
+
+
+class TestXszjToc(unittest.TestCase):
+    def test_parses_ordered_toc_and_strips_dup_seq(self):
+        chapters = xszj.parse_toc_html(XSZJ_TOC_HTML, "336003")
+        self.assertEqual(len(chapters), 3)
+        self.assertEqual(chapters[0]["ordernum"], "1")
+        self.assertEqual(chapters[0]["title"], "第01章 校花当众送奶茶")
+        self.assertEqual(chapters[0]["url"], "https://xszj.org/b/336003/c/1772342")
+        # no inner seq in the site title -> keep the full dd text
+        self.assertEqual(chapters[2]["title"], "第10章 校花高冷女神人设要崩了")
+
+    def test_parses_meta(self):
+        title, author = xszj.parse_meta_html(XSZJ_META_HTML, "336003")
+        self.assertEqual(title, "好烦啊，高冷校花天天倒追我")
+        self.assertEqual(author, "一只小水人")
+
+
+XSZJ_CHAPTER_WATERMARK = """
+<html><head><meta charset="utf-8">
+<title>第02章 高冷校花居然是未婚妻-好烦啊，高冷校花天天倒追我第2章(1/1)-小说之家</title>
+</head><body>
+<div id="content"><div id="booktxt">
+  <p>　　苏校花找的人，居然是新生代表，家世也很好。M.Ι.</p>
+  <p>　　这要是接了奶茶，就成了眼中钉肉中刺了。Ｅ</p>
+  <p>　　真是人比人气死人！！.</p>
+</div></div>
+</body></html>
+"""
+
+
+class TestXszjChapter(unittest.TestCase):
+    def test_title_from_tag_and_cut_marker(self):
+        title = xszj.chapter_title_from_html(XSZJ_CHAPTER_PAGE1)
+        self.assertEqual(title, "第01章 校花当众送奶茶")
+        paras, nxt, cut = xszj.parse_chapter_page(XSZJ_CHAPTER_PAGE1)
+        self.assertEqual(paras, ["“大家快看，苏校花来我们新生晚会了！！”", "虽然这个未婚"])
+        self.assertEqual(nxt, "/b/336003/c/1772342?page=2")
+        self.assertTrue(cut)  # lone ： marks the screen cut
+
+    def test_stitches_split_sentence_across_screens(self):
+        session = _FakeXszjSession(
+            [
+                ("page=2", XSZJ_CHAPTER_PAGE2),
+                ("1772342", XSZJ_CHAPTER_PAGE1),
+            ]
+        )
+        with patch("crawler.xszj.time.sleep"):
+            title, paras = xszj.fetch_chapter(
+                session, "https://xszj.org/b/336003/c/1772342"
+            )
+        self.assertEqual(title, "第01章 校花当众送奶茶")
+        self.assertEqual(
+            paras,
+            [
+                "“大家快看，苏校花来我们新生晚会了！！”",
+                # the two halves around the ： marker are rejoined
+                "虽然这个未婚妻张成已经十年没见了，年底就是婚期了。",
+                "众人都看呆了。",
+            ],
+        )
+
+    def test_strips_anticopy_watermark(self):
+        # site appends "M.Ι." / "Ｅ" / "." to random paragraphs
+        session = _FakeXszjSession(
+            [("1772347", XSZJ_CHAPTER_WATERMARK)]
+        )
+        _, paras = xszj.fetch_chapter(
+            session, "https://xszj.org/b/336003/c/1772347"
+        )
+        self.assertEqual(
+            paras,
+            [
+                "苏校花找的人，居然是新生代表，家世也很好。",
+                "这要是接了奶茶，就成了眼中钉肉中刺了。",
+                "真是人比人气死人！！",
+            ],
+        )
+
+    def test_empty_body_raises(self):
+        session = _FakeXszjSession(
+            [("1772342", "<html><body><div id='booktxt'></div></body></html>")]
+        )
+        with self.assertRaises(RuntimeError):
+            xszj.fetch_chapter(session, "https://xszj.org/b/336003/c/1772342")
 
 
 if __name__ == "__main__":

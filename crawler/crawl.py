@@ -4,6 +4,7 @@ Sources (--source):
   ixdzs   ixdzs mirror, plain requests           default bid 546610
   shu69   69shuba behind Cloudflare, driven by   default bid 84642
           an undetected Chrome window
+  xszj    小说之家, plain requests, utf-8        default bid 336003
 
 Examples:
   # test 2 chapters first
@@ -34,6 +35,7 @@ from crawler.to_epub import build_epub
 SOURCES = {
     "ixdzs": {"module": "crawler.ixdzs", "default_bid": "546610"},
     "shu69": {"module": "crawler.shu69", "default_bid": "84642"},
+    "xszj": {"module": "crawler.xszj", "default_bid": "336003"},
 }
 
 
