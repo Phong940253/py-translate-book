@@ -5,6 +5,9 @@ Sources (--source):
   shu69   69shuba behind Cloudflare, driven by   default bid 84642
           an undetected Chrome window
   xszj    小说之家, plain requests, utf-8        default bid 336003
+  fanqie  番茄小说 official: TOC from fanqie, text  default bid 7478055015341378585
+          from the archive.org dump when available,
+          else PUA-decoded reader pages
 
 Examples:
   # test 2 chapters first
@@ -36,6 +39,7 @@ SOURCES = {
     "ixdzs": {"module": "crawler.ixdzs", "default_bid": "546610"},
     "shu69": {"module": "crawler.shu69", "default_bid": "84642"},
     "xszj": {"module": "crawler.xszj", "default_bid": "336003"},
+    "fanqie": {"module": "crawler.fanqie", "default_bid": "7478055015341378585"},
 }
 
 
@@ -124,7 +128,16 @@ def main():
             toc.sort(key=lambda c: int(c["ordernum"]))
         else:
             print(f"Fetching TOC ({args.source}) bid={args.bid} ...")
-            book_title, author, toc = src.fetch_toc(session, args.bid)
+            for attempt in range(4):
+                try:
+                    book_title, author, toc = src.fetch_toc(session, args.bid)
+                    break
+                except Exception as e:  # noqa: BLE001 - retry then fail loudly
+                    wait = 2.0 * (attempt + 1)
+                    print(f"\n[retry {attempt+1}/4] toc {e} (wait {wait}s)")
+                    time.sleep(wait)
+            else:
+                raise SystemExit(f"FAILED TOC ({args.source} bid={args.bid})")
             source_title = book_title
             if args.title:
                 book_title = args.title

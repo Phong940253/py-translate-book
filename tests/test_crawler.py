@@ -6,6 +6,7 @@ Covers:
   TC-C3: build_epub produces a readable EPUB with one file per chapter.
   TC-C4: shu69 TOC/chapter parsing (69shuba, Cloudflare source).
   TC-C5: xszj TOC/chapter parsing incl. multi-screen stitching.
+  TC-C6: fanqie TOC/chapter parsing incl. PUA font decode.
 """
 import json
 import os
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ebooklib import epub as _epub
 
 from crawler import crawl as crawl_cli
-from crawler import ixdzs, shu69, xszj
+from crawler import fanqie, ixdzs, shu69, xszj
 from crawler.to_epub import build_epub
 
 
@@ -512,6 +513,193 @@ class TestXszjChapter(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError):
             xszj.fetch_chapter(session, "https://xszj.org/b/336003/c/1772342")
+
+
+FANQIE_TOC_HTML = """
+<html><head><meta charset="utf-8"></head><body>
+<script>
+window.__INITIAL_STATE__={"page":{"bookName":"娇娇青梅一红眼，野戾太子爷轻哄",
+"author":"七颗草莓","chapterListWithVolume":[
+[{"itemId":"200","needPay":0,"title":"第2章“跟我回家好不好？”","realChapterOrder":"2"},
+ {"itemId":"100","needPay":0,"title":"第1章重生","realChapterOrder":"1"}],
+[{"itemId":"300","needPay":0,"title":"番外：执念生贪（3）","realChapterOrder":"3"}]]}};
+</script></body></html>
+"""
+
+FANQIE_READER_HTML = (
+    '<html><head><meta charset="utf-8"></head><body><script>\n'
+    'window.__INITIAL_STATE__={"reader":{"chapterData":{'
+    '"title":"第1章重生","needPay":0,"itemId":"100",'
+    '"content":"<p>裴聿\\ue4de\\ue489深黑\\ue44c的\\ue515装，面色却惨\\ue473着。</p>'
+    '<p>才回\\ue48a刚搬来这片\\ue3f8墅区。</p>"}}};\n'
+    "</script></body></html>"
+)
+
+
+class _FakeFanqieSession:
+    def __init__(self, html):
+        self.html = html
+        self.calls = []
+
+    def get(self, url, timeout=20):
+        self.calls.append(url)
+        return _FakeResp(text=self.html)
+
+
+class TestFanqieToc(unittest.TestCase):
+    def test_parses_book_meta_and_flattens_volumes_in_order(self):
+        title, author, chapters = fanqie.parse_toc_html(FANQIE_TOC_HTML)
+        self.assertEqual(title, "娇娇青梅一红眼，野戾太子爷轻哄")
+        self.assertEqual(author, "七颗草莓")
+        self.assertEqual([c["ordernum"] for c in chapters], ["1", "2", "3"])
+        # source title runs together: 第1章 + 重生 -> insert the missing space
+        self.assertEqual(chapters[0]["title"], "第1章 重生")
+        self.assertEqual(chapters[1]["title"], "第2章 “跟我回家好不好？”")
+        # 番外 has no 第N章 prefix -> untouched
+        self.assertEqual(chapters[2]["title"], "番外：执念生贪（3）")
+        self.assertEqual(chapters[0]["url"], "https://fanqienovel.com/reader/100")
+
+    def test_title_spacing_handles_titles_without_zhang(self):
+        # 5 real fanqie titles omit 章 ("第38这是...") - still split number/title
+        self.assertEqual(
+            fanqie._norm_title("第38这是他亲手养大的女孩"), "第38 这是他亲手养大的女孩"
+        )
+        self.assertEqual(fanqie._norm_title("第1章重生"), "第1章 重生")
+        # source already spaced after 章 - must not become "第77 章 ..."
+        self.assertEqual(
+            fanqie._norm_title("第77章 沈梨初是裴聿的眼珠子"), "第77章 沈梨初是裴聿的眼珠子"
+        )
+        self.assertEqual(fanqie._norm_title("第108章"), "第108章")
+        self.assertEqual(fanqie._norm_title("番外：执念生贪（3）"), "番外：执念生贪（3）")
+        self.assertEqual(
+            fanqie._norm_title("if线：梨梨在Daddy身边长大（1）"),
+            "if线：梨梨在Daddy身边长大（1）",
+        )
+
+    def test_fetch_toc_uses_page_endpoint(self):
+        session = _FakeFanqieSession(FANQIE_TOC_HTML)
+        title, author, chapters = fanqie.fetch_toc(session, "7478055015341378585")
+        self.assertEqual(len(chapters), 3)
+        self.assertEqual(
+            session.calls[0], "https://fanqienovel.com/page/7478055015341378585"
+        )
+
+
+class TestFanqieChapter(unittest.TestCase):
+    def setUp(self):
+        fanqie._archive.clear()
+
+    def test_decodes_pua_font_and_splits_paragraphs(self):
+        title, paras = fanqie.parse_chapter_html(FANQIE_READER_HTML)
+        self.assertEqual(title, "第1章 重生")
+        self.assertEqual(
+            paras,
+            [
+                "裴聿一身深黑色的西装，面色却惨白着。",
+                "才回国刚搬来这片别墅区。",
+            ],
+        )
+        # map really loaded: no PUA survived
+        for p in paras:
+            self.assertFalse(any("\ue000" <= ch <= "\uf8ff" for ch in p))
+
+    def test_unknown_pua_is_kept_not_crashed(self):
+        html = FANQIE_READER_HTML.replace("\\ue4de", "\\uf010")
+        fanqie._unknown_pua.clear()
+        _, paras = fanqie.parse_chapter_html(html)
+        self.assertIn("\uf010", paras[0])
+
+    def test_paid_chapter_raises(self):
+        html = FANQIE_READER_HTML.replace('"needPay":0', '"needPay":1')
+        with self.assertRaises(RuntimeError):
+            fanqie.parse_chapter_html(html)
+
+    def test_fetch_chapter_reads_reader_endpoint(self):
+        session = _FakeFanqieSession(FANQIE_READER_HTML)
+        title, paras = fanqie.fetch_chapter(
+            session, "https://fanqienovel.com/reader/100"
+        )
+        self.assertEqual(title, "第1章 重生")
+        self.assertEqual(len(paras), 2)
+        self.assertEqual(session.calls, ["https://fanqienovel.com/reader/100"])
+
+
+FANQIE_ARCHIVE_META = {"files": [{"name": "book-full.txt"}]}
+
+FANQIE_ARCHIVE_TXT = (
+    "别惹他的乖乖小甜梨\n原名：娇娇青梅一红眼，野戾太子爷轻哄\n作者：七颗草莓\n\n"
+    "第1章重生\n裴聿一身深黑色的西装。\n面色却惨白着。\n\n"
+    "第2章“跟我回家好不好？”\n她问他愿不愿意回家。\n"
+)
+
+FANQIE_ARCHIVE_TITLES = ["第1章 重生", "第2章 “跟我回家好不好？”", "第3章 缺失"]
+
+
+class _FakeFanqieRoutes:
+    """GET keyed by url substring: (needle, text, json_payload)."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def get(self, url, timeout=20):
+        self.calls.append(url)
+        for needle, text, payload in self.routes:
+            if needle in url:
+                return _FakeResp(text=text, payload=payload)
+        raise AssertionError(f"unexpected url {url}")
+
+
+class TestFanqieArchive(unittest.TestCase):
+    def setUp(self):
+        self._old_min = fanqie.ARCHIVE_MIN_BYTES
+        fanqie.ARCHIVE_MIN_BYTES = 10  # tiny fixtures
+
+    def tearDown(self):
+        fanqie.ARCHIVE_MIN_BYTES = self._old_min
+
+    def test_split_matches_headers_across_title_spacing(self):
+        secs = fanqie.split_archive_text(FANQIE_ARCHIVE_TXT, FANQIE_ARCHIVE_TITLES)
+        self.assertEqual(secs["第1章 重生"], ["裴聿一身深黑色的西装。", "面色却惨白着。"])
+        self.assertEqual(secs["第2章 “跟我回家好不好？”"], ["她问他愿不愿意回家。"])
+        self.assertNotIn("第3章 缺失", secs)  # preamble must not leak into a body
+
+    def test_fetch_prefers_archive_and_skips_reader(self):
+        session = _FakeFanqieRoutes(
+            [
+                ("/page/", FANQIE_TOC_HTML, None),
+                ("archive.org/metadata", "", FANQIE_ARCHIVE_META),
+                ("archive.org/download", FANQIE_ARCHIVE_TXT, None),
+            ]
+        )
+        _, _, chapters = fanqie.fetch_toc(session, "7478055015341378585")
+        title, paras = fanqie.fetch_chapter(session, chapters[0]["url"])
+        self.assertIsNone(title)  # crawl.py falls back to the TOC title
+        self.assertEqual(paras, ["裴聿一身深黑色的西装。", "面色却惨白着。"])
+        # archive hit -> the reader page was never requested
+        self.assertFalse(any("/reader/" in u for u in session.calls))
+
+    def test_reader_page_fallback_when_archive_misses(self):
+        session = _FakeFanqieRoutes(
+            [
+                ("/page/", FANQIE_TOC_HTML, None),
+                ("archive.org/metadata", "", FANQIE_ARCHIVE_META),
+                ("archive.org/download", FANQIE_ARCHIVE_TXT, None),
+                ("/reader/", FANQIE_READER_HTML, None),
+            ]
+        )
+        fanqie.fetch_toc(session, "7478055015341378585")
+        # ch3 has no archive body -> reader page path (PUA decode)
+        title, paras = fanqie.fetch_chapter(session, "https://fanqienovel.com/reader/300")
+        self.assertEqual(title, "第1章 重生")
+        self.assertEqual(paras[0], "裴聿一身深黑色的西装，面色却惨白着。")
+
+    def test_reader_truncation_warns_but_returns(self):
+        html = FANQIE_READER_HTML.replace(
+            '"content"', '"chapterWordNumber":9000,"content"'
+        )
+        title, paras = fanqie.parse_chapter_html(html)
+        self.assertEqual(len(paras), 2)  # kept; a warning is printed
 
 
 if __name__ == "__main__":
