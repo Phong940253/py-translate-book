@@ -72,6 +72,11 @@ _VN_COMMON_PINYIN = _PINYIN_SYLLABLES & _VN_COMMON_SYLLABLES
 _NAME_CANDIDATE_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
 
 
+# Latin letters incl. Vietnamese: a CJK string carrying any of these is
+# mixed-script garble from the engine ("Thẩm梨初"), not source text.
+_LATIN_RE = re.compile(r"[A-Za-zÀ-ỹ]")
+
+
 def has_cjk(text: str) -> bool:
     return bool(_CJK_RE.search(text or ""))
 
@@ -858,7 +863,9 @@ class GlobalRulesManager:
 
     def mapping(self) -> dict[str, str]:
         """Surface form → canonical spelling, for normalising a written EPUB.
-        Chinese surfaces are excluded: the source title/text is never touched."""
+        Pure Chinese surfaces are excluded: the source title/text is never
+        touched.  Mixed-script garble ("Thẩm梨初") is unique to translated
+        text and maps like any other variant."""
         with self._lock:
             out: dict[str, str] = {}
             for entry in self._state.name_glossary:
@@ -866,14 +873,19 @@ class GlobalRulesManager:
                 if not _safe_to_rewrite(canonical):
                     continue
                 for surface in entry["variants"] + entry["pinyin"]:
-                    if not surface or surface == canonical or has_cjk(surface):
+                    if not surface or surface == canonical:
                         continue
-                    # a lowercase-initial surface ("anh Thu") is a common
-                    # phrase as much as a name, and a case-only difference
-                    # ("Đạo trưởng" -> "đạo trưởng") would lowercase text
-                    # that is simply starting a sentence — rewriting either
-                    # would corrupt ordinary prose.
-                    if not _safe_to_rewrite(surface):
+                    if has_cjk(surface):
+                        # mixed-script garble is safe to rewrite; pure Chinese
+                        # (source title/text) never is
+                        if not _LATIN_RE.search(surface):
+                            continue
+                    elif not _safe_to_rewrite(surface):
+                        # a lowercase-initial surface ("anh Thu") is a common
+                        # phrase as much as a name, and a case-only difference
+                        # ("Đạo trưởng" -> "đạo trưởng") would lowercase text
+                        # that is simply starting a sentence — rewriting either
+                        # would corrupt ordinary prose.
                         continue
                     if surface.lower() == canonical.lower():
                         continue
@@ -884,9 +896,15 @@ class GlobalRulesManager:
             }
             for key in self._state.characters:
                 canonical = canonical_by_fold.get(fold_name(key))
-                if not canonical or canonical == key or has_cjk(key):
+                if not canonical or canonical == key:
                     continue
-                if not _safe_to_rewrite(canonical) or not _safe_to_rewrite(key):
+                if has_cjk(key):
+                    # mixed-script key ("裴 Duật") -> same rule as variants
+                    if not _LATIN_RE.search(key):
+                        continue
+                elif not _safe_to_rewrite(key):
+                    continue
+                if not _safe_to_rewrite(canonical):
                     continue
                 if key.lower() == canonical.lower():
                     continue

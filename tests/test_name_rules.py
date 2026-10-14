@@ -12,7 +12,8 @@ Covers:
           proper Vietnamese name nor a whitelisted form.
   NR-6  : glossary_text lists only the Chinese forms the chapter uses and
           stays inside its budget.
-  NR-7  : mapping() carries Vietnamese surfaces only (never Chinese).
+  NR-7  : mapping() carries Vietnamese canonicals only (never pure Chinese);
+          mixed-script garble ("Thẩm梨初") does map.
   NR-8  : glossary/whitelist survive save/load; hand edits on disk win the
           next save.
   NR-9  : sanitize parks Chinese keys, merges diacritic duplicates, keeps
@@ -22,7 +23,8 @@ Covers:
   NR-12 : _render_chapter_rules opens with the glossary and stays in budget.
   NR-13 : _detect_pinyin_names only runs on Chinese-source chunks.
   NR-14 : normalize_names_in_html is longest-first and never rewrites
-          Chinese (第N章 headings); the book pass leaves binaries alone.
+          Chinese (第N章 headings); mixed-script garble does get fixed;
+          the book pass leaves binaries alone.
 """
 import json
 import os
@@ -311,6 +313,17 @@ class TestGlossaryText(unittest.TestCase):
         self.assertFalse(any(has_cjk(key) for key in mapping))
         self.assertFalse(any(has_cjk(value) for value in mapping.values()))
         self.assertNotIn("龙怜冬", mapping)
+
+    def test_mapping_rewrites_mixed_garble_not_pure_chinese(self):
+        self.mgr.add_glossary_entry("Thẩm Lê Sơ", cn="沈梨初", variant="Thẩm梨初")
+        self.mgr.add_glossary_entry("Bùi Duật", cn="裴聿", variant="裴 Duật")
+        mapping = self.mgr.mapping()
+        # mixed-script garble the engine left in translated text
+        self.assertEqual(mapping.get("Thẩm梨初"), "Thẩm Lê Sơ")
+        self.assertEqual(mapping.get("裴 Duật"), "Bùi Duật")
+        # pure Chinese stays excluded: kept source titles are never touched
+        self.assertNotIn("沈梨初", mapping)
+        self.assertFalse(any(has_cjk(value) for value in mapping.values()))
 
 
 class TestPersistence(unittest.TestCase):
@@ -740,6 +753,14 @@ class TestEpubNameNormalization(unittest.TestCase):
         text, count = normalize_names_in_html(html, mapping)
         self.assertIn("第130章 白清夏", text)
         self.assertIn("Long Lân Đông", text)
+        self.assertEqual(count, 1)
+
+    def test_mixed_script_surface_is_rewritten_but_pure_chinese_is_not(self):
+        mapping = {"Thẩm梨初": "Thẩm Lê Sơ", "沈梨初": "Thẩm Lê Sơ"}
+        html = "<title>第3章 沈梨初</title><p>Thẩm梨初 cười.</p>"
+        text, count = normalize_names_in_html(html, mapping)
+        self.assertIn("第3章 沈梨初", text)      # source title untouched
+        self.assertIn("Thẩm Lê Sơ cười", text)   # engine garble fixed
         self.assertEqual(count, 1)
 
     def test_book_pass_skips_binary_items(self):

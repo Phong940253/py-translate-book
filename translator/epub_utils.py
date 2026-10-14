@@ -170,13 +170,20 @@ def _atomic_write_epub(path, book):
 _NAME_SURFACE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
+# Latin letters incl. Vietnamese: a CJK string carrying any of these is
+# mixed-script garble the engine left in translated text ("Thẩm梨初"),
+# never source text.
+_LATIN_RE = re.compile(r"[A-Za-zÀ-ỹ]")
+
+
 def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, int]:
     """Rewrite variant/pinyin spellings to the canonical name.
 
-    Longest surface first (``Long Lệ Đông`` before any shorter overlap) and
-    Vietnamese-only: a surface or replacement carrying Chinese is skipped so
-    the source text and the kept ``第N章`` headings stay untouched.
-    Returns ``(text, replacement_count)``."""
+    Longest surface first (``Long Lệ Đông`` before any shorter overlap).
+    Pure-Chinese surfaces and Chinese canonicals are skipped so the source
+    text and the kept ``第N章`` headings stay untouched; a mixed-script
+    surface (``Thẩm梨初``) only occurs in translated text and is rewritten
+    to its Vietnamese canonical.  Returns ``(text, replacement_count)``."""
     if not html or not mapping:
         return html, 0
     text = html
@@ -185,7 +192,9 @@ def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, in
         canonical = mapping.get(surface)
         if not surface or not canonical or surface == canonical:
             continue
-        if _NAME_SURFACE_RE.search(surface) or _NAME_SURFACE_RE.search(canonical):
+        if _NAME_SURFACE_RE.search(canonical):
+            continue
+        if _NAME_SURFACE_RE.search(surface) and not _LATIN_RE.search(surface):
             continue
         if surface not in text:
             continue
