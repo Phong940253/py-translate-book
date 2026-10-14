@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#131622" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
   <title>{% block title %}Translate Book Manager{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_v('style.css')) }}">
   {% block extra_head %}{% endblock %}
   <script>
     // Apply the saved/preferred theme before first paint to avoid a flash.
@@ -106,7 +106,7 @@
     <small>{{ t('footer.local') }}</small>
   </footer>
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v=asset_v('app.js')) }}"></script>
   <script>
     // PWA: register only in a secure context (https/localhost) — service
     // workers are rejected on plain-HTTP LAN addresses, where the manifest

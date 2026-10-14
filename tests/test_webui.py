@@ -823,6 +823,17 @@ class TestWebUI(unittest.TestCase):
         html = read("templates", "reader.html")
         self.assertIn('id="rd-font-warn"', html)
         self.assertIn('id="rd-p-pos-m"', html)
+        # assets carry their mtime as ?v= — the service worker answers
+        # static requests cache-first, so without a fresh URL an edit would
+        # stay invisible until the SW's own version changed (the cover
+        # refetch fix never reached the browser that way)
+        self.assertIn("asset_v('reader.js')", html)
+
+        page = self.client.get(
+            "/read?path=" + self._reader_rich_epub("_test_reader_v.epub")
+        ).get_data(as_text=True)
+        self.assertIn("/static/reader.js?v=", page,
+                      "the rendered page must carry the asset version")
 
         from webui import i18n as wui_i18n
 
@@ -830,7 +841,7 @@ class TestWebUI(unittest.TestCase):
             self.assertIn("read.font_no_vi", wui_i18n.TRANSLATIONS[lang])
 
         # reader assets changed → bump so installed PWAs refetch them
-        self.assertIn("'pytb-v13'", read("static", "sw.js"))
+        self.assertIn("'pytb-v14'", read("static", "sw.js"))
 
     def test_reader_res_serves_assets_and_refuses_documents(self):
         path = self._reader_rich_epub("_test_reader_res.epub")

@@ -2,7 +2,7 @@
 {% from "_icons.html" import icon %}
 {% block title %}{{ book_title }} · {{ t('read.title') }}{% endblock %}
 {% block extra_head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='reader.css', v=asset_v('reader.css')) }}">
 {% endblock %}
 {% block app_config %}
 window.APP.reader = {
@@ -254,5 +254,5 @@ window.APP.reader = {
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='reader.js') }}"></script>
+<script src="{{ url_for('static', filename='reader.js', v=asset_v('reader.js')) }}"></script>
 {% endblock %}

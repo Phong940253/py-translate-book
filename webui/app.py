@@ -122,6 +122,25 @@ def _inject_i18n():
     return {"locale": loc, "t": t, "js_i18n": i18n.table(loc)}
 
 
+@app.context_processor
+def _inject_asset_version():
+    """Expose ``asset_v(name)`` — a static file's mtime as a cache token.
+
+    Templates append it to ``url_for('static', ...)`` so editing a file yields
+    a new URL. The service worker answers static requests cache-first from
+    whatever it cached when it installed, so without a fresh URL readers keep
+    running stale code (the cover-refetch fix was invisible until the SW's
+    version changed — this makes every edit land on the next load)."""
+    def asset_v(name):
+        try:
+            return int(os.path.getmtime(
+                os.path.join(PROJECT_ROOT, "webui", "static", name)))
+        except OSError:
+            return 0
+
+    return {"asset_v": asset_v}
+
+
 # --------------------------------------------------------------------------
 # Engine / key-status helpers (shared by job_new + API Keys pages)
 # --------------------------------------------------------------------------
