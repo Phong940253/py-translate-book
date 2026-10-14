@@ -96,9 +96,12 @@ def _no_cache(resp):
     Without an explicit policy the browser may heuristic-cache a page and serve
     a stale copy on F5 (soft reload); navigating to another tab then back
     triggers a fresh navigation and re-reads the server, which is exactly the
-    "stale on F5" symptom. Static assets are left alone (they may be cached).
+    "stale on F5" symptom. Static assets are left alone (they may be cached),
+    and so is any response that states its own max-age (e.g. the cover route —
+    its artwork is refetched on every lock-screen metadata update).
     """
-    if resp.mimetype in ("text/html", "application/json"):
+    cc = resp.headers.get("Cache-Control", "")
+    if resp.mimetype in ("text/html", "application/json") and "max-age" not in cc:
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Expires"] = "0"
     return resp
@@ -550,9 +553,13 @@ def book_cover():
         abort(400)
     cover = get_cover(path)
     if not cover:
-        abort(404)
+        # Negatively cached: the reader probes the cover once and Chrome
+        # fetches the lock-screen artwork on every MediaMetadata set — books
+        # without a cover must stop coming back as 404 log lines.
+        return Response(b"", status=404,
+                        headers={"Cache-Control": "private, max-age=3600"})
     data, mime = cover
-    return send_file(io.BytesIO(data), mimetype=mime)
+    return send_file(io.BytesIO(data), mimetype=mime, max_age=3600)
 
 
 # --------------------------------------------------------------------------

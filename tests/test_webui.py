@@ -198,12 +198,17 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(r.status_code, 200, "cover should be served")
         self.assertTrue(r.content_type.startswith("image/"))
         self.assertEqual(r.data, _PNG)
+        # the lock-screen artwork is refetched on every metadata assignment —
+        # cache it client-side instead of hitting the server per paragraph
+        self.assertIn("max-age", r.headers.get("Cache-Control", ""))
 
         bad = self.client.get("/books/cover?path=/etc/passwd")
         self.assertEqual(bad.status_code, 400, "path outside PROJECT_ROOT rejected")
 
         missing = self.client.get("/books/cover?path=" + nocov_path)
         self.assertEqual(missing.status_code, 404, "no cover -> 404")
+        self.assertIn("max-age", missing.headers.get("Cache-Control", ""),
+                      "negative answers must be cacheable too")
 
     def test_books_page_renders_shell_fast(self):
         # /books no longer blocks on a full library scan: it renders the toolbar
@@ -1601,6 +1606,11 @@ class TestWebUI(unittest.TestCase):
         # refused play() falls back to the raw destination: never silent
         self.assertIn("player.gain.connect(player.ctx.destination)", js)
         self.assertIn("bgm.gain.connect(bgm.ctx.destination)", js)
+        # metadata is assigned only when it CHANGES and the cover is probed
+        # once — otherwise Chrome refetches the artwork per paragraph and a
+        # book without a cover fills the log with 404s while read-aloud runs
+        self.assertIn("media.metaKey", js)
+        self.assertIn("media.art = false", js)
 
         html = read("templates", "reader.html")
         self.assertIn('id="rd-tts-bg-hint"', html)

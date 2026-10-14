@@ -2792,15 +2792,26 @@
      buttons drive the read-aloud (book + author + cover as metadata), and
      Android classifies the page as media playback — the reason the OS keeps
      the audio running after the screen turns off. */
-  var media = { hs: false };
+  var media = { hs: false, metaKey: null, art: undefined };
 
   function msOk() { return typeof navigator !== 'undefined' && 'mediaSession' in navigator; }
 
   function mediaArtwork() {
+    if (media.art === false) return [];
     var m = state.meta;
     if (!m || !m.path) return [];
     var base = (window.APP && APP.coverUrl) || '/books/cover';
-    return [{ src: base + '?path=' + encodeURIComponent(m.path), sizes: '512x512', type: 'image/jpeg' }];
+    var src = base + '?path=' + encodeURIComponent(m.path);
+    if (media.art === undefined) {
+      // Probe the cover ONCE: a book without one 404s, and Chrome refetches
+      // the artwork on every metadata assignment (per paragraph while the
+      // read-aloud runs). Remember the failure and offer no artwork after it.
+      media.art = true;
+      var img = new Image();
+      img.onerror = function () { media.art = false; media.metaKey = null; mediaSync(); };
+      img.src = src;
+    }
+    return [{ src: src, sizes: '512x512', type: 'image/jpeg' }];
   }
 
   function mediaHandlers() {
@@ -2849,14 +2860,24 @@
       if (active && window.MediaMetadata) {
         var m = state.meta || {};
         var ch = (m.chapters && m.chapters[state.ch - 1]) || null;
-        navigator.mediaSession.metadata = new MediaMetadata(
-          speak.on
-            ? { title: m.title || '', artist: m.author || '',
-                album: (ch && chapterLabel(ch)) || '', artwork: mediaArtwork() }
-            : { title: bgm.file || '', artist: i18n('read.music'),
-                album: m.title || '', artwork: mediaArtwork() });
+        var md = speak.on
+          ? { title: m.title || '', artist: m.author || '',
+              album: (ch && chapterLabel(ch)) || '', artwork: mediaArtwork() }
+          : { title: bgm.file || '', artist: i18n('read.music'),
+              album: m.title || '', artwork: mediaArtwork() };
+        // Chrome refetches the artwork on EVERY metadata assignment — during
+        // read-aloud that was one GET /books/cover per paragraph. Only assign
+        // when what the lock screen shows actually changed; position and
+        // playback state below stay live either way.
+        var key = md.title + '\u0000' + md.artist + '\u0000' + md.album + '\u0000' +
+                  ((md.artwork[0] && md.artwork[0].src) || '');
+        if (key !== media.metaKey) {
+          media.metaKey = key;
+          navigator.mediaSession.metadata = new MediaMetadata(md);
+        }
       } else {
         navigator.mediaSession.metadata = null;
+        media.metaKey = null;
       }
       navigator.mediaSession.playbackState =
         speak.on ? (speak.paused ? 'paused' : 'playing')
