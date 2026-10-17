@@ -182,6 +182,23 @@ class TestWrapperRepair(unittest.TestCase):
         self.assertNotIn("<div>", repaired)
         self.assertNotIn("<section>", repaired)
 
+    # --- surplus heading wrappers (the chapter-146 re-wrap)
+
+    def test_repair_strips_duplicate_heading_wrapper(self):
+        # webai re-wraps the kept 第N章 heading in its own <h2> pair — nested,
+        # or only re-opened. Retries are unlimited, so the guard spun forever
+        # on chapter 146; the repair must leave the source's single heading.
+        src = '<h2>第146章 【江别，我喜欢你，很喜欢你。】</h2><p>甲。</p>'
+        for out in (
+            '<h2><h2>Chương 146 【Giang Biệt】</h2></h2><p>Một.</p>',
+            '<h2><h2>Chương 146 【Giang Biệt】</h2><p>Một.</p>',
+        ):
+            repaired = _repair_wrapper_balance(src, out)
+            self.assertEqual(
+                repaired, '<h2>Chương 146 【Giang Biệt】</h2><p>Một.</p>'
+            )
+            self.assertFalse(self.t._has_html_structure_mismatch(src, repaired))
+
     # --- surplus closes on tags the structural guard ignores (chapter 5 case)
 
     def test_repair_strips_surplus_paragraph_close(self):
@@ -236,6 +253,24 @@ class TestWrapperRepair(unittest.TestCase):
         self.assertEqual(t.engine.calls, 1)  # no retry
         self.assertTrue(out.endswith("</p>"))
         self.assertFalse(out.endswith("</p></p>"))
+
+    def test_translate_chunk_repairs_duplicate_heading(self):
+        # End-to-end: the re-wrapped heading must neither trigger a retry nor
+        # reach the returned translation (chapter-146 loop).
+        src = '<h2>第146章 【江别】</h2><p>第一段文字</p>'
+
+        class ReWrapHeadingEngine(FakeEngine):
+            def translate(self, text):
+                self.calls += 1
+                return ('<h2><h2>Chương 146 【Giang Biệt】</h2></h2>'
+                        '<p>Đoạn một văn bản.</p>')
+
+        t = Translator(ReWrapHeadingEngine(), html_structure_min_similarity=0.7,
+                       consistency_config={})
+        out = t._translate_chunk(src, chapter_number=146)
+        self.assertEqual(t.engine.calls, 1)  # no retry
+        self.assertNotIn("<h2><h2>", out)
+        self.assertIn("Chương 146 【Giang Biệt】</h2><p>Đoạn một văn bản.</p>", out)
 
     def test_real_leaf_tag_drop_still_rejected(self):
         # Dropping a real <em> (leaf structural tag) is genuine content loss.

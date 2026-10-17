@@ -176,9 +176,11 @@ def _structural_tags(tags) -> list:
 
 # Wrapper tags a model may "complete" by adding extra open/close pairs at the
 # boundaries of a chunk (e.g. appending </section></div> to close the chapter
-# wrapper it saw opened at the top of the chunk). These are repaired, not treated
-# as a structural break, because the source chunk is the authoritative balance.
-_WRAPPER_REPAIR_TAGS = ("div", "section", "body")
+# wrapper it saw opened at the top of the chunk), or re-wrap the kept 第N章
+# heading in one more <h2> pair. These are repaired, not treated as a
+# structural break, because the source chunk is the authoritative balance.
+_WRAPPER_REPAIR_TAGS = ("div", "section", "body",
+                        "h1", "h2", "h3", "h4", "h5", "h6")
 
 
 def _count_tag_kind(text: str, tag: str):
@@ -194,8 +196,11 @@ def _count_tag_kind(text: str, tag: str):
 
 
 def _repair_wrapper_balance(source: str, out: str) -> str:
-    """Strip wrapper tags (div/section/body) the model added beyond the source
-    chunk's own open/close balance, so chunks reassemble into valid HTML.
+    """Strip wrapper tags (div/section/body, h1-h6) the model added beyond the
+    source chunk's own open/close balance, so chunks reassemble into valid
+    HTML.  The heading case: the model re-wraps the kept 第N章 title in its own
+    <h2> pair (or just re-opens it), which — with retries unlimited — spun the
+    structural guard on chapter 146 forever.
 
     Only *surplus* wrapper tags are removed. Tags the model genuinely dropped are
     intentionally left in place so ``_has_html_structure_mismatch`` still rejects

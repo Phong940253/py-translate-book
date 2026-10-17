@@ -501,6 +501,19 @@ class TestRepairParsing(unittest.TestCase):
             {"Bai Qing Xia": "Bạch Thanh Hạ"},
         )
 
+    def test_apply_repair_learns_mixed_script_garble(self):
+        # The chapter-146 garble: "江 biệt" (CJK + romanized reading). The fix
+        # must reach the retry prompt (pinyin_fixes) and the EPUB normaliser
+        # (mapping) alike, and the name must leave the pending queue.
+        self.mgr.add_pending("江 biệt")
+        fixes = self.mgr.apply_repair("江 biệt -> 江别 = Giang Biệt")
+        self.assertEqual(fixes, {"江 biệt": "Giang Biệt"})
+        self.assertEqual(
+            self.mgr.pinyin_fixes(["江 biệt"]), {"江 biệt": "Giang Biệt"}
+        )
+        self.assertEqual(self.mgr.mapping().get("江 biệt"), "Giang Biệt")
+        self.assertNotIn("江 biệt", self.mgr.pending)
+
 
 class NameAwareEngine(AnalyzingEngine):
     def __init__(self):
@@ -592,6 +605,26 @@ class TestTranslatorNameFlow(unittest.TestCase):
         self.assertEqual(
             translator._detect_pinyin_names(
                 "<p>Anh Qiu smiled.</p>", "<p>Hắn cười.</p>"
+            ),
+            [],
+        )
+
+    def test_mixed_script_garble_is_detected_and_parked(self):
+        # "江 biệt" / "Thẩm梨初": the engine half-translated a name, leaving
+        # CJK glued to (or ahead of) the romanized reading. It used to ship
+        # silently; the detector must flag it so the repair pass learns the
+        # canonical form and later chapters get it from the glossary.
+        translator = self._translator(NameAwareEngine())
+        hits = translator._detect_pinyin_names(
+            "<p>江别看着沈青提。</p>",
+            "<p>trái tim 江 biệt đập nhanh, Thẩm梨初 mỉm cười.</p>",
+        )
+        self.assertEqual(hits, ["江 biệt", "Thẩm梨初"])
+        self.assertEqual(translator.global_rules.pending.get("江 biệt"), "pinyin")
+        # kept 第N章 numbering next to translated text is not garble
+        self.assertEqual(
+            translator._detect_pinyin_names(
+                "<p>江别看着沈青提。</p>", "<p>第146章 Giang Biệt bước vào.</p>"
             ),
             [],
         )

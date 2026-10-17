@@ -71,6 +71,16 @@ _VN_COMMON_PINYIN = _PINYIN_SYLLABLES & _VN_COMMON_SYLLABLES
 # (Bạch Thanh Hạ) never matches, a pinyin name always does.
 _NAME_CANDIDATE_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
 
+# Mixed-script garble: CJK glued to a romanized reading ("Thẩm梨初") or a CJK
+# run followed by one Latin word ("江 biệt") — a name the engine left
+# half-translated.  Source text is pure Chinese, so this shape only appears in
+# translated output; the kept ``第N章`` numbering is guarded by the digit that
+# precedes 章 ("第146章 Giang Biệt" is not a leak).
+_MIXED_GARBLE_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+[ \u00a0]?[A-Za-zÀ-ỹ]+"
+    r"|[A-Za-zÀ-ỹ]+[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+"
+)
+
 
 # Latin letters incl. Vietnamese: a CJK string carrying any of these is
 # mixed-script garble from the engine ("Thẩm梨初"), not source text.
@@ -834,13 +844,16 @@ class GlobalRulesManager:
         return fixes
 
     def detect_pinyin_names(self, text: str) -> list[str]:
-        """Latin name-like runs in a translation that look like pinyin.
+        """Latin name-like runs in a translation that look like pinyin, plus
+        mixed-script garble (CJK left glued to or ahead of the romanized
+        reading: "江 biệt", "Thẩm梨初").
 
         A run is suspicious when it is 2-3 capitalized ASCII words, is not a
         known Vietnamese name (dictionary, canonical, whitelist), and carries
         at least one pinyin syllable that no known name uses — which is what
         separates 'Anh Qiu' (leak) from 'Dinh Van Quan' (Vietnamese without
-        diacritics)."""
+        diacritics).  Mixed-script runs cannot come from the source text and
+        are flagged as-is for the repair pass."""
         if not text:
             return []
         with self._lock:
@@ -859,6 +872,21 @@ class GlobalRulesManager:
                     continue
                 if self._pinyin_suspicious_locked(candidate):
                     found.append(candidate)
+            for match in _MIXED_GARBLE_RE.finditer(text):
+                candidate = match.group(0)
+                start = match.start()
+                if (
+                    start > 0
+                    and text[start - 1].isdigit()
+                    and _CJK_RE.match(candidate)
+                ):
+                    continue                    # kept 第N章 numbering, no name
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if fold_name(candidate) in known_folded or candidate in known_folded:
+                    continue                    # kept / whitelisted as-is
+                found.append(candidate)
         return found
 
     def mapping(self) -> dict[str, str]:
