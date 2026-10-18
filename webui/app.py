@@ -56,9 +56,10 @@ from translator.model_lister import fetch_models
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 
-# Rendered TTS pieces live on disk (cache/tts/, git-ignored) so chapters can
-# be pre-generated from the read-aloud panel and playback streams off disk
-# instead of waiting for the model. See reader.TTSPieceCache.
+# Rendered read-aloud audio lives on disk (cache/tts/, git-ignored) so
+# chapters can be pre-generated from the read-aloud panel and playback
+# streams off disk instead of waiting for the model; a chapter costs one
+# MP3 + one index file. See reader.TTSChapterCache.
 reader.ENGINE.enable_disk(os.path.join(PROJECT_ROOT, "cache", "tts"))
 
 # Sections users cannot overwrite with the "add provider" form (built-in
@@ -650,9 +651,13 @@ def api_reader_chapter():
     except (TypeError, ValueError):
         return jsonify({"error": "n must be an integer"}), 400
     try:
-        return jsonify(doc.chapter(n))
+        chapter = doc.chapter(n)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    # Read-aloud write-through: paragraphs rendered while this chapter is the
+    # one on screen are bundled into its disk-cache files (see TTSChapterCache).
+    reader.ENGINE.note_chapter(doc.path, n)
+    return jsonify(chapter)
 
 
 @app.route("/api/reader/image")
@@ -706,6 +711,7 @@ def api_reader_doc():
         return _doc_error_page(str(e), 400)
     except Exception as e:  # noqa: BLE001 — broken chapter → readable page
         return _doc_error_page(f"{type(e).__name__}: {e}", 422)
+    reader.ENGINE.note_chapter(doc.path, n)   # same write-through context
     return Response(
         page,
         mimetype="text/html",
@@ -955,7 +961,7 @@ def api_tts_stream():
 
 
 # --------------------------------------------------------------------------
-# TTS piece disk cache: pre-render chapters so read-aloud streams off disk
+# TTS disk cache: pre-render chapters so read-aloud streams off disk
 # --------------------------------------------------------------------------
 
 _CACHE_CHAPTERS_MAX = 999

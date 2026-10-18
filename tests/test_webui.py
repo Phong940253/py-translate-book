@@ -79,6 +79,7 @@ class _FakeBookDoc:
     def __init__(self, texts):
         # texts = {chapter_number: [paragraph, ...]}
         self._texts = texts
+        self.path = "fake-book.epub"
         self.chapters = [
             {"chars": sum(len(t) for t in texts[n])} for n in sorted(texts)
         ]
@@ -857,7 +858,7 @@ class TestWebUI(unittest.TestCase):
             self.assertIn("read.font_no_vi", wui_i18n.TRANSLATIONS[lang])
 
         # reader assets changed → bump so installed PWAs refetch them
-        self.assertIn("'pytb-v15'", read("static", "sw.js"))
+        self.assertIn("'pytb-v16'", read("static", "sw.js"))
 
     def test_reader_res_serves_assets_and_refuses_documents(self):
         path = self._reader_rich_epub("_test_reader_res.epub")
@@ -1535,13 +1536,13 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(len(segs), n)
         self.assertEqual(len(stub.calls), calls_before)  # pieces shared
 
-    # -------------------------------------------------- TTS disk piece cache
+    # -------------------------------------------------- TTS disk chapter cache
     def _disk_engine(self, tmp=None, stamp=0.1):
         """TTSEngine over a tmp cache dir + a counting stub model."""
         from webui import reader
 
         if tmp is None:
-            tmp = tempfile.mkdtemp(prefix="tts_piece_cache_")
+            tmp = tempfile.mkdtemp(prefix="tts_chapter_cache_")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
 
         class _Stub:
@@ -1576,6 +1577,7 @@ class TestWebUI(unittest.TestCase):
 
         text = "Xin chào thế giới. Một câu thứ hai ở đây."
         eng, stub, tmp = self._disk_engine()
+        eng.note_chapter("book.epub", 1)   # what the reader page tells the engine
         wav1, segs1 = eng.synthesize(text, voice="v1")
         self.assertEqual(len(stub.calls), len(reader.split_for_tts(text)))
         self.assertTrue(wav1.startswith(b"RIFF"))
@@ -1587,6 +1589,19 @@ class TestWebUI(unittest.TestCase):
         self.assertEqual(stub2.calls, [])                 # served from disk
         self.assertEqual(len(wav2), len(wav1))
         self.assertEqual(segs2, segs1)
+
+        # streaming playback serves the same bundle without the model
+        frames = list(eng2.synthesize_stream(text, voice="v1"))
+        pieces = reader.split_for_tts_seg(text)
+        self.assertEqual(stub2.calls, [])
+        self.assertEqual(len(frames), len(pieces))
+        self.assertFalse(frames[-1][0]["final"] is False)
+        for idx, (header, payload) in enumerate(frames):
+            self.assertEqual(header["i"], idx)
+            self.assertEqual((header["s"], header["e"]),
+                             (pieces[idx][1], pieces[idx][2]))
+            self.assertGreater(header["d"], 0)
+            self.assertTrue(payload.startswith(b"RIFF"))
 
         # inventory: planning matches playback; all pieces counted cached
         doc = _FakeBookDoc({1: [text]})
@@ -1604,7 +1619,8 @@ class TestWebUI(unittest.TestCase):
 
         # clear wipes the store
         eng.clear_cache()
-        self.assertEqual(eng.disk.stats(), {"files": 0, "bytes": 0})
+        disk = eng.disk.stats()
+        self.assertEqual((disk["files"], disk["bytes"]), (0, 0))
 
     def test_tts_disk_cache_off_without_a_dir(self):
         from webui import reader
@@ -1625,12 +1641,57 @@ class TestWebUI(unittest.TestCase):
         wav, _ = eng.synthesize("Xin chào.")
         self.assertTrue(wav.startswith(b"RIFF"))
 
-    def test_tts_disk_cache_skips_silence_and_heals_corruption(self):
-        import wave
+    def test_tts_disk_cache_bundles_one_pair_per_chapter(self):
+        """A whole chapter costs ONE audio file + ONE index, appended as
+        paragraphs are rendered — not one file per paragraph or piece."""
+        from webui import reader
 
+        def listing():
+            return sorted(os.path.join(d, n)
+                          for d, _s, ns in os.walk(tmp) for n in ns)
+
+        eng, stub, tmp = self._disk_engine()
+        eng.note_chapter("book.epub", 1)
+        texts = ["Đoạn một đủ dài để tách thành mảnh riêng.",
+                 "Đoạn hai cũng thế, dài vừa đủ cho một mảnh."]
+        for t in texts:
+            eng.synthesize(t, voice="v1")
+
+        files = listing()
+        self.assertEqual(len(files), 2)                   # one pair, not four
+        mp3 = [f for f in files if f.endswith(".mp3")]
+        self.assertEqual(len(mp3), 1)
+        self.assertEqual(len([f for f in files if f.endswith(".json")]), 1)
+        self.assertGreater(os.path.getsize(mp3[0]), 0)
+
+        # a second chapter gets its own pair
+        eng.note_chapter("book.epub", 2)
+        eng.synthesize("Chương hai một đoạn ngắn.", voice="v1")
+        self.assertEqual(len(listing()), 4)
+
+        # both paragraphs stream back from disk on a fresh engine
+        eng2, stub2, _ = self._disk_engine(tmp=tmp)
+        for t in texts:
+            frames = list(eng2.synthesize_stream(t, voice="v1"))
+            self.assertEqual(len(frames), len(reader.split_for_tts(t)))
+        self.assertEqual(stub2.calls, [])
+
+        # a new paragraph for the same chapter is appended to the existing
+        # pair (still four files) and served on the next read
+        eng2.note_chapter("book.epub", 1)
+        extra = "Đoạn mới thêm vào chương một."
+        eng2.synthesize(extra, voice="v1")
+        self.assertTrue(stub2.calls)                      # rendered once, live
+        self.assertEqual(len(listing()), 4)
+        eng3, stub3, _ = self._disk_engine(tmp=tmp)
+        eng3.synthesize(extra, voice="v1")
+        self.assertEqual(stub3.calls, [])
+
+    def test_tts_disk_cache_skips_silence_and_heals_corruption(self):
         from webui import reader
 
         eng, stub, tmp = self._disk_engine()
+        eng.note_chapter("book.epub", 1)
 
         # a lone "？" never reaches the model → silence, nothing on disk
         wav, _ = eng.synthesize("？", voice="v1")
@@ -1653,20 +1714,54 @@ class TestWebUI(unittest.TestCase):
         self.assertTrue(wav2.startswith(b"RIFF"))
         self.assertEqual(eng.disk.stats()["files"], 0)
 
-        # a torn file reads as a miss and is replaced by the fresh render
+        # a torn audio file reads as a miss and is replaced by the fresh render
         text = "Chỉ một câu ngắn."
         eng3, stub3, _ = self._disk_engine(tmp=tmp)
+        eng3.note_chapter("book.epub", 1)
         eng3.synthesize(text, voice="v1")
-        part = reader.split_for_tts(text)[0]
-        path = eng3.disk._path("v1", part)
+        path = eng3.disk._base("v1", "book.epub", 1) + ".mp3"
         with open(path, "wb") as f:
             f.write(b"RIFFgarbage")
         eng4, stub4, _ = self._disk_engine(tmp=tmp)
+        eng4.note_chapter("book.epub", 1)
         wav4, _ = eng4.synthesize(text, voice="v1")
         self.assertEqual(len(stub4.calls), 1)             # corrupt → re-rendered
         self.assertTrue(wav4.startswith(b"RIFF"))
-        with wave.open(path, "rb") as wf:                 # valid again
-            self.assertGreater(wf.getnframes(), 0)
+        self.assertIsNotNone(eng4.disk.get_item(
+            "v1", reader._collapse(text), len(reader.split_for_tts(text))))
+
+    def test_tts_disk_cache_stores_compressed_audio(self):
+        import soundfile as sf
+
+        from webui import reader
+
+        eng, _stub, _tmp = self._disk_engine(stamp=0.5)
+        eng.note_chapter("book.epub", 1)
+        text = "Một câu đủ dài để kiểm tra nén."
+        eng.synthesize(text, voice="v1")
+        path = eng.disk._base("v1", "book.epub", 1) + ".mp3"
+        self.assertTrue(os.path.isfile(path))
+        # 0.5 s of float32 samples is ~96 KB in RAM; the on-disk copy is a
+        # small fraction of that (MP3, not PCM/WAV).
+        raw = 48000 * 0.5 * 4 * len(reader.split_for_tts(text))
+        self.assertLess(os.path.getsize(path), raw * 0.5)
+        samples, sr = sf.read(path, dtype="float32")
+        self.assertEqual(sr, 48000)
+        self.assertAlmostEqual(len(samples) / 48000, 0.5, delta=0.1)
+        got = eng.disk.get_item("v1", reader._collapse(text),
+                                len(reader.split_for_tts(text)))
+        self.assertIsNotNone(got)                          # decodes for playback
+        self.assertTrue(all(len(chunk) > 0 for chunk in got))
+
+    def test_tts_disk_cache_prunes_legacy_wav_pieces(self):
+        eng, _stub, tmp = self._disk_engine()
+        legacy = os.path.join(tmp, "ab", "deadbeef.wav")
+        os.makedirs(os.path.dirname(legacy), exist_ok=True)
+        with open(legacy, "wb") as f:
+            f.write(b"RIFF-old-format")
+        st = eng.disk.stats()
+        self.assertEqual((st["files"], st["bytes"]), (0, 0))
+        self.assertFalse(os.path.exists(legacy))
 
     def test_tts_cache_job_renders_chapters_and_skips_cached(self):
         from webui import reader
@@ -1749,6 +1844,10 @@ class TestWebUI(unittest.TestCase):
         self.assertIn("rd-cache-start", body)
         self.assertIn("rd-cache-bar", body)
         self.assertIn("rd-cache-clear", body)
+        # the cache is deliberately uncapped: no budget inputs / endpoint
+        self.assertNotIn("cacheLimitUrl", body)
+        self.assertNotIn("rd-cache-max-mb", body)
+        self.assertNotIn("rd-cache-max-files", body)
 
     def test_tts_cache_endpoints(self):
         from webui import reader
@@ -1830,6 +1929,74 @@ class TestWebUI(unittest.TestCase):
                                side_effect=ValueError("busy")):
             r = self.client.post("/api/tts/cache/clear")
         self.assertEqual(r.status_code, 409)
+
+        # the old budget endpoint is gone — the cache is uncapped on purpose
+        r = self.client.post("/api/tts/cache/limit",
+                             json={"max_bytes": 1024})
+        self.assertEqual(r.status_code, 404)
+
+    def test_tts_stream_write_through_follows_open_chapter(self):
+        """Loading a chapter sets the write-through target: streaming its
+        paragraphs bundles one audio+index pair per chapter, and a second
+        listen replays them with zero model calls."""
+        import struct
+
+        from webui import reader
+
+        tmp = tempfile.mkdtemp(prefix="tts_writethrough_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                return [0.05] * 4800
+
+        def frame_count(data):
+            n, off = 0, 0
+            while off < len(data):
+                hl = struct.unpack(">I", data[off:off + 4])[0]
+                off += 4 + hl
+                wl = struct.unpack(">I", data[off:off + 4])[0]
+                off += 4 + wl
+                n += 1
+            return n
+
+        path = self._reader_epub(name="_test_writethrough.epub")
+        stub = _Stub()
+        eng = reader.ENGINE
+        self.addCleanup(setattr, eng, "_book_ctx", None)
+        with self._warm_noop(), \
+                mock.patch.object(eng, "disk", reader.TTSChapterCache(tmp)), \
+                mock.patch.object(eng, "_tts", stub), \
+                mock.patch.object(eng, "state", "ready"), \
+                mock.patch.object(eng, "default_voice", "v1"), \
+                mock.patch.object(eng, "voices", [{"id": "v1", "label": "v1"}]):
+            r = self.client.get("/api/reader/chapter?path=%s&n=1" % path)
+            self.assertEqual(r.status_code, 200)
+            text = r.get_json()["items"][0]["text"]
+
+            r1 = self.client.post("/api/tts/stream",
+                                  json={"text": text, "voice": "v1"})
+            self.assertEqual(r1.status_code, 200)
+            self.assertGreater(frame_count(r1.get_data()), 0)
+            calls = len(stub.calls)
+            self.assertGreater(calls, 0)
+
+            files = [os.path.join(d, n)
+                     for d, _s, ns in os.walk(tmp) for n in ns]
+            self.assertEqual(len(files), 2)          # one pair for chapter 1
+
+            # replay: same frames from the bundle, model untouched
+            r2 = self.client.post("/api/tts/stream",
+                                  json={"text": text, "voice": "v1"})
+            self.assertEqual(len(stub.calls), calls)
+            self.assertEqual(frame_count(r2.get_data()),
+                             frame_count(r1.get_data()))
 
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")

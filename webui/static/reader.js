@@ -2117,10 +2117,11 @@
   function cacheKey(ch, i) { return ch + ':' + i; }
 
   /* ----------------------------------------------------- TTS disk cache HUD
-     The server keeps one rendered WAV per speech piece (per voice): normal
-     read-aloud fills it as it goes, and the panel can pre-render a chapter
-     range up front (instant, restart-proof playback). One bar shows
-     whichever is active — a running job, else this chapter's fill. */
+     The server stores read-aloud audio per chapter (one compact MP3 + one
+     index file per chapter, per voice): normal read-aloud fills it as it
+     goes, and the panel can pre-render a chapter range up front (instant,
+     restart-proof playback). One bar shows whichever is active — a running
+     job, else this chapter's fill. The store is uncapped; clear it here. */
 
   var ttsCache = { poll: 0, job: null, fill: null, busy: false };
 

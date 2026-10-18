@@ -186,7 +186,7 @@ Open **http://127.0.0.1:5000**.
 | `/config/settings` | **Settings (GUI)**: translation / illustration / consistency / Discord as a form (advanced YAML stays on `/config`) |
 | `/config` | Advanced: edit raw `config.yaml` (keys masked, `.bak` backup), test Discord |
 | `/illustrations` | Gallery of generated illustrations |
-| `/read?path=<epub>` | **Reader**: iframe-safe chapter rendering, themes/fonts, search, annotations, and read-aloud (local VieNeu-TTS). The read-aloud panel can **pre-generate a chapter range to disk** (`cache/tts/`) with a progress bar; playback then streams off disk (normal listening fills the same cache as it goes). |
+| `/read?path=<epub>` | **Reader**: iframe-safe chapter rendering, themes/fonts, search, annotations, and read-aloud (local VieNeu-TTS). The read-aloud panel can **pre-generate a chapter range to disk** (`cache/tts/`) with a progress bar; playback then streams off disk (normal listening fills the same cache as it goes). Audio is stored as compact MP3 — **one audio file + one index per chapter** (~2 files/chapter, no file-count explosion), uncapped and cleared from the panel. |
 
 **Stopping a job:** the Stop button halts safely at a **chapter boundary** (it will
 not abort a chunk that is mid-API-call).
@@ -209,7 +209,7 @@ translator/
   engines/                TranslationEngine: openai / gemini / webai / compatible (+ base)
 webui/
   app.py                 Flask app (routes + SSE)
-  reader.py              EPUB reader (/read) + local TTS engine + TTS piece disk cache
+  reader.py              EPUB reader (/read) + local TTS engine + TTS chapter disk cache
   jobs.py                JobRegistry + Job (state, log, progress; persisted in webui/jobs/)
   core_runner.py         runs run_translation in a thread, forwards log/events -> SSE
   config_store.py        safe read/write of config.yaml (mask keys + backup)

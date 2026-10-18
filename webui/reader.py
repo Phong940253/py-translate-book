@@ -1296,107 +1296,81 @@ def _to_wav(chunks, sample_rate: int) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# Disk piece cache: chapter audio survives restarts and can be pre-rendered
+# Disk cache: chapter audio survives restarts and can be pre-rendered
 # --------------------------------------------------------------------------
 
 # Part of every cache key — bump when a render change should invalidate the
-# whole store (voice model updates, PCM format changes). Old files are simply
-# never read again.
-_CACHE_VER = "v1"
+# whole store (voice model updates, bundle layout changes). Old bundles are
+# simply never looked up again; legacy PCM (.wav) pieces are pruned on the
+# first walk.
+_CACHE_VER = "v3"
 # Two hex chars of the digest as a subdirectory: keeps any single folder
-# small once a few novels' worth of pieces are cached.
+# small once a few novels' worth of chapters are cached.
 _CACHE_SUBDIR = 2
+# Per cached chapter: ONE audio file (concatenated per-paragraph MP3 streams)
+# plus ONE JSON index (byte range + piece timing of every paragraph) — a
+# whole novel costs ~2 files per chapter instead of one per speech piece.
+# MP3 keeps it in a couple of GB (~9% of the old 48 kHz PCM WAV, ~11x fewer
+# bytes written to the SSD); the browser never touches this format — the
+# engine decodes to samples and re-frames WAV on the fly.
+_AUDIO_EXT = ".mp3"
+_INDEX_EXT = ".json"
+_PIECE_LEVEL = 0.5       # libsndfile MP3 quality slider ≈ 68 kbps mono
 
 
-class TTSPieceCache:
-    """One WAV file per rendered speech piece, keyed by ``(voice, text)``.
+class TTSChapterCache:
+    """Two files per cached chapter: one MP3 audio, one paragraph index.
 
-    The piece is the synthesis unit of BOTH playback paths (whole-paragraph
-    ``synthesize`` and streaming ``synthesize_stream``), so a hit here skips
-    the model entirely. ``TTSEngine`` writes through on every real render
-    (listening fills the cache), and the batch job pre-fills whole chapters.
-    Every failure mode degrades to a cache miss — playback must never break
-    because of a full disk or a half-written file.
+    Every rendered paragraph is encoded as a self-contained MP3 stream and
+    appended to its chapter's audio as soon as it is finished — by the batch
+    pre-render job or by normal listening (write-through). The index stores,
+    per paragraph hash, the byte range plus the per-piece char/sample split
+    the reader needs for sentence highlighting, so a read decodes only the
+    requested paragraph (a few ms). Playback never depends on the cache: any
+    missing entry, torn file or stale version simply reads as a miss and the
+    paragraph is synthesized again.
     """
 
     def __init__(self, root: str):
         self.root = root
-        # {files, bytes} — exact once seeded by the first walk, then kept
-        # in step by put()/clear(); the panel polls this every second while a
-        # job runs and walking a six-figure tree would be far too slow.
+        # {files, bytes} for the panel: exact after the first walk, then kept
+        # in step by put_item/clear — walking a big tree on every poll would
+        # be far too slow once whole novels are cached.
         self._stats = None
-        self._stats_lock = threading.Lock()
+        # (voice, paragraph hash) → (base path, entry) over every index file,
+        # rebuilt lazily once per process (see ``_ensure_index_locked``).
+        self._index = None
+        self._lock = threading.Lock()
 
-    def _path(self, voice, part: str) -> str:
+    # -- paths -------------------------------------------------------------
+    @staticmethod
+    def _para_hash(text: str) -> str:
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+    def _base(self, voice, book: str, ch) -> str:
         h = hashlib.sha1(
-            ("%s\x00%s\x00%s" % (_CACHE_VER, voice or "", part)).encode("utf-8")
+            ("%s\x00%s\x00%s\x00%s"
+             % (_CACHE_VER, voice or "", book or "", ch)).encode("utf-8")
         ).hexdigest()
-        return os.path.join(self.root, h[:_CACHE_SUBDIR], h + ".wav")
+        return os.path.join(self.root, h[:_CACHE_SUBDIR], h)
 
-    def has(self, voice, part: str) -> bool:
-        try:
-            return os.path.isfile(self._path(voice, part))
-        except OSError:
-            return False
-
-    def get(self, voice, part: str):
-        """Cached piece as float32 samples, or None on miss/corrupt file."""
-        import numpy as np
-
-        try:
-            with wave.open(self._path(voice, part), "rb") as wf:
-                if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-                    return None
-                pcm = wf.readframes(wf.getnframes())
-        except (OSError, EOFError, wave.Error):
-            return None
-        if not pcm:
-            return None
-        return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32767.0
-
-    def put(self, voice, part: str, wav: bytes) -> None:
-        """Atomic write (tmp + replace) so readers never see a torn file.
-
-        Runs under the stats lock: the size counters stay exact even when a
-        concurrent ``stats()`` walk is seeding them for the first time.
-        """
-        path = self._path(voice, part)
-        d = os.path.dirname(path)
-        tmp = None
-        with self._stats_lock:
-            try:
-                old = os.path.getsize(path)
-            except OSError:
-                old = None
-            try:
-                os.makedirs(d, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
-                with os.fdopen(fd, "wb") as f:
-                    f.write(wav)
-                os.replace(tmp, path)
-                tmp = None
-                if self._stats is not None:
-                    self._stats["files"] += 0 if old is not None else 1
-                    self._stats["bytes"] += len(wav) - (old or 0)
-            except OSError:
-                pass   # a full/unwritable disk must never break playback
-            finally:
-                if tmp:
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
-
-    def _walk(self) -> dict:
+    # -- inventory ---------------------------------------------------------
+    def _walk_locked(self) -> dict:
+        """Count the whole store; prunes legacy PCM pieces (pre-MP3 caches)."""
         files = 0
         total = 0
         try:
             for dirpath, _dirs, names in os.walk(self.root):
                 for name in names:
-                    if not name.endswith(".wav"):
+                    path = os.path.join(dirpath, name)
+                    if name.endswith(".wav"):     # leftovers from the PCM era
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
                         continue
                     try:
-                        total += os.path.getsize(os.path.join(dirpath, name))
+                        total += os.path.getsize(path)
                         files += 1
                     except OSError:
                         pass
@@ -1404,22 +1378,199 @@ class TTSPieceCache:
             pass
         return {"files": files, "bytes": total}
 
+    def _ensure_index_locked(self) -> None:
+        """(voice, paragraph hash) → (base, entry), built by reading every
+        index file once; ``put_item`` keeps it in step afterwards."""
+        if self._index is not None:
+            return
+        index = {}
+        try:
+            for dirpath, _dirs, names in os.walk(self.root):
+                for name in names:
+                    if not name.endswith(_INDEX_EXT):
+                        continue
+                    path = os.path.join(dirpath, name)
+                    try:
+                        with open(path, encoding="utf-8") as fh:
+                            doc = json.load(fh)
+                        if doc.get("v") != _CACHE_VER:
+                            continue
+                        base = path[:-len(_INDEX_EXT)]
+                        voice = doc.get("voice") or ""
+                        for h, entry in (doc.get("items") or {}).items():
+                            index[(voice, h)] = (base, entry)
+                    except (OSError, ValueError, AttributeError, TypeError):
+                        continue
+        except OSError:
+            pass
+        self._index = index
+
+    def _entry(self, voice, text: str):
+        """``(base, entry)`` of a cached paragraph, or None."""
+        h = self._para_hash(text)
+        with self._lock:
+            self._ensure_index_locked()
+            hit = self._index.get((voice, h))
+            if hit is None:
+                return None
+            base, entry = hit
+            if not os.path.isfile(base + _AUDIO_EXT):
+                del self._index[(voice, h)]
+                return None
+            return base, entry
+
+    # -- reads -------------------------------------------------------------
+    def has_item(self, voice, text: str, pieces: int) -> bool:
+        """True when the paragraph is bundled with exactly its pieces."""
+        hit = self._entry(voice, text)
+        return bool(hit is not None and len(hit[1].get("parts") or []) == pieces)
+
+    def get_item(self, voice, text: str, pieces: int):
+        """The decoded piece waveforms of a cached paragraph, or None."""
+        import numpy as np
+        import soundfile as sf
+
+        h = self._para_hash(text)
+        hit = self._entry(voice, text)
+        if hit is None:
+            return None
+        base, entry = hit
+        parts = entry.get("parts") or []
+        if len(parts) != pieces:
+            return None
+        try:
+            off = int(entry["off"])
+            length = int(entry["len"])
+            with open(base + _AUDIO_EXT, "rb") as fh:
+                fh.seek(off)
+                payload = fh.read(length)
+            if len(payload) != length:
+                raise ValueError("short read")
+            audio, _sr = sf.read(io.BytesIO(payload), dtype="float32")
+        except Exception:  # noqa: BLE001 — torn/foreign data reads as a miss
+            audio = None
+        if audio is not None:
+            audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+            out = []
+            pos = 0
+            for _s, _e, n in parts:
+                chunk = audio[pos:pos + int(n)]
+                if chunk.size == 0:      # a 0-frame WAV would stop playback
+                    out = None
+                    break
+                out.append(chunk)
+                pos += int(n)
+            if out is not None:
+                return out
+        # Broken beyond use: forget the entry so a fresh render can append a
+        # replacement segment (the stale bytes just sit unreferenced).
+        with self._lock:
+            self._index.pop((voice, h), None)
+        return None
+
+    # -- writes ------------------------------------------------------------
+    def put_item(self, voice, book: str, ch, text: str, pieces, samples,
+                 sr: float) -> bool:
+        """Encode one finished paragraph as a single self-contained MP3 and
+        append it (plus its index entry) to the chapter bundle.
+
+        ``pieces`` are ``(part, s, e)`` triples, ``samples`` the matching
+        waveforms. No-op when the paragraph is already bundled (another
+        writer won the race). Never raises — any failure degrades to a later
+        cache miss."""
+        if not text or not book or not ch:
+            return False
+        pieces = list(pieces or [])
+        samples = list(samples or [])
+        if not pieces or len(pieces) != len(samples):
+            return False
+        h = self._para_hash(text)
+        with self._lock:
+            self._ensure_index_locked()
+            if (voice, h) in self._index:
+                return False                    # already bundled
+            try:
+                import numpy as np
+                import soundfile as sf
+
+                audio = np.nan_to_num(np.concatenate(
+                    [np.asarray(x, dtype=np.float32).reshape(-1)
+                     for x in samples]))
+                if audio.size == 0:
+                    return False
+                buf = io.BytesIO()
+                sf.write(buf, np.clip(audio, -1.0, 1.0), int(sr),
+                         format="MP3", subtype="MPEG_LAYER_III",
+                         compression_level=_PIECE_LEVEL)
+                blob = buf.getvalue()
+                if not blob:
+                    return False
+            except Exception:  # noqa: BLE001 — encoder hiccup → cache miss
+                return False
+
+            base = self._base(voice, book, ch)
+            audio_path, index_path = base + _AUDIO_EXT, base + _INDEX_EXT
+            try:
+                existed_audio = os.path.isfile(audio_path)
+                try:
+                    index_before = os.path.getsize(index_path)
+                except OSError:
+                    index_before = 0
+                os.makedirs(os.path.dirname(base), exist_ok=True)
+                off = os.path.getsize(audio_path) if existed_audio else 0
+                with open(audio_path, "ab") as fh:
+                    fh.write(blob)
+                entry = {
+                    "off": off,
+                    "len": len(blob),
+                    "parts": [[int(s), int(e), int(np.asarray(x).size)]
+                              for (_p, s, e), x in zip(pieces, samples)],
+                }
+                doc = None
+                try:
+                    with open(index_path, encoding="utf-8") as fh:
+                        doc = json.load(fh)
+                    if not isinstance(doc, dict) or doc.get("v") != _CACHE_VER:
+                        doc = None
+                except (OSError, ValueError):
+                    doc = None
+                if doc is None:
+                    doc = {"v": _CACHE_VER, "voice": voice, "book": book,
+                           "ch": int(ch), "sr": int(sr), "items": {}}
+                doc.setdefault("items", {})[h] = entry
+                tmp = index_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(doc, fh, separators=(",", ":"))
+                os.replace(tmp, index_path)
+                index_after = os.path.getsize(index_path)
+            except (OSError, ValueError, TypeError):
+                return False
+            self._index[(voice, h)] = (base, entry)
+            if self._stats is not None:
+                self._stats["files"] += ((0 if existed_audio else 1)
+                                         + (0 if index_before else 1))
+                self._stats["bytes"] += (len(blob) + index_after
+                                         - index_before)
+            return True
+
+    # -- misc --------------------------------------------------------------
     def stats(self) -> dict:
-        """File count + total bytes (cached in memory; see ``__init__``)."""
-        with self._stats_lock:
+        """File count + total bytes of the store (cached in memory)."""
+        with self._lock:
             if self._stats is None:
-                self._stats = self._walk()
+                self._stats = self._walk_locked()
             return dict(self._stats)
 
     def clear(self) -> dict:
         import shutil
 
-        with self._stats_lock:
+        with self._lock:
             try:
                 shutil.rmtree(self.root)
             except OSError:
                 pass
             self._stats = {"files": 0, "bytes": 0}
+            self._index = {}
         return self.stats()
 
 
@@ -1439,15 +1590,16 @@ class TTSEngine:
         self.voices = []                   # [{"id", "label", "gender", "region"}]
         self.default_voice = None
         self.load_seconds = None
-        # Disk piece cache — off unless a root is given (webui passes one at
-        # startup; tests build engines with a tmp dir or none at all).
-        self.disk = TTSPieceCache(cache_dir) if cache_dir else None
+        # Disk chapter cache — off unless a root is given (webui passes one
+        # at startup; tests build engines with a tmp dir or none at all).
+        self.disk = TTSChapterCache(cache_dir) if cache_dir else None
+        self._book_ctx = None              # (book basename, ch); see note_chapter
         self._job_lock = threading.RLock()  # guards _job + clear/start races
         self._job = None                   # TTSCacheJob, current or last
 
     def enable_disk(self, root: str):
-        """Attach the piece disk cache (webui startup)."""
-        self.disk = TTSPieceCache(root)
+        """Attach the chapter disk cache (webui startup)."""
+        self.disk = TTSChapterCache(root)
 
     # -- lifecycle ---------------------------------------------------------
     def ensure_warm(self):
@@ -1552,23 +1704,15 @@ class TTSEngine:
     def _render_piece(self, part: str, voice, tts, sr: float):
         """Synthesize one split piece → audio samples (list/ndarray).
 
-        Memoized on two levels: the piece LRU, then the disk cache (so both
-        playback and the batch pre-render share every render); silence
-        fallback for text the model cannot read (a 0-frame WAV would stop the
-        browser session, a punctuation-only piece would turn into junk
-        speech); one extra-copy retry.
+        Memoized in the piece LRU (so repeated playback re-uses renders);
+        silence fallback for text the model cannot read (a 0-frame WAV would
+        stop the browser session, a punctuation-only piece would turn into
+        junk speech); one extra-copy retry.
         """
         key = (voice, "p", part)
         hit = self._cache_get(key)
         if hit is not None:
-            self._disk_write(voice, part, hit[0], sr)
             return hit[0]
-
-        if self.disk is not None:
-            samples = self.disk.get(voice, part)
-            if samples is not None:
-                self._cache_put(key, samples, None, size=int(samples.nbytes))
-                return samples
 
         wav = None
         with self._lock:
@@ -1599,21 +1743,39 @@ class TTSEngine:
         # Cache stores samples (not WAV bytes): size = bytes, ≈4B/sample.
         size = int(getattr(wav, "nbytes", None) or len(wav) * 4)
         self._cache_put(key, wav, None, size=size)
-        self._disk_write(voice, part, wav, sr, force=True)
         return wav
 
-    def _disk_write(self, voice, part: str, samples, sr: float,
-                    force: bool = False):
-        """Persist one rendered piece. Cheap when it already exists (a single
-        stat, no re-encode); ``force`` overwrites (used after a fresh render,
-        which may have happened because the on-disk copy was corrupt)."""
-        d = self.disk
-        if d is None:
-            return
+    def note_chapter(self, path: str, ch) -> None:
+        """Remember the chapter the reader just opened: paragraphs rendered
+        while it is active are bundled into that chapter's cache files."""
         try:
-            if not force and d.has(voice, part):
-                return
-            d.put(voice, part, _to_wav([samples], int(sr)))
+            ch = int(ch)
+        except (TypeError, ValueError):
+            return
+        book = os.path.basename(path or "")
+        if book and ch > 0:
+            self._book_ctx = (book, ch)
+
+    def _save_item(self, voice, text: str, pieces, samples, sr: float,
+                   book=None, ch=None) -> None:
+        """Write-through one finished paragraph to the disk bundle.
+
+        Uses the current chapter noted by the reader unless the caller
+        (the batch job) names one. Silent-only items are skipped — their
+        zeros rebuild in ~0 ms and an unreadable 6000-char span would
+        otherwise park a silent MP3 on disk. Never raises."""
+        import numpy as np
+
+        d = self.disk
+        if d is None or not any(np.asarray(x).any() for x in samples):
+            return
+        if not book or not ch:
+            ctx = self._book_ctx
+            if ctx is None:
+                return                    # nothing open → nothing to file
+            book, ch = ctx
+        try:
+            d.put_item(voice, book, ch, text, pieces, samples, sr)
         except Exception:  # noqa: BLE001 — the cache never breaks playback
             pass
 
@@ -1634,8 +1796,13 @@ class TTSEngine:
         import numpy as np
 
         pieces = split_for_tts_seg(text)
-        wavs = [self._render_piece(part, voice, tts, sr)
-                for part, _s, _e in pieces]
+        wavs = None
+        if self.disk is not None:
+            wavs = self.disk.get_item(voice, text, len(pieces))
+        if wavs is None:
+            wavs = [self._render_piece(part, voice, tts, sr)
+                    for part, _s, _e in pieces]
+            self._save_item(voice, text, pieces, wavs, sr)
         wav = _to_wav(wavs, int(sr))
 
         segs, t = [], 0.0
@@ -1653,7 +1820,10 @@ class TTSEngine:
         header = ``{i, s, e, d, sr, final}`` where ``s``/``e`` are char
         offsets in the collapsed text (for sentence highlighting) and
         ``final`` marks the last piece of the paragraph. Raises
-        RuntimeError/ValueError before the first yield.
+        RuntimeError/ValueError before the first yield. A paragraph that is
+        already in the disk bundle is served from it (no model call); a
+        freshly rendered one is written through to the bundle once its last
+        frame has been sent.
         """
         text = _collapse(text)[:MAX_TEXT]
         if not text:
@@ -1662,8 +1832,28 @@ class TTSEngine:
         tts, sr, voice = self._session(voice)
         pieces = split_for_tts_seg(text)
         n = len(pieces)
+
+        cached = None
+        if self.disk is not None:
+            cached = self.disk.get_item(voice, text, n)
+        if cached is not None:
+            for idx, (_part, s, e) in enumerate(pieces):
+                chunk = cached[idx]
+                header = {
+                    "i": idx, "s": s, "e": e,
+                    "d": round(len(chunk) / sr, 3),
+                    "sr": int(sr),
+                    "final": idx == n - 1,
+                }
+                yield header, _to_wav([chunk], int(sr))
+            return
+
+        import numpy as np
+
+        wavs = []
         for idx, (part, s, e) in enumerate(pieces):
             chunk = self._render_piece(part, voice, tts, sr)
+            wavs.append(chunk)
             header = {
                 "i": idx, "s": s, "e": e,
                 "d": round(len(chunk) / sr, 3),
@@ -1671,6 +1861,12 @@ class TTSEngine:
                 "final": idx == n - 1,
             }
             yield header, _to_wav([chunk], int(sr))
+
+        # After the final frame the server resumes this generator to finish
+        # the response — the moment to write the paragraph through to disk.
+        # (A client that disconnects early raises GeneratorExit at a yield,
+        # so half-heard paragraphs are never bundled.)
+        self._save_item(voice, text, pieces, wavs, sr)
 
     # -- disk cache management (pre-render whole chapters) -----------------
     @staticmethod
@@ -1727,19 +1923,24 @@ class TTSEngine:
         return self.cache_status()
 
     def inspect_cache(self, doc, ch: int, voice=None) -> dict:
-        """Fill state of one chapter: planned pieces vs. files on disk."""
+        """Fill state of one chapter: planned pieces vs. bundled paragraphs."""
         voice = self.resolve_voice(voice)
         items = doc.chapter(ch)["items"]
         pieces = cached = chars = cached_chars = 0
         for it in items:
             if not isinstance(it, dict) or it.get("type") != "p":
                 continue
-            for part, _s, _e in self.piece_plan(it.get("text") or ""):
-                pieces += 1
-                chars += len(part)
-                if self.disk is not None and self.disk.has(voice, part):
-                    cached += 1
-                    cached_chars += len(part)
+            text = _collapse(it.get("text") or "")[:MAX_TEXT]
+            plan = self.piece_plan(text)
+            if not plan:
+                continue
+            size = sum(len(part) for part, _s, _e in plan)
+            pieces += len(plan)
+            chars += size
+            if self.disk is not None and self.disk.has_item(
+                    voice, text, len(plan)):
+                cached += len(plan)
+                cached_chars += size
         return {"ch": ch, "voice": voice, "pieces": pieces, "cached": cached,
                 "chars": chars, "cached_chars": cached_chars}
 
@@ -1756,14 +1957,16 @@ class TTSEngine:
 
 
 class TTSCacheJob:
-    """Pre-render every speech piece of a chapter range to the disk cache.
+    """Pre-render a chapter range into the disk cache (one MP3 + one index
+    file per chapter).
 
     Runs on its own thread; the single instance lives on ``TTSEngine``
     (``start_cache``/``stop_cache``/``cache_status``). Synthesis goes through
     ``TTSEngine._render_piece`` — the same serialized lock as live playback —
     so a job and read-aloud coexist: playback waits at most one piece, and
-    every finished piece immediately serves it from disk. Pieces already on
-    disk are counted without rendering, so re-running a chapter is instant.
+    every finished paragraph lands in the bundle the moment it completes.
+    Paragraphs already bundled are counted without rendering, so re-running
+    a chapter is instant.
     """
 
     def __init__(self, engine, doc, voice, ch_from: int, chapters: int,
@@ -1771,7 +1974,8 @@ class TTSCacheJob:
         self.engine = engine
         self.doc = doc
         self.voice = voice
-        self.book = book                  # basename, for the panel hint
+        # basename, for bundle naming + the panel hint
+        self.book = book or os.path.basename(getattr(doc, "path", "") or "")
         self.ch_from = ch_from
         self.chapters = chapters
         self.state = "running"            # running | done | stopped | error
@@ -1812,34 +2016,51 @@ class TTSCacheJob:
                     self.state = "stopped"
                     return
                 ch = self.ch_from + i
-                plan = []
+                items = []
                 for it in self.doc.chapter(ch)["items"]:
-                    if isinstance(it, dict) and it.get("type") == "p":
-                        plan.extend(eng.piece_plan(it.get("text") or ""))
-                exact = sum(len(part) for part, _s, _e in plan)
+                    if not isinstance(it, dict) or it.get("type") != "p":
+                        continue
+                    text = _collapse(it.get("text") or "")[:MAX_TEXT]
+                    plan = eng.piece_plan(text)
+                    if plan:
+                        items.append((text, plan))
+                exact = sum(len(part) for _text, plan in items
+                            for part, _s, _e in plan)
                 rest = self._estimate(ch + 1, self.ch_from + self.chapters)
                 with self._plock:
                     self.ch_now = ch
-                    self.pieces_total = len(plan)
+                    self.pieces_total = sum(len(plan) for _t, plan in items)
                     self.pieces_done = 0
                     self.chars_total = self.chars_done + exact + rest
-                if plan:
+                if items:
                     tts, sr, voice = eng._session(self.voice)
-                    for part, _s, _e in plan:
+                    for text, plan in items:
                         if self._stop.is_set():
                             self.state = "stopped"
                             return
-                        if eng.disk is None or not eng.disk.has(voice, part):
+                        if eng.disk is not None and eng.disk.has_item(
+                                voice, text, len(plan)):
+                            with self._plock:
+                                self.pieces_done += len(plan)
+                                self.chars_done += sum(
+                                    len(part) for part, _s, _e in plan)
+                            continue
+                        wavs = []
+                        for part, _s, _e in plan:
+                            if self._stop.is_set():
+                                self.state = "stopped"
+                                return
                             t0 = time.time()
-                            eng._render_piece(part, voice, tts, sr)
+                            wavs.append(eng._render_piece(part, voice, tts, sr))
                             with self._plock:
                                 self._synth_t += time.time() - t0
                                 self._synth_c += len(part)
-                        with self._plock:
-                            self.pieces_done += 1
-                            self.chars_done += len(part)
-                            if self._synth_t > 0:
-                                self.rate = self._synth_c / self._synth_t
+                                self.pieces_done += 1
+                                self.chars_done += len(part)
+                                if self._synth_t > 0:
+                                    self.rate = self._synth_c / self._synth_t
+                        eng._save_item(voice, text, plan, wavs, sr,
+                                       book=self.book, ch=ch)
                 with self._plock:
                     self.ch_done += 1
             self.state = "done"
