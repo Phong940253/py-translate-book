@@ -19,6 +19,11 @@ window.APP.reader = {
   ttsUrl: {{ url_for('api_tts')|tojson }},
   ttsStreamUrl: {{ url_for('api_tts_stream')|tojson }},
   voicesUrl: {{ url_for('api_tts_voices')|tojson }},
+  cacheStatusUrl: {{ url_for('api_tts_cache_status')|tojson }},
+  cacheInspectUrl: {{ url_for('api_tts_cache_inspect')|tojson }},
+  cacheStartUrl: {{ url_for('api_tts_cache_start')|tojson }},
+  cacheStopUrl: {{ url_for('api_tts_cache_stop')|tojson }},
+  cacheClearUrl: {{ url_for('api_tts_cache_clear')|tojson }},
   musicUrl: {{ url_for('api_music_list')|tojson }}
 };
 {% endblock %}
@@ -160,6 +165,22 @@ window.APP.reader = {
       </div>
       <div id="rd-tts-note" class="muted small" aria-live="polite"></div>
       <div id="rd-tts-bg-hint" class="muted small">{{ t('read.tts_bg_hint') }}</div>
+      <div class="rd-field rd-actions">
+        <span>{{ t('read.cache') }}</span>
+        <label class="rd-check">{{ t('read.cache_chapters') }}
+          <input id="rd-cache-chapters" type="number" min="1" max="999" step="1" value="1" inputmode="numeric">
+        </label>
+        <button id="rd-cache-start" type="button" class="btn btn-ghost btn-sm">{{ t('read.cache_start') }}</button>
+        <button id="rd-cache-stop" type="button" class="btn btn-ghost btn-sm" hidden>{{ t('read.cache_stop') }}</button>
+      </div>
+      <div id="rd-cache-pbar" class="rd-cbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="{{ t('read.cache') }}">
+        <span id="rd-cache-bar"></span>
+      </div>
+      <div id="rd-cache-note" class="muted small" aria-live="polite"></div>
+      <div class="rd-field rd-actions">
+        <button id="rd-cache-clear" type="button" class="btn btn-ghost btn-sm">{{ t('read.cache_clear') }}</button>
+        <span id="rd-cache-size" class="muted small"></span>
+      </div>
       <div class="rd-field">
         <span>{{ t('read.music') }}</span>
         <select id="rd-music-file" class="rd-select"></select>

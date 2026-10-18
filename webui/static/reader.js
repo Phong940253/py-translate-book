@@ -412,6 +412,9 @@
         try { history.pushState({ rdCh: n }, ''); } catch (e) { /* file:// etc */ }
       }
       prefetchNearby(n);
+      // TTS panel open? repaint its cache bar for the new chapter
+      var rdEl = el('rd');
+      if (rdEl && rdEl.dataset.panel === 'tts') ttsCacheRefresh();
       return r[1];
     }).catch(function (e) {
       if (token === state.token) showError(e);
@@ -1950,7 +1953,7 @@
       var pb = el('rd-open-' + prev);
       if (pb) { try { pb.focus(); } catch (e) { /* inert */ } }
     }
-    if (open === 'tts') { warmVoices(); bgmList(); }
+    if (open === 'tts') { warmVoices(); bgmList(); ttsCacheRefresh(); }
     if (open === 'toc') { markToc(); renderStats(); }
     if (open === 'search') {
       var qi = el('rd-search-q');
@@ -2037,9 +2040,11 @@
 
   function ttsStatus(text, cls) {
     var n = el('rd-tts-status');
-    if (!n) return;
-    n.textContent = text || '';
-    n.className = 'muted small' + (cls ? ' ' + cls : '');
+    if (n) {
+      n.textContent = text || '';
+      n.className = 'muted small' + (cls ? ' ' + cls : '');
+    }
+    ttsCacheButtons();   // engine state may have changed (start gating)
   }
 
   function warmVoices() {
@@ -2084,6 +2089,7 @@
     var rate = el('rd-tts-rate'), rateV = el('rd-tts-rate-v');
     if (rate) rate.value = ttsCfg.rate;
     if (rateV) rateV.textContent = 'x' + Number(ttsCfg.rate).toFixed(2);
+    ttsCacheButtons();   // pre-generate is gated on the engine being ready
   }
 
   function ttsPost(text) {
@@ -2109,6 +2115,192 @@
   }
 
   function cacheKey(ch, i) { return ch + ':' + i; }
+
+  /* ----------------------------------------------------- TTS disk cache HUD
+     The server keeps one rendered WAV per speech piece (per voice): normal
+     read-aloud fills it as it goes, and the panel can pre-render a chapter
+     range up front (instant, restart-proof playback). One bar shows
+     whichever is active — a running job, else this chapter's fill. */
+
+  var ttsCache = { poll: 0, job: null, fill: null, busy: false };
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return Math.round(n / 1024) + ' KB';
+    return n + ' B';
+  }
+
+  function fmtEta(sec) {
+    sec = Math.round(Number(sec) || 0);
+    if (sec < 60) return Math.max(1, sec) + 's';
+    var m = Math.floor(sec / 60);
+    if (m < 60) return m + 'm';
+    return Math.floor(m / 60) + 'h' + ('0' + (m % 60)).slice(-2);
+  }
+
+  function ttsCacheNote(text) {
+    var n = el('rd-cache-note');
+    if (n) n.textContent = text || '';
+  }
+
+  function ttsCacheBar(pct) {
+    pct = clamp(Math.round(Number(pct) || 0), 0, 100);
+    var bar = el('rd-cache-bar'), wrap = el('rd-cache-pbar');
+    if (bar) bar.style.width = pct + '%';
+    if (wrap) {
+      wrap.setAttribute('aria-valuenow', String(pct));
+      wrap.classList.toggle('full', pct >= 100);
+    }
+  }
+
+  function ttsCacheSize(disk) {
+    var n = el('rd-cache-size');
+    if (!n) return;
+    if (!disk || !disk.files) { n.textContent = i18n('read.cache_empty'); return; }
+    n.textContent = fmt('read.cache_size', { size: fmtBytes(disk.bytes), n: disk.files });
+  }
+
+  function ttsCacheButtons() {
+    var start = el('rd-cache-start'), stop = el('rd-cache-stop');
+    var running = !!(ttsCache.job && ttsCache.job.state === 'running');
+    if (start) start.disabled = running || ttsCache.busy || tts.state !== 'ready';
+    if (stop) stop.hidden = !running;
+  }
+
+  function ttsCacheBookName() {
+    var p = (R.path || '').split(/[\\/]/);
+    return p[p.length - 1] || '';
+  }
+
+  function ttsCachePaint() {
+    var job = ttsCache.job;
+    if (job && job.state === 'running') {
+      var pct = job.chars_total > 0 ? (job.chars_done * 100 / job.chars_total) : 0;
+      ttsCacheBar(pct);
+      var eta = job.eta ? ' · ' + fmt('read.cache_eta', { eta: fmtEta(job.eta) }) : '';
+      if (job.book && ttsCacheBookName() && job.book !== ttsCacheBookName()) {
+        ttsCacheNote(fmt('read.cache_other', { name: job.book, pct: Math.round(pct) }) + eta);
+      } else {
+        ttsCacheNote(fmt('read.cache_run', {
+          ch: job.ch_now, done: job.pieces_done, total: job.pieces_total
+        }) + eta);
+      }
+    } else {
+      var f = ttsCache.fill;
+      if (f && f.pieces > 0) {
+        var pct2 = f.cached * 100 / f.pieces;
+        ttsCacheBar(pct2);
+        if (pct2 >= 100) {
+          ttsCacheNote(fmt('read.cache_full', { total: f.pieces }));
+        } else {
+          ttsCacheNote(fmt('read.cache_fill', {
+            pct: Math.round(pct2), done: f.cached, total: f.pieces
+          }));
+        }
+      } else if (f) {
+        ttsCacheBar(0);
+        ttsCacheNote('');
+      }
+    }
+    ttsCacheButtons();
+  }
+
+  function ttsCachePoll() {
+    if (ttsCache.poll) return;
+    ttsCache.poll = setTimeout(function () {
+      ttsCache.poll = 0;
+      ttsCacheTick();
+    }, 1200);
+  }
+
+  /* Cheap poll: job + disk size only (no chapter rebuild). */
+  function ttsCacheTick() {
+    return getJSON(R.cacheStatusUrl).then(function (data) {
+      var prev = ttsCache.job && ttsCache.job.state;
+      ttsCache.job = data.job || null;
+      ttsCacheSize(data.disk);
+      if (ttsCache.job && ttsCache.job.state === 'running') {
+        ttsCachePaint();
+        ttsCachePoll();
+        return;
+      }
+      var msg = '';
+      if (prev === 'running' && ttsCache.job) {
+        if (ttsCache.job.state === 'done') msg = i18n('read.cache_done');
+        else if (ttsCache.job.state === 'stopped') msg = i18n('read.cache_stopped');
+        else if (ttsCache.job.state === 'error')
+          msg = i18n('read.cache_error') + ' ' + (ttsCache.job.error || '');
+      }
+      ttsCacheRefresh(msg);
+    }, noop);
+  }
+
+  /* Full refresh: this chapter's fill + job + size in one request.
+     msg (optional) pins the note after painting (job-finished message). */
+  function ttsCacheRefresh(msg) {
+    var q = '?path=' + encodeURIComponent(R.path) + '&ch=' + state.ch +
+      (ttsCfg.voice ? '&voice=' + encodeURIComponent(ttsCfg.voice) : '');
+    return getJSON(R.cacheInspectUrl + q).then(function (data) {
+      ttsCache.fill = data;
+      ttsCache.job = data.job || null;
+      ttsCacheSize(data.disk);
+      ttsCachePaint();
+      if (msg) ttsCacheNote(msg);
+      if (ttsCache.job && ttsCache.job.state === 'running') ttsCachePoll();
+    }, noop);
+  }
+
+  function ttsCacheStart() {
+    if (ttsCache.busy) return;
+    var nch = clamp(parseInt((el('rd-cache-chapters') || {}).value, 10) || 1, 1, 999);
+    ttsCache.busy = true;
+    ttsCacheButtons();
+    fetch(R.cacheStartUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: R.path, ch: state.ch, chapters: nch, voice: ttsCfg.voice
+      })
+    }).then(function (res) {
+      return res.json().then(function (d) {
+        ttsCache.busy = false;
+        if (!res.ok) throw new Error((d && d.error) || ('HTTP ' + res.status));
+        return d;
+      });
+    }).then(function (d) {
+      ttsCache.job = d.job || null;
+      ttsCachePaint();
+      ttsCachePoll();
+    }).catch(function (e) {
+      ttsCache.busy = false;
+      ttsCacheNote(i18n('read.cache_error') + ' ' + e.message);
+      ttsCacheButtons();
+    });
+  }
+
+  function ttsCacheStop() {
+    fetch(R.cacheStopUrl, { method: 'POST' }).then(function () {
+      ttsCacheTick();
+    }, noop);
+  }
+
+  function ttsCacheClear() {
+    if (!window.confirm(i18n('read.cache_clear_confirm'))) return;
+    fetch(R.cacheClearUrl, { method: 'POST' }).then(function (res) {
+      return res.json().then(function (d) {
+        if (!res.ok) throw new Error((d && d.error) || ('HTTP ' + res.status));
+        ttsCache.fill = null;
+        ttsCache.job = null;
+        ttsCacheSize(d.disk);
+        ttsCacheRefresh();
+      });
+    }).catch(function (e) {
+      ttsCacheNote(i18n('read.cache_error') + ' ' + e.message);
+    });
+  }
+
 
   /* Recent non-current chapters' items (queue walks past the current chapter) */
   var chapItems = {};
@@ -3605,6 +3797,8 @@
       speak.inflight = {};
       speak.gen++;
       saveJSON(ttsKey, ttsCfg);
+      var rd = el('rd');
+      if (rd && rd.dataset.panel === 'tts') ttsCacheRefresh();  // fill is per voice
     });
     // background music: own toggle + own volume (never follows the read rate)
     var mvol = el('rd-music-vol');
@@ -3668,6 +3862,12 @@
         ttsStatus(i18n('read.tts_error') + ' ' + e.message, 'error');
       });
     });
+    var cstart = el('rd-cache-start');
+    if (cstart) cstart.addEventListener('click', ttsCacheStart);
+    var cstop = el('rd-cache-stop');
+    if (cstop) cstop.addEventListener('click', ttsCacheStop);
+    var cclear = el('rd-cache-clear');
+    if (cclear) cclear.addEventListener('click', ttsCacheClear);
 
     // parent-level input
     document.addEventListener('keydown', onKeydown);

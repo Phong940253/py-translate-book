@@ -56,6 +56,11 @@ from translator.model_lister import fetch_models
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 
+# Rendered TTS pieces live on disk (cache/tts/, git-ignored) so chapters can
+# be pre-generated from the read-aloud panel and playback streams off disk
+# instead of waiting for the model. See reader.TTSPieceCache.
+reader.ENGINE.enable_disk(os.path.join(PROJECT_ROOT, "cache", "tts"))
+
 # Sections users cannot overwrite with the "add provider" form (built-in
 # engines + non-engine config groups).
 RESERVED_CONFIG_SECTIONS = {
@@ -947,6 +952,80 @@ def api_tts_stream():
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Accel-Buffering"] = "no"  # proxies: flush per frame
     return resp
+
+
+# --------------------------------------------------------------------------
+# TTS piece disk cache: pre-render chapters so read-aloud streams off disk
+# --------------------------------------------------------------------------
+
+_CACHE_CHAPTERS_MAX = 999
+
+
+@app.route("/api/tts/cache/status")
+def api_tts_cache_status():
+    """Current/last pre-render job + total cache size (cheap; polled)."""
+    return jsonify(reader.ENGINE.cache_status())
+
+
+@app.route("/api/tts/cache/inspect")
+def api_tts_cache_inspect():
+    """Fill state of one chapter (planned pieces vs. files on disk)."""
+    doc, err = _reader_doc()
+    if err:
+        return err
+    try:
+        ch = int(request.args.get("ch", "1"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "ch must be an integer"}), 400
+    voice = request.args.get("voice")
+    try:
+        data = reader.ENGINE.inspect_cache(doc, ch, voice)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    data.update(reader.ENGINE.cache_status())
+    return jsonify(data)
+
+
+@app.route("/api/tts/cache/start", methods=["POST"])
+def api_tts_cache_start():
+    payload = request.get_json(silent=True) or {}
+    doc, err = _reader_doc_for(payload.get("path", ""))
+    if err:
+        return err
+    try:
+        ch = int(payload.get("ch", 1))
+        chapters = int(payload.get("chapters", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "ch and chapters must be integers"}), 400
+    total = len(doc.chapters)
+    if not 1 <= ch <= total:
+        return jsonify({"error": f"chapter {ch} out of range (1..{total})"}), 400
+    chapters = max(1, min(chapters, _CACHE_CHAPTERS_MAX, total - ch + 1))
+    voice = payload.get("voice")
+    if voice is not None and not isinstance(voice, str):
+        return jsonify({"error": "voice must be a string"}), 400
+    reader.ENGINE.ensure_warm()
+    try:
+        job = reader.ENGINE.start_cache(doc, voice, ch, chapters,
+                                        book=os.path.basename(doc.path))
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "state": reader.ENGINE.state}), 503
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"job": job})
+
+
+@app.route("/api/tts/cache/stop", methods=["POST"])
+def api_tts_cache_stop():
+    return jsonify(reader.ENGINE.stop_cache())
+
+
+@app.route("/api/tts/cache/clear", methods=["POST"])
+def api_tts_cache_clear():
+    try:
+        return jsonify(reader.ENGINE.clear_cache())
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
 
 
 # --------------------------------------------------------------------------

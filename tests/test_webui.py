@@ -73,6 +73,22 @@ class _SubprocSlowEngine(TranslationEngine):
         return text.replace("Hello", "Xin chào")
 
 
+class _FakeBookDoc:
+    """Minimal BookDoc stand-in for the TTS cache job tests."""
+
+    def __init__(self, texts):
+        # texts = {chapter_number: [paragraph, ...]}
+        self._texts = texts
+        self.chapters = [
+            {"chars": sum(len(t) for t in texts[n])} for n in sorted(texts)
+        ]
+
+    def chapter(self, n):
+        if n not in self._texts:
+            raise ValueError(f"Chapter {n} out of range")
+        return {"items": [{"type": "p", "text": t} for t in self._texts[n]]}
+
+
 def _make_epub(path):
     book = epub.EpubBook()
     book.set_identifier("webui-test")
@@ -841,7 +857,7 @@ class TestWebUI(unittest.TestCase):
             self.assertIn("read.font_no_vi", wui_i18n.TRANSLATIONS[lang])
 
         # reader assets changed → bump so installed PWAs refetch them
-        self.assertIn("'pytb-v14'", read("static", "sw.js"))
+        self.assertIn("'pytb-v15'", read("static", "sw.js"))
 
     def test_reader_res_serves_assets_and_refuses_documents(self):
         path = self._reader_rich_epub("_test_reader_res.epub")
@@ -1518,6 +1534,302 @@ class TestWebUI(unittest.TestCase):
         self.assertTrue(wav2.startswith(b"RIFF"))
         self.assertEqual(len(segs), n)
         self.assertEqual(len(stub.calls), calls_before)  # pieces shared
+
+    # -------------------------------------------------- TTS disk piece cache
+    def _disk_engine(self, tmp=None, stamp=0.1):
+        """TTSEngine over a tmp cache dir + a counting stub model."""
+        from webui import reader
+
+        if tmp is None:
+            tmp = tempfile.mkdtemp(prefix="tts_piece_cache_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append((text, voice))
+                return [0.05] * int(48000 * stamp)
+
+        eng = reader.TTSEngine(cache_dir=tmp)
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "v1"
+        eng.voices = [{"id": "v1", "label": "v1"}]
+        return eng, stub, tmp
+
+    def _wait_job(self, eng, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            st = eng.cache_status()["job"]
+            if st and st["state"] != "running":
+                return st
+            time.sleep(0.01)
+        self.fail("cache job did not finish in time")
+
+    def test_tts_disk_cache_read_through_and_inventory(self):
+        from webui import reader
+
+        text = "Xin chào thế giới. Một câu thứ hai ở đây."
+        eng, stub, tmp = self._disk_engine()
+        wav1, segs1 = eng.synthesize(text, voice="v1")
+        self.assertEqual(len(stub.calls), len(reader.split_for_tts(text)))
+        self.assertTrue(wav1.startswith(b"RIFF"))
+        self.assertGreater(eng.disk.stats()["bytes"], 0)
+
+        # a fresh engine over the same dir never touches the model
+        eng2, stub2, _ = self._disk_engine(tmp=tmp)
+        wav2, segs2 = eng2.synthesize(text, voice="v1")
+        self.assertEqual(stub2.calls, [])                 # served from disk
+        self.assertEqual(len(wav2), len(wav1))
+        self.assertEqual(segs2, segs1)
+
+        # inventory: planning matches playback; all pieces counted cached
+        doc = _FakeBookDoc({1: [text]})
+        inv = eng.inspect_cache(doc, 1, "v1")
+        self.assertEqual(inv["pieces"], len(reader.split_for_tts(text)))
+        self.assertEqual(inv["cached"], inv["pieces"])
+        self.assertEqual(inv["chars"], inv["cached_chars"])
+        # unknown voice falls back to the default (same file set)
+        inv2 = eng.inspect_cache(doc, 1, "khong-co-giong-nay")
+        self.assertEqual(inv2["voice"], "v1")
+        self.assertEqual(inv2["cached"], inv2["pieces"])
+        # a different voice is a different key space
+        eng.voices.append({"id": "v2", "label": "v2"})
+        self.assertEqual(eng.inspect_cache(doc, 1, "v2")["cached"], 0)
+
+        # clear wipes the store
+        eng.clear_cache()
+        self.assertEqual(eng.disk.stats(), {"files": 0, "bytes": 0})
+
+    def test_tts_disk_cache_off_without_a_dir(self):
+        from webui import reader
+
+        eng = reader.TTSEngine()
+        self.assertIsNone(eng.disk)
+
+        class _Stub:
+            sample_rate = 48000
+
+            def infer(self, text, voice=None):
+                return [0.05] * 4800
+
+        eng._tts = _Stub()
+        eng.state = "ready"
+        eng.default_voice = "v1"
+        eng.voices = [{"id": "v1", "label": "v1"}]
+        wav, _ = eng.synthesize("Xin chào.")
+        self.assertTrue(wav.startswith(b"RIFF"))
+
+    def test_tts_disk_cache_skips_silence_and_heals_corruption(self):
+        import wave
+
+        from webui import reader
+
+        eng, stub, tmp = self._disk_engine()
+
+        # a lone "？" never reaches the model → silence, nothing on disk
+        wav, _ = eng.synthesize("？", voice="v1")
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(eng.disk.stats()["files"], 0)
+
+        # model comes back empty (unreadable paragraph) → silence too
+        class _EmptyStub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                return []
+
+        eng._tts = _EmptyStub()
+        wav2, _ = eng.synthesize("全班掌声热烈。", voice="v1")
+        self.assertTrue(wav2.startswith(b"RIFF"))
+        self.assertEqual(eng.disk.stats()["files"], 0)
+
+        # a torn file reads as a miss and is replaced by the fresh render
+        text = "Chỉ một câu ngắn."
+        eng3, stub3, _ = self._disk_engine(tmp=tmp)
+        eng3.synthesize(text, voice="v1")
+        part = reader.split_for_tts(text)[0]
+        path = eng3.disk._path("v1", part)
+        with open(path, "wb") as f:
+            f.write(b"RIFFgarbage")
+        eng4, stub4, _ = self._disk_engine(tmp=tmp)
+        wav4, _ = eng4.synthesize(text, voice="v1")
+        self.assertEqual(len(stub4.calls), 1)             # corrupt → re-rendered
+        self.assertTrue(wav4.startswith(b"RIFF"))
+        with wave.open(path, "rb") as wf:                 # valid again
+            self.assertGreater(wf.getnframes(), 0)
+
+    def test_tts_cache_job_renders_chapters_and_skips_cached(self):
+        from webui import reader
+
+        eng, stub, _tmp = self._disk_engine()
+        doc = _FakeBookDoc({
+            1: ["Câu đầu tiên đủ dài để tách thành mảnh. Câu hai cũng đủ dài vậy."],
+            2: ["Chương hai chỉ có một đoạn ngắn."],
+        })
+        eng.start_cache(doc, "v1", 1, 2, book="book.epub")
+        st = self._wait_job(eng)
+        self.assertEqual(st["state"], "done", st)
+        self.assertEqual(st["book"], "book.epub")
+        self.assertEqual(st["ch_done"], 2)
+        self.assertEqual(st["chars_done"], st["chars_total"])
+        plan_len = sum(len(reader.TTSEngine.piece_plan(it["text"]))
+                       for n in (1, 2) for it in doc.chapter(n)["items"])
+        self.assertEqual(len(stub.calls), plan_len)
+        for n in (1, 2):
+            inv = eng.inspect_cache(doc, n, "v1")
+            self.assertGreater(inv["pieces"], 0)
+            self.assertEqual(inv["cached"], inv["pieces"])
+        self.assertGreater(eng.disk.stats()["bytes"], 0)
+
+        # re-run: everything comes off disk, the model is not called again
+        calls = len(stub.calls)
+        eng.start_cache(doc, "v1", 1, 2)
+        st2 = self._wait_job(eng)
+        self.assertEqual(st2["state"], "done", st2)
+        self.assertEqual(len(stub.calls), calls)
+
+    def test_tts_cache_job_stop_halts_between_pieces(self):
+        import threading
+
+        from webui import reader
+
+        gate = threading.Event()
+        tmp = tempfile.mkdtemp(prefix="tts_cache_stop_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+
+        class _GatedStub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None):
+                self.calls.append(text)
+                gate.wait(5)          # hold the first piece
+                return [0.05] * 4800
+
+        eng = reader.TTSEngine(cache_dir=tmp)
+        stub = _GatedStub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "v1"
+        eng.voices = [{"id": "v1", "label": "v1"}]
+
+        doc = _FakeBookDoc({1: ["Đoạn một đủ dài để thành một mảnh riêng.",
+                                "Đoạn hai cũng thế, dài vừa đủ cho một mảnh."]})
+        eng.start_cache(doc, "v1", 1, 1)
+        deadline = time.time() + 5
+        while not stub.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(stub.calls, "job never reached the model")
+        eng.stop_cache()
+        gate.set()
+        st = self._wait_job(eng)
+        self.assertEqual(st["state"], "stopped")
+        self.assertEqual(len(stub.calls), 1)   # held piece done, then stopped
+
+    def test_read_page_bootstraps_tts_disk_cache(self):
+        path = self._reader_epub()
+        with self._warm_noop():
+            r = self.client.get("/read?path=" + path)
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("cacheStartUrl", body)
+        self.assertIn("cacheInspectUrl", body)
+        self.assertIn("rd-cache-start", body)
+        self.assertIn("rd-cache-bar", body)
+        self.assertIn("rd-cache-clear", body)
+
+    def test_tts_cache_endpoints(self):
+        from webui import reader
+
+        path = self._reader_epub()
+        with self._warm_noop():
+            r = self.client.get("/api/tts/cache/inspect?path=%s&ch=1&voice=v1" % path)
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["ch"], 1)
+        self.assertEqual(data["voice"], "v1")   # engine not loaded → kept as-is
+        self.assertGreaterEqual(data["pieces"], 1)
+        self.assertEqual(data["cached"], 0)
+        self.assertIn("disk", data)
+        self.assertIn("job", data)
+
+        with self._warm_noop():
+            r = self.client.get("/api/tts/cache/inspect?path=%s&ch=99" % path)
+        self.assertEqual(r.status_code, 400)
+
+        # start: model not ready → 503 with state, no job created
+        with self._warm_noop():
+            r = self.client.post("/api/tts/cache/start",
+                                 json={"path": path, "ch": 1, "chapters": 1})
+        self.assertEqual(r.status_code, 503)
+
+        # bad payloads
+        r = self.client.post("/api/tts/cache/start", json={"path": path, "ch": "x"})
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post("/api/tts/cache/start",
+                             json={"path": path, "ch": 1, "voice": 42})
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post("/api/tts/cache/start", json={"path": "nope.epub"})
+        self.assertEqual(r.status_code, 400)
+
+        job = {"state": "running", "ch_now": 1, "chapters": 2,
+               "pieces_done": 3, "pieces_total": 9, "chars_done": 30,
+               "chars_total": 90, "eta": 5, "book": os.path.basename(path)}
+        with self._warm_noop(), \
+                mock.patch.object(reader.ENGINE, "start_cache",
+                                  return_value=job) as start:
+            r = self.client.post("/api/tts/cache/start",
+                                 json={"path": path, "ch": 1,
+                                       "chapters": 999, "voice": "v1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["job"]["state"], "running")
+        # chapters clamped to the end of the book; voice + book forwarded
+        self.assertEqual(start.call_args.args[1:4], ("v1", 1, 1))
+        self.assertEqual(start.call_args.kwargs["book"], os.path.basename(path))
+
+        # busy → 409
+        with self._warm_noop(), \
+                mock.patch.object(reader.ENGINE, "start_cache",
+                                  side_effect=ValueError("busy")):
+            r = self.client.post("/api/tts/cache/start", json={"path": path, "ch": 1})
+        self.assertEqual(r.status_code, 409)
+
+        # status + stop + clear (mocked: never touch the real cache dir)
+        with mock.patch.object(reader.ENGINE, "cache_status",
+                               return_value={"job": job,
+                                             "disk": {"files": 4, "bytes": 2048}}):
+            r = self.client.get("/api/tts/cache/status")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["disk"]["files"], 4)
+
+        stopped = dict(job, state="stopped")
+        with mock.patch.object(reader.ENGINE, "stop_cache",
+                               return_value={"job": stopped,
+                                             "disk": {"files": 4, "bytes": 2048}}):
+            r = self.client.post("/api/tts/cache/stop")
+        self.assertEqual(r.get_json()["job"]["state"], "stopped")
+
+        with mock.patch.object(reader.ENGINE, "clear_cache",
+                               return_value={"job": None,
+                                             "disk": {"files": 0, "bytes": 0}}):
+            r = self.client.post("/api/tts/cache/clear")
+        self.assertEqual(r.get_json()["disk"]["files"], 0)
+        with mock.patch.object(reader.ENGINE, "clear_cache",
+                               side_effect=ValueError("busy")):
+            r = self.client.post("/api/tts/cache/clear")
+        self.assertEqual(r.status_code, 409)
 
     def test_set_lang_sets_cookie(self):
         r = self.client.get("/set-lang/en?next=/books")

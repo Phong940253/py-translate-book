@@ -180,6 +180,30 @@ input[type="checkbox"]:focus-visible, input[type="file"]:focus-visible {
   cursor: pointer;
 }
 .rd-check input { accent-color: var(--accent); }
+/* TTS disk cache: number input + fill bar in the read-aloud panel */
+#rd-cache-chapters {
+  width: 58px;
+  padding: 4px 6px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.rd-cbar {
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.rd-cbar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--t-fast) var(--ease);
+}
+.rd-cbar.full span { background: var(--ok, var(--accent)); }
 .seg-wrap { flex-wrap: wrap; }
 .rd-custom-colors {
   display: grid;
