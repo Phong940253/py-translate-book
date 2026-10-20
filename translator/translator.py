@@ -1643,16 +1643,14 @@ class Translator:
         if len(text) <= max_size:
             return [text]
 
-        # Prefer semantic HTML boundaries first to keep tags intact.
-        boundary_tokens = [
-            "</li>",
-            "</p>",
-            "<br>",
-            "<br/>",
-            "<br />",
-            ">",
-            " ",
-        ]
+        # Prefer semantic block boundaries first to keep tags intact. Only these
+        # are considered when one exists: the old code also accepted the ">" of
+        # an *opening* tag and, because it kept the right-most match, it routinely
+        # cut right after "<p>". The next part then began with naked paragraph
+        # text and no opener; models drop such leading fragments, and since <p>
+        # boundaries are not structural guards the loss passed validation
+        # (chapter 315 lost a spoken line this way after an echo split).
+        semantic_tokens = ("</li>", "</p>", "<br>", "<br/>", "<br />")
 
         chunks: list[str] = []
         cursor = 0
@@ -1666,7 +1664,7 @@ class Translator:
             window_end = cursor + max_size
             split_idx = -1
 
-            for token in boundary_tokens:
+            for token in semantic_tokens:
                 idx = text.rfind(token, cursor, window_end)
                 if idx != -1:
                     candidate = idx + len(token)
@@ -1674,11 +1672,26 @@ class Translator:
                         split_idx = max(split_idx, candidate)
 
             if split_idx == -1:
-                # No semantic boundary found in the window. Cut at the nearest
-                # tag boundary (just after a '>') so we never split an HTML tag
-                # in half, which would corrupt the markup.
+                # No block end in the window. Fall back to the nearest tag
+                # boundary (just after a '>') so we never split an HTML tag in
+                # half, but never *after an opening tag*: move the cut in front
+                # of it so the next part still gets its opener.
                 tag_end = text.rfind(">", cursor, window_end)
-                split_idx = tag_end + 1 if tag_end != -1 else window_end
+                if tag_end != -1:
+                    tag_start = text.rfind("<", cursor, tag_end + 1)
+                    raw_tag = text[tag_start:tag_end + 1] if tag_start != -1 else ""
+                    is_opening = (
+                        raw_tag.startswith("<")
+                        and not raw_tag.startswith("</")
+                        and not raw_tag.rstrip().endswith("/>")
+                    )
+                    if is_opening and tag_start > cursor:
+                        split_idx = tag_start
+                    else:
+                        split_idx = tag_end + 1
+                else:
+                    space = text.rfind(" ", cursor, window_end)
+                    split_idx = space + 1 if space != -1 else window_end
 
             chunks.append(text[cursor:split_idx])
             cursor = split_idx

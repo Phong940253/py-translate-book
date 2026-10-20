@@ -334,6 +334,21 @@ class TestOversizeSplit(unittest.TestCase):
         for p in parts:
             self.assertNotRegex(p, r"<[a-zA-Z]*$")
 
+    def test_splits_at_paragraph_end_not_after_next_opener(self):
+        # Regression: after an echo split, a chunk used to be cut right after
+        # the next "<p>", so the following part began with naked text. Models
+        # drop such fragments and <p> is not a structural guard (chapter 315).
+        t = Translator(FakeEngine(), fallback_max_chunk_size=200,
+                       consistency_config={})
+        text = "".join(f"<p>第{i}段" + "文" * 88 + "</p>" for i in range(12))
+        parts = t._split_oversized_chunk(text, max_size=200)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual("".join(parts), text)
+        for p in parts:
+            self.assertTrue(p.startswith("<p>"), p[:24])
+            self.assertTrue(p.endswith("</p>"), p[-24:])
+            self.assertNotIn("<p><p>", p)
+
 
 class FakeBatchEngine(TranslationEngine):
     """Stub engine with batch support (never calls a real API)."""
