@@ -176,17 +176,18 @@
   }
 
   function familyValue() {
-    // Noto Serif / Noto Sans ship the full Vietnamese set; devices without
-    // Georgia (phones) must not fall through to a serif whose accented glyphs
-    // are missing — the browser would swap them in one by one and the text
-    // renders with gaps after every diacritic.
+    // All stacks start with a font that ships the full Vietnamese set. Windows
+    // Georgia does NOT: its Latin-Extended-Additional glyphs drop the tone mark
+    // next to the vowel ("thê´", "mă´t"), so it must not be the first serif.
+    // Cambria (Windows) → Times New Roman (macOS/Windows) → Noto Serif
+    // (Android/Linux) are all safe.
     switch (settings.family) {
       case 'sans': return "'Helvetica Neue', Arial, 'Segoe UI', 'Noto Sans', sans-serif";
       case 'mono': return "ui-monospace, Consolas, 'Courier New', monospace";
       case 'system': return "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
       case 'dyslexic': return "'OpenDyslexic', 'Comic Sans MS', Verdana, 'Noto Sans', sans-serif";
-      case 'custom': return "'RDUserFont', Georgia, 'Noto Serif', serif";
-      default: return "Georgia, 'Times New Roman', 'Noto Serif', serif";
+      case 'custom': return "'RDUserFont', Cambria, 'Times New Roman', 'Noto Serif', serif";
+      default: return "Cambria, 'Times New Roman', 'Noto Serif', serif";
     }
   }
 

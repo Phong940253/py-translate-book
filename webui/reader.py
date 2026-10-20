@@ -318,7 +318,7 @@ def _sanitize(text: str, book_path: str, cur_n: int, base_dir: str, n_by_zip):
 # sets on <html> of the iframe document; pagination toggles html.pg.
 _INJECT_CSS = """
 :root{--rd-fg:#1b1e22;--rd-bg:#fff;--rd-size:18px;--rd-lh:1.75;
---rd-fam:Georgia,'Times New Roman',serif;--rd-w:760px;--rd-ls:0px;
+--rd-fam:Cambria,'Times New Roman',serif;--rd-w:760px;--rd-ls:0px;
 --rd-padx:16px;--rd-pad-y:24px;--rd-align:left;--rd-ow:normal;
 --rd-pgw:640px;--rd-pggap:32px}
 *{box-sizing:border-box}
