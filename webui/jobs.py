@@ -13,7 +13,11 @@ import uuid
 
 from webui.diff_utils import diff_chunk, chunk_structure
 
-JOB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs")
+# Overridable so tests (which import webui.app and construct the default
+# registry) don't relabel a user's live jobs as interrupted.
+JOB_DIR = os.environ.get("PYTB_JOB_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "jobs"
+)
 
 # In-memory caps.
 MAX_LOG_LINES = 3000

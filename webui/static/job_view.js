@@ -49,6 +49,21 @@
     }
   }
   var progEl = document.getElementById('progress');
+  var connEl = document.getElementById('conn');
+  // Older cached job_view.html templates lack these two elements. Create/find
+  // them so the reconnect notice and live status badge still work after a
+  // no-restart static-asset update.
+  if (!connEl && progEl && progEl.parentNode) {
+    connEl = document.createElement('p');
+    connEl.id = 'conn';
+    connEl.className = 'muted small';
+    connEl.setAttribute('role', 'status');
+    connEl.setAttribute('aria-live', 'polite');
+    connEl.hidden = true;
+    progEl.parentNode.insertBefore(connEl, progEl.nextSibling);
+  }
+  var statusEl = document.getElementById('jobStatusBadge') ||
+    document.querySelector('.page-title .badge');
   var barEl = document.getElementById('bar');
   var apiEl = document.getElementById('api');
   var subEl = document.getElementById('subprog');
@@ -57,6 +72,15 @@
   var diffWrap = document.getElementById('diffWrap');
   var diffSource = document.getElementById('diffSource');
   var diffTrans = document.getElementById('diffTrans');
+  var TERMINAL = ['done', 'error', 'stopped', 'interrupted'];
+  var lastProgress = null;
+  var lastError = null;
+  var lastRulesCompleted = null;
+  var pollTimer = null;
+  var pollDelay = 2000;
+  var es = null;
+  var currentStatus = data.status || null;
+  var lastMessageAt = Date.now();
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -70,11 +94,34 @@
     return d;
   }
 
+  function isTerminal(status) {
+    return TERMINAL.indexOf(status) !== -1;
+  }
+
+  function setConn(text) {
+    if (!connEl) return;
+    connEl.textContent = text || '';
+    connEl.hidden = !text;
+  }
+
+  function setStatusBadge(status) {
+    if (!statusEl || !status) return;
+    statusEl.className = 'badge ' + status;
+    statusEl.textContent = '';
+    var d = document.createElement('span');
+    d.className = 'status-dot';
+    statusEl.appendChild(d);
+    statusEl.appendChild(document.createTextNode(' ' + i18n('job.status.' + status)));
+  }
+
   function renderProgress(p) {
     if (!p || !p.total_chapters) {
-      if (progEl) progEl.textContent = i18n('job.view.initializing');
+      // A resume briefly clears progress; keep the last known values visible
+      // instead of flashing "Initializing..." over a working monitor.
+      if (progEl && !lastProgress) progEl.textContent = i18n('job.view.initializing');
       return;
     }
+    lastProgress = p;
     var cur = p.current_chapter || p.last_completed || '?';
     var total = p.total_chapters;
     var done = p.last_completed || 0;
@@ -82,6 +129,8 @@
       (p.current_title ? ' — <i>' + esc(p.current_title) + '</i>' : '');
     var pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
     barEl.style.width = pct + '%';
+    var barBox = barEl.parentNode;
+    if (barBox) barBox.setAttribute('aria-valuenow', String(pct));
     renderMonitor(p);
   }
 
@@ -413,13 +462,136 @@
     });
   }
 
-  // Render current state first, then live-update via SSE (no flash on reload).
-  if (data.progress) renderProgress(data.progress);
+  function applyProgress(msg) {
+    if (!msg) return;
+    if (msg.progress) renderProgress(msg.progress);
+    if (msg.status) {
+      currentStatus = msg.status;
+      setStatusBadge(msg.status);
+    }
 
-  if (data.streamUrl) {
-    var es = new EventSource(data.streamUrl);
-    es.onmessage = function (e) {
-      var msg = JSON.parse(e.data);
+    // Refresh rules only when a new chapter actually completes; the SSE stream
+    // emits progress every tick, and refetching the (possibly 1MB) rules table
+    // on every tick would compete with the stream itself.
+    var p = msg.progress || {};
+    if (p.last_completed && p.last_completed !== lastRulesCompleted) {
+      lastRulesCompleted = p.last_completed;
+      rulesLoaded = false;
+      var rulesView = document.getElementById('rulesView');
+      if (rulesView && !rulesView.hidden) fetchRules();
+    }
+
+    if (isTerminal(msg.status)) {
+      if (msg.error && msg.error !== lastError) {
+        lastError = msg.error;
+        appendLog('\n' + i18n('job.view.error_line') + msg.error + '\n');
+      }
+      stopPolling();
+      setConn(null);
+    }
+  }
+
+  function schedulePoll(delay) {
+    if (pollTimer || !data.id) return;
+    pollTimer = setTimeout(function () {
+      pollTimer = null;
+      fetchState();
+    }, delay);
+  }
+
+  function fetchStateFromStream() {
+    // One-shot read of the SSE endpoint for older servers that predate
+    // /api/jobs/<id>/state. Abort as soon as the first progress event arrives;
+    // this is a short request, not a permanently held connection.
+    if (!data.streamUrl) return Promise.reject(new Error('no stream'));
+    return fetch(data.streamUrl, { cache: 'no-store' })
+      .then(function (resp) {
+        if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+        function finish(result) {
+          try { reader.cancel(); } catch (e) { /* already closed */ }
+          return result;
+        }
+        function pump() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) throw new Error('stream ended');
+            buf += decoder.decode(chunk.value, { stream: true });
+            var idx;
+            while ((idx = buf.indexOf('\n\n')) !== -1) {
+              var block = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              var payload = null;
+              var rows = block.split('\n');
+              for (var i = 0; i < rows.length; i++) {
+                if (rows[i].indexOf('data:') !== 0) continue;
+                var line = rows[i].slice(5).replace(/^ /, '');
+                payload = payload === null ? line : payload + '\n' + line;
+              }
+              if (payload === null) continue;
+              var msg;
+              try { msg = JSON.parse(payload); } catch (e) { continue; }
+              if (msg.type === 'progress' || msg.type === 'end') {
+                return finish({ progress: msg.progress || {}, status: msg.status });
+              }
+            }
+            return pump();
+          });
+        }
+        return pump();
+      });
+  }
+
+  function fetchState() {
+    fetch('/api/jobs/' + encodeURIComponent(data.id) + '/state', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .catch(fetchStateFromStream)
+      .then(function (msg) {
+        pollDelay = 2000;
+        applyProgress(msg);
+        if (!isTerminal(msg.status)) schedulePoll(pollDelay);
+      })
+      .catch(function () {
+        // Fallback polling is best-effort; keep the last progress visible and
+        // back off while the server is unreachable.
+        pollDelay = Math.min(10000, Math.round(pollDelay * 1.5));
+        schedulePoll(pollDelay);
+      });
+  }
+
+  function startPolling() {
+    if (pollTimer || !data.id) return;
+    pollDelay = 2000;
+    schedulePoll(pollDelay);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function connectStream() {
+    if (!data.streamUrl) return null;
+    if (es) {
+      try { es.close(); } catch (e) { /* already closed */ }
+    }
+    var src = new EventSource(data.streamUrl);
+    src.onopen = function () {
+      if (es !== src) { src.close(); return; }
+      lastMessageAt = Date.now();
+      stopPolling();
+      setConn(null);
+    };
+    src.onmessage = function (e) {
+      lastMessageAt = Date.now();
+      var msg;
+      try { msg = JSON.parse(e.data); } catch (err) { return; }
       if (msg.type === 'log_batch' && Array.isArray(msg.lines)) {
         for (var i = 0; i < msg.lines.length; i++) {
           appendLog(msg.lines[i] + '\n');
@@ -427,33 +599,57 @@
       } else if (msg.type === 'log') {
         appendLog((msg.line || '') + '\n');
       } else if (msg.type === 'progress') {
-        renderProgress(msg.progress);
-        // Refresh rules when new chapter completes (last_completed changes)
-        var p = msg.progress || {};
-        if (p.last_completed) {
-          rulesLoaded = false;
-          var rulesView = document.getElementById('rulesView');
-          if (rulesView && !rulesView.hidden) fetchRules();
-        }
-        if (['done', 'error', 'stopped', 'interrupted'].indexOf(msg.status) !== -1) {
-          if (progEl) {
-            var badge = document.createElement('span');
-            badge.className = 'badge ' + msg.status;
-            var d = document.createElement('span');
-            d.className = 'status-dot';
-            badge.appendChild(d);
-            badge.appendChild(document.createTextNode(' ' + i18n('job.status.' + msg.status)));
-            if (msg.error) appendLog('\n' + i18n('job.view.error_line') + msg.error + '\n');
-            progEl.appendChild(document.createTextNode(' — '));
-            progEl.appendChild(badge);
-          }
+        applyProgress(msg);
+        if (isTerminal(msg.status)) {
+          // The server also sends "end", but closing here avoids a spurious
+          // onerror if the last event is lost while the socket closes.
+          src.close();
+          if (es === src) es = null;
         }
       } else if (msg.type === 'end') {
-        es.close();
+        src.close();
+        stopPolling();
+        if (es === src) es = null;
       }
     };
-    es.onerror = function () {
-      if (progEl) progEl.textContent = i18n('job.view.stream_lost');
+    src.onerror = function () {
+      if (es !== src) return;
+      // Keep the last progress visible; surface the reconnect attempt in a
+      // separate status line instead of replacing the progress text.
+      setConn(i18n('job.view.reconnecting'));
+      startPolling();
+      // EventSource retries by itself, but mobile browsers can leave it
+      // permanently CLOSED after a background freeze. Reconnect manually.
+      if (src.readyState === 2) {
+        setTimeout(function () {
+          if (es === src && src.readyState === 2) es = connectStream();
+        }, 5000);
+      }
     };
+    es = src;
+    return src;
   }
+
+  // Render current state first, then live-update via SSE (no flash on reload).
+  if (data.progress) renderProgress(data.progress);
+  if (data.status) setStatusBadge(data.status);
+  if (data.streamUrl) es = connectStream();
+
+  // A dead TCP connection doesn't always fire EventSource.onerror promptly
+  // (mobile browsers can sit on it for minutes). If no event — progress, log,
+  // or server ping — arrives for 30s while the job is live, rebuild the stream.
+  setInterval(function () {
+    if (!es || es.readyState !== 1 || isTerminal(currentStatus)) return;
+    if (Date.now() - lastMessageAt < 30000) return;
+    setConn(i18n('job.view.reconnecting'));
+    startPolling();
+    es = connectStream();
+  }, 10000);
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden || !data.streamUrl) return;
+    if (!es || es.readyState === 2 || (connEl && !connEl.hidden)) {
+      es = connectStream();
+    }
+  });
 })();

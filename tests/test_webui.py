@@ -6,6 +6,7 @@ let the background runner finish, and assert the output EPUB is produced.
 """
 
 import os
+import atexit
 import base64
 import json
 import re
@@ -17,6 +18,13 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Importing webui.app constructs the default registry, which relabels any
+# "running" jobs on disk as interrupted. Keep that away from the real
+# webui/jobs/ directory when a user is translating while tests run.
+_TEST_JOB_DIR = tempfile.mkdtemp(prefix="pytb-test-jobs-")
+atexit.register(shutil.rmtree, _TEST_JOB_DIR, ignore_errors=True)
+os.environ["PYTB_JOB_DIR"] = _TEST_JOB_DIR
 
 from ebooklib import epub
 
@@ -858,7 +866,7 @@ class TestWebUI(unittest.TestCase):
             self.assertIn("read.font_no_vi", wui_i18n.TRANSLATIONS[lang])
 
         # reader assets changed → bump so installed PWAs refetch them
-        self.assertIn("'pytb-v16'", read("static", "sw.js"))
+        self.assertIn("'pytb-v17'", read("static", "sw.js"))
 
     def test_reader_res_serves_assets_and_refuses_documents(self):
         path = self._reader_rich_epub("_test_reader_res.epub")
@@ -2318,9 +2326,13 @@ writeWav(path.join(out, 'in.wav'), x);
             'id="rulesMeta"',
             'id="log"',
             'id="progress"',
+            'id="conn"',
+            'id="jobStatusBadge"',
             'id="bar"',
         ):
             self.assertIn(needle, body)
+
+        self.assertIn("/static/job_view.js?v=", body)
 
         # No model paths baked into JS string literals; no emoji labels.
         self.assertNotIn("onclick=\"preview('", body)
@@ -2330,6 +2342,58 @@ writeWav(path.join(out, 'in.wav'), x);
         # An interrupted job offers resume, not stop.
         self.assertIn(f'action="/jobs/{job.id}/resume"', body)
         self.assertNotIn(f'action="/jobs/{job.id}/stop"', body)
+
+    def test_job_view_uses_persisted_progress_over_stale_memory(self):
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        job.status = "running"
+        job.progress = {"total_chapters": 10, "current_chapter": 4}
+        self.registry.save(job)
+        # Subprocess workers write the JSON, not this process's Job object.
+        job.status = "queued"
+        job.progress = {}
+
+        body = self.client.get(f"/jobs/{job.id}").get_data(as_text=True)
+        self.assertIn('status: "running"', body)
+        self.assertIn('"current_chapter": 4', body)
+
+    def test_job_state_endpoint_reads_persisted_progress(self):
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        job.status = "running"
+        job.progress = {
+            "total_chapters": 10,
+            "current_chapter": 3,
+            "last_completed": 2,
+        }
+        self.registry.save(job)
+
+        r = self.client.get(f"/api/jobs/{job.id}/state")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+        data = r.get_json()
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["progress"]["current_chapter"], 3)
+
+    def test_job_stream_sends_retry_and_terminal_events(self):
+        job = self.registry.create(
+            {"engine": "openai", "input": self.src, "output": self.out}
+        )
+        job.status = "done"
+        job.progress = {"total_chapters": 2, "last_completed": 2}
+        self.registry.save(job)
+
+        r = self.client.get(f"/jobs/{job.id}/stream")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/event-stream", r.headers["Content-Type"])
+        self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+        body = r.get_data(as_text=True)
+        self.assertIn("retry: 2000", body)
+        self.assertIn('"type": "progress"', body)
+        self.assertIn('"type": "end"', body)
+        self.assertIn('"status": "done"', body)
 
     def test_job_rules_endpoint_scopes_to_a_chapter(self):
         """?chapter=N returns only the characters that chapter's analysis

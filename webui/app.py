@@ -254,7 +254,42 @@ def job_view(job_id):
     job = registry.get(job_id)
     if not job:
         abort(404)
-    return render_template("job_view.html", job=job)
+    # Subprocess workers update the JSON on disk, while this process's Job
+    # object can still say "queued"/empty. Render the persisted snapshot so a
+    # reload shows the real progress even before the SSE stream connects.
+    view = copy.copy(job)
+    meta = registry.load_meta(job_id) or {}
+    if meta:
+        view.status = meta.get("status", view.status)
+        view.progress = meta.get("progress") or {}
+    return render_template("job_view.html", job=view)
+
+
+@app.route("/api/jobs/<job_id>/state")
+def api_job_state(job_id):
+    """Lightweight progress snapshot used when the SSE stream is unavailable.
+
+    The job view keeps its last rendered progress on a dropped stream and polls
+    this endpoint until SSE reconnects (or the job reaches a terminal state).
+    Reads from disk so it also reflects subprocess workers.
+    """
+    job = registry.get(job_id)
+    if not job:
+        abort(404)
+    meta = registry.load_meta(job_id) or {}
+    if not meta:
+        return jsonify({
+            "progress": job.progress or {},
+            "status": job.status,
+            "result": job.result,
+            "error": job.error,
+        })
+    return jsonify({
+        "progress": meta.get("progress") or {},
+        "status": meta.get("status"),
+        "result": meta.get("result"),
+        "error": meta.get("error"),
+    })
 
 
 @app.route("/api/jobs/<job_id>/rules")
@@ -394,8 +429,11 @@ def job_stream(job_id):
     log_path = registry._log_path(job_id)
 
     LOG_BATCH_SIZE = 100  # send log lines in batches to avoid O(n²) DOM updates
+    HEARTBEAT_SECONDS = 10
 
     def gen():
+        # Let EventSource retry quickly after a server restart/background freeze.
+        yield "retry: 2000\n\n"
         # Send only the tail on connect: the on-disk log is never truncated,
         # so resending it whole would flood the client on every page load.
         # Afterwards follow the file by byte position (O(new bytes) per tick
@@ -414,6 +452,8 @@ def job_stream(job_id):
                 pos = os.path.getsize(log_path)
             except Exception:  # noqa: BLE001
                 pos = 0
+        last_payload = None
+        last_emit = time.time()
         while True:
             # Read state from disk so it works for both the thread worker (which
             # shares memory but also persists) and a subprocess worker (which
@@ -438,6 +478,7 @@ def job_stream(job_id):
                 except Exception:  # noqa: BLE001
                     lines = []
 
+            emitted = False
             if lines:
                 # Send incremental log lines in batches
                 for i in range(0, len(lines), LOG_BATCH_SIZE):
@@ -445,6 +486,12 @@ def job_stream(job_id):
                     yield "data: " + json.dumps(
                         {"type": "log_batch", "lines": batch}, ensure_ascii=False
                     ) + "\n\n"
+                emitted = True
+
+            # Progress carries the full current chunk (source + translation),
+            # which can be large. Only send it when it actually changed; an
+            # unchanged 0.7s tick costs a tiny heartbeat instead of a repeated
+            # chapter-sized payload.
             payload = {
                 "type": "progress",
                 "progress": prog,
@@ -452,7 +499,20 @@ def job_stream(job_id):
                 "result": result,
                 "error": error,
             }
-            yield "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+            payload_json = json.dumps(payload, ensure_ascii=False)
+            if payload_json != last_payload:
+                yield "data: " + payload_json + "\n\n"
+                last_payload = payload_json
+                emitted = True
+
+            if emitted:
+                last_emit = time.time()
+            elif time.time() - last_emit >= HEARTBEAT_SECONDS:
+                # A real event (not just an SSE comment) so the client's
+                # watchdog can distinguish "quiet" from "silently dead".
+                yield 'data: {"type": "ping"}\n\n'
+                last_emit = time.time()
+
             if status in ("done", "error", "stopped", "interrupted"):
                 yield "data: " + json.dumps(
                     {"type": "end", "status": status}, ensure_ascii=False
@@ -460,7 +520,15 @@ def job_stream(job_id):
                 break
             time.sleep(0.7)
 
-    return Response(gen(), mimetype="text/event-stream")
+    return Response(
+        gen(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # --------------------------------------------------------------------------

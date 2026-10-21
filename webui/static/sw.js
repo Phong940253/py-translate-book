@@ -6,7 +6,7 @@
                           refreshed in the background)
    - state/annotations/search, POST/PUT, TTS audio → network only. */
 
-var CACHE = 'pytb-v16';
+var CACHE = 'pytb-v17';
 var KEEP = 240;                       // runtime entries (chapter docs, images)
 var ASSET_RX = /\/static\/|\/manifest\.webmanifest$|\/favicon/;
 var CONTENT_RX = /\/api\/reader\/(meta|toc|doc|chapter|image)\?|\/books\/cover\?|\/api\/library\?/;
@@ -15,7 +15,7 @@ self.addEventListener('install', function (e) {
   e.waitUntil(
     caches.open(CACHE).then(function (c) {
       return c.addAll(['/', '/static/style.css', '/static/app.js',
-        '/static/reader.css', '/static/reader.js']);
+        '/static/reader.css', '/static/reader.js', '/static/job_view.js']);
     }).then(function () { return self.skipWaiting(); })
   );
 });

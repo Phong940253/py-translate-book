@@ -158,6 +158,7 @@ TRANSLATIONS = {
         "job.view.missing_span": " Thiếu span: {ids}",
         "job.view.extra_span": " Thừa span: {ids}",
         "job.view.stream_lost": "Mất kết nối stream.",
+        "job.view.reconnecting": "Mất kết nối — đang kết nối lại…",
         "job.view.error_line": "LỖI: ",
         # config page
         "config.title": "Cấu hình",
@@ -531,6 +532,7 @@ TRANSLATIONS = {
         "job.view.missing_span": " Missing spans: {ids}",
         "job.view.extra_span": " Extra spans: {ids}",
         "job.view.stream_lost": "Stream connection lost.",
+        "job.view.reconnecting": "Connection lost — reconnecting…",
         "job.view.error_line": "ERROR: ",
         # config page
         "config.title": "Configuration",

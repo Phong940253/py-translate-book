@@ -11,7 +11,7 @@ window.APP.jobData = {
 {% endblock %}
 {% block content %}
 <h1 class="page-title">{{ t('job.view.title') }} <span class="mono">{{ job.id }}</span>
-  <span class="badge {{ job.status }}"><span class="status-dot"></span>{{ t('job.status.' + job.status) }}</span>
+  <span id="jobStatusBadge" class="badge {{ job.status }}"><span class="status-dot"></span>{{ t('job.status.' + job.status) }}</span>
 </h1>
 
 <section class="card">
@@ -27,6 +27,7 @@ window.APP.jobData = {
 <section class="card">
   <h2 class="card-title">{{ t('job.view.progress') }}</h2>
   <p id="progress" class="muted">{{ t('job.view.waiting') }}</p>
+  <p id="conn" class="muted small" role="status" aria-live="polite" hidden></p>
   <div class="progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="{{ t('job.view.progress_aria') }}"><div id="bar" style="width:0%"></div></div>
   {% if job.status == 'running' %}
   <form method="post" action="{{ url_for('job_stop', job_id=job.id) }}" class="mt">
@@ -87,5 +88,5 @@ window.APP.jobData = {
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='job_view.js') }}"></script>
+<script src="{{ url_for('static', filename='job_view.js', v=asset_v('job_view.js')) }}"></script>
 {% endblock %}
