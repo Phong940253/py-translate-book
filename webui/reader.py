@@ -1471,12 +1471,14 @@ class TTSChapterCache:
 
     @staticmethod
     def _entry_is_clean(text: str, parts, sr) -> bool:
-        """Reject cache entries whose audio is longer than the text can be.
+        """Reject a legacy cache entry whose audio is longer than the text can be.
 
         Older pre-renders contain the free-running duplicate this module now
         avoids at synthesis time.  The guard already catches that overrun on
         live playback; applying it to the cache keeps 1.4 GB of good audio
         usable instead of invalidating the whole store with a version bump.
+        Entries written after the fix carry ``ok`` and skip this check, so a
+        naturally slow short take is not re-rendered on every read.
         """
         pieces = split_for_tts_seg(text)
         if len(pieces) != len(parts):
@@ -1502,7 +1504,13 @@ class TTSChapterCache:
             return False
         _base, entry, sr = hit
         parts = entry.get("parts") or []
-        if len(parts) != pieces or not self._entry_is_clean(text, parts, sr):
+        # Entries written by the guarded renderer are trusted. Only legacy
+        # entries (no "ok" marker) go through the duration check; otherwise a
+        # slightly slow but legitimate short take would be re-rendered on
+        # every read because its replacement is just as long.
+        if (len(parts) != pieces
+                or (not entry.get("ok")
+                    and not self._entry_is_clean(text, parts, sr))):
             self._forget(voice, text)
             return False
         return True
@@ -1517,10 +1525,10 @@ class TTSChapterCache:
             return None
         base, entry, sr = hit
         parts = entry.get("parts") or []
-        if not self._entry_is_clean(text, parts, sr):
-            self._forget(voice, text)
-            return None
         if len(parts) != pieces:
+            return None
+        if not entry.get("ok") and not self._entry_is_clean(text, parts, sr):
+            self._forget(voice, text)
             return None
         try:
             off = int(entry["off"])
