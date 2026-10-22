@@ -1272,6 +1272,39 @@ def _suspects_extra_copy(part: str, seconds: float) -> bool:
     return seconds > expected
 
 
+def _retry_frame_cap(part: str):
+    """Frame cap for a short piece the model is repeating.
+
+    VieNeu v3 Turbo often fills the whole generation budget on very short
+    clauses: "Đi thôi." comes back as "Đi thôi. Đi thôi." even though the
+    model's own babble guard cannot see it (two speech bursts = two
+    syllables, so ``bursts > syllables`` never fires).  Its generic cap is
+    also generous enough to fit both copies.  Re-rendering with a tight cap
+    based on the word count stops after the first copy while leaving normal
+    pieces alone.  ``None`` means "not short enough to cap" — longer text
+    keeps the normal retry path.
+    """
+    words = len(re.findall(r"[^\W\d_]+", part or "", re.UNICODE))
+    if not words or words > 6:
+        return None
+    return max(10, min(24, 3 * words + 3))
+
+
+def _infer_with_cap(tts, part: str, voice, max_new_frames):
+    """``tts.infer`` with an optional frame cap.
+
+    Test stubs and older TTS wrappers may not accept the keyword; fall back
+    to their normal signature rather than failing the paragraph.
+    """
+    if max_new_frames is not None:
+        try:
+            return tts.infer(part, voice=voice,
+                             max_new_frames=max_new_frames)
+        except TypeError:
+            pass
+    return tts.infer(part, voice=voice)
+
+
 def _to_wav(chunks, sample_rate: int) -> bytes:
     """Concatenate float32 waveforms (+ short gaps) into 16-bit mono WAV bytes."""
     import numpy as np
@@ -1379,8 +1412,8 @@ class TTSChapterCache:
         return {"files": files, "bytes": total}
 
     def _ensure_index_locked(self) -> None:
-        """(voice, paragraph hash) → (base, entry), built by reading every
-        index file once; ``put_item`` keeps it in step afterwards."""
+        """(voice, paragraph hash) → (base, entry, sample_rate), built by
+        reading every index file once; ``put_item`` keeps it in step."""
         if self._index is not None:
             return
         index = {}
@@ -1397,8 +1430,15 @@ class TTSChapterCache:
                             continue
                         base = path[:-len(_INDEX_EXT)]
                         voice = doc.get("voice") or ""
+                        sr = doc.get("sr") or _SAMPLE_RATE
                         for h, entry in (doc.get("items") or {}).items():
-                            index[(voice, h)] = (base, entry)
+                            # A replacement written by the guarded renderer
+                            # carries "ok"; let it beat an older copy of the
+                            # same paragraph living in another chapter bundle.
+                            prev = index.get((voice, h))
+                            if (prev is None or not prev[1].get("ok")
+                                    or entry.get("ok")):
+                                index[(voice, h)] = (base, entry, sr)
                     except (OSError, ValueError, AttributeError, TypeError):
                         continue
         except OSError:
@@ -1406,36 +1446,80 @@ class TTSChapterCache:
         self._index = index
 
     def _entry(self, voice, text: str):
-        """``(base, entry)`` of a cached paragraph, or None."""
+        """``(base, entry, sample_rate)`` of a cached paragraph, or None."""
         h = self._para_hash(text)
         with self._lock:
             self._ensure_index_locked()
             hit = self._index.get((voice, h))
             if hit is None:
                 return None
-            base, entry = hit
+            base, entry, sr = hit
             if not os.path.isfile(base + _AUDIO_EXT):
                 del self._index[(voice, h)]
                 return None
-            return base, entry
+            return base, entry, sr
+
+    def _forget(self, voice, text: str) -> None:
+        """Drop a bad entry from the in-memory index.
+
+        The on-disk bundle keeps its old bytes; the next ``put_item`` appends
+        a fresh entry under the same hash, and a later process launch sees the
+        replacement. Bad entries that are still the first hit are rejected
+        again by ``_entry_is_clean``, so stale audio is never served."""
+        with self._lock:
+            self._index.pop((voice, self._para_hash(text)), None)
+
+    @staticmethod
+    def _entry_is_clean(text: str, parts, sr) -> bool:
+        """Reject cache entries whose audio is longer than the text can be.
+
+        Older pre-renders contain the free-running duplicate this module now
+        avoids at synthesis time.  The guard already catches that overrun on
+        live playback; applying it to the cache keeps 1.4 GB of good audio
+        usable instead of invalidating the whole store with a version bump.
+        """
+        pieces = split_for_tts_seg(text)
+        if len(pieces) != len(parts):
+            return False
+        try:
+            sr = float(sr or _SAMPLE_RATE)
+        except (TypeError, ValueError):
+            return False
+        for (_s, _e, n), (part, _ps, _pe) in zip(parts, pieces):
+            try:
+                seconds = float(n) / sr
+            except (TypeError, ValueError, ZeroDivisionError):
+                return False
+            if seconds <= 0 or _suspects_extra_copy(part, seconds):
+                return False
+        return True
 
     # -- reads -------------------------------------------------------------
     def has_item(self, voice, text: str, pieces: int) -> bool:
         """True when the paragraph is bundled with exactly its pieces."""
         hit = self._entry(voice, text)
-        return bool(hit is not None and len(hit[1].get("parts") or []) == pieces)
+        if hit is None:
+            return False
+        _base, entry, sr = hit
+        parts = entry.get("parts") or []
+        if len(parts) != pieces or not self._entry_is_clean(text, parts, sr):
+            self._forget(voice, text)
+            return False
+        return True
 
     def get_item(self, voice, text: str, pieces: int):
         """The decoded piece waveforms of a cached paragraph, or None."""
         import numpy as np
         import soundfile as sf
 
-        h = self._para_hash(text)
         hit = self._entry(voice, text)
         if hit is None:
             return None
-        base, entry = hit
+        base, entry, sr = hit
         parts = entry.get("parts") or []
+        if not self._entry_is_clean(text, parts, sr):
+            self._forget(voice, text)
+            return None
         if len(parts) != pieces:
             return None
         try:
@@ -1464,8 +1548,7 @@ class TTSChapterCache:
                 return out
         # Broken beyond use: forget the entry so a fresh render can append a
         # replacement segment (the stale bytes just sit unreferenced).
-        with self._lock:
-            self._index.pop((voice, h), None)
+        self._forget(voice, text)
         return None
 
     # -- writes ------------------------------------------------------------
@@ -1523,6 +1606,10 @@ class TTSChapterCache:
                 entry = {
                     "off": off,
                     "len": len(blob),
+                    # Written by the duplicate-guard path. The loader uses
+                    # this to prefer a repaired copy over an older, unmarked
+                    # entry for the same content in a different chapter.
+                    "ok": 1,
                     "parts": [[int(s), int(e), int(np.asarray(x).size)]
                               for (_p, s, e), x in zip(pieces, samples)],
                 }
@@ -1545,7 +1632,7 @@ class TTSChapterCache:
                 index_after = os.path.getsize(index_path)
             except (OSError, ValueError, TypeError):
                 return False
-            self._index[(voice, h)] = (base, entry)
+            self._index[(voice, h)] = (base, entry, sr)
             if self._stats is not None:
                 self._stats["files"] += ((0 if existed_audio else 1)
                                          + (0 if index_before else 1))
@@ -1726,10 +1813,15 @@ class TTSEngine:
                     # Model occasionally speaks a phrase one time more than
                     # the text (free-running copy). A fresh sample almost
                     # never repeats the mistake — take it when it's clean,
-                    # else keep the shorter of the two.
-                    alt = tts.infer(part, voice=voice)
-                    if (not _suspects_extra_copy(part, float(len(alt)) / sr)
-                            or len(alt) < len(wav)):
+                    # else keep the shorter of the two. Very short clauses
+                    # need a tight frame budget: the model will happily use
+                    # a generous cap to speak the same words twice.
+                    alt = _infer_with_cap(tts, part, voice,
+                                          _retry_frame_cap(part))
+                    alt_sec = float(len(alt)) / sr
+                    if (alt_sec >= _MIN_AUDIO_SEC
+                            and (not _suspects_extra_copy(part, alt_sec)
+                                 or len(alt) < len(wav))):
                         wav = alt
         if wav is None:
             # Nothing to pronounce ("……", Chinese, lone "?") → a proportional

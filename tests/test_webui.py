@@ -1391,11 +1391,13 @@ class TestWebUI(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def infer(self, text, voice=None):
-                self.calls.append(text)
-                # first render free-runs (≈3 s for an 11-char piece); a fresh
-                # sample comes back clean (≈0.4 s)
-                secs = 3.0 if len(self.calls) == 1 else 0.4
+            def infer(self, text, voice=None, max_new_frames=None):
+                self.calls.append((text, max_new_frames))
+                # an uncapped short phrase free-runs (≈3 s for 11 chars);
+                # the capped retry comes back clean (≈0.4 s). Every other
+                # piece is clean on the first render.
+                secs = (3.0 if text == "Một hai ba." and max_new_frames is None
+                        else 0.4)
                 return [0.0] * int(48000 * secs)
 
         eng = reader.TTSEngine()
@@ -1406,13 +1408,51 @@ class TestWebUI(unittest.TestCase):
         eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
 
         wav, _segs = eng.synthesize("Một hai ba.", voice="Hải Đăng")
-        self.assertEqual(len(stub.calls), 2)   # suspect overrun → one retry
+        # suspect overrun → one retry, with the tight short-clause cap
+        self.assertEqual(stub.calls, [
+            ("Một hai ba.", None),
+            ("Một hai ba.", reader._retry_frame_cap("Một hai ba.")),
+        ])
         expected = reader._to_wav([[0.0] * int(48000 * 0.4)], 48000)
         self.assertEqual(wav, expected)        # the clean sample wins
 
         # a clean render is never re-synthesized (2 calls → 3, no 4th)
         eng.synthesize("Một câu khác hẳn.", voice="Hải Đăng")
         self.assertEqual(len(stub.calls), 3)
+
+    def test_tts_short_piece_retry_caps_the_free_running_copy(self):
+        """The ch152 bug: "Đi thôi." was rendered twice by the model."""
+        from webui import reader
+
+        self.assertEqual(reader._retry_frame_cap("“Đi thôi,"), 10)
+        self.assertEqual(reader._retry_frame_cap("đi tắm thôi.”"), 12)
+        self.assertIsNone(reader._retry_frame_cap(
+            "một hai ba bốn năm sáu bảy"))
+
+        class _Stub:
+            sample_rate = 48000
+
+            def __init__(self):
+                self.calls = []
+
+            def infer(self, text, voice=None, max_new_frames=None):
+                self.calls.append(max_new_frames)
+                # 1.44 s is the real measured duplicate for this phrase;
+                # capping at 10 frames gives the single clean copy.
+                secs = 1.44 if max_new_frames is None else 0.72
+                return [0.0] * int(48000 * secs)
+
+        eng = reader.TTSEngine()
+        stub = _Stub()
+        eng._tts = stub
+        eng.state = "ready"
+        eng.default_voice = "Hải Đăng"
+        eng.voices = [{"id": "Hải Đăng", "label": "Hải Đăng"}]
+
+        wav, _segs = eng.synthesize("“Đi thôi,”", voice="Hải Đăng")
+        self.assertEqual(stub.calls, [None, 10])
+        expected = reader._to_wav([[0.0] * int(48000 * 0.72)], 48000)
+        self.assertEqual(wav, expected)
 
     def test_tts_engine_silences_text_it_cannot_read(self):
         from webui import reader
@@ -1629,6 +1669,50 @@ class TestWebUI(unittest.TestCase):
         eng.clear_cache()
         disk = eng.disk.stats()
         self.assertEqual((disk["files"], disk["bytes"]), (0, 0))
+
+    def test_tts_disk_cache_rejects_duplicate_audio(self):
+        """An older pre-render of ch152 stored both copies; reading it must
+        miss, re-render, and replace the hash entry instead of replaying it."""
+        import numpy as np
+
+        from webui import reader
+
+        text = "“Đi thôi, đi tắm thôi.”"
+        pieces = reader.split_for_tts_seg(text)
+        eng, _stub, tmp = self._disk_engine()
+        # ch152's measured duplicate: 1.44 s for "Đi thôi," and 1.84 s for
+        # "đi tắm thôi.”" — exactly the old free-running two-copy render.
+        samples = [
+            np.full(int(48000 * 1.44), 0.05, dtype=np.float32),
+            np.full(int(48000 * 1.84), 0.05, dtype=np.float32),
+        ]
+        self.assertTrue(eng.disk.put_item(
+            "v1", "book.epub", 152, text, pieces, samples, 48000))
+        # Simulate an entry written before the guard existed: no "ok" marker.
+        index_path = eng.disk._base("v1", "book.epub", 152) + ".json"
+        with open(index_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        for entry in doc["items"].values():
+            entry.pop("ok", None)
+        with open(index_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, separators=(",", ":"))
+
+        # The bad entry is found but rejected: has_item/get_item both miss,
+        # and the in-memory index forgets it so put_item can append a fix.
+        eng2, stub2, _ = self._disk_engine(tmp=tmp)
+        self.assertFalse(eng2.disk.has_item("v1", text, len(pieces)))
+        self.assertIsNone(eng2.disk.get_item("v1", text, len(pieces)))
+
+        eng2.note_chapter("book.epub", 152)
+        wav, _segs = eng2.synthesize(text, voice="v1")
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertEqual(len(stub2.calls), len(pieces))  # re-rendered
+
+        # the fresh entry wins on the next process too
+        eng3, stub3, _ = self._disk_engine(tmp=tmp)
+        self.assertTrue(eng3.disk.has_item("v1", text, len(pieces)))
+        eng3.synthesize(text, voice="v1")
+        self.assertEqual(stub3.calls, [])
 
     def test_tts_disk_cache_off_without_a_dir(self):
         from webui import reader
