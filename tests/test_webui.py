@@ -1845,6 +1845,58 @@ class TestWebUI(unittest.TestCase):
         self.assertIsNotNone(got)                          # decodes for playback
         self.assertTrue(all(len(chunk) > 0 for chunk in got))
 
+    def test_tts_disk_cache_mp3_quality_keeps_sibilants_clean(self):
+        """Regression for the ~58 kbps cache that sounded gritty ("rè").
+
+        The old 0.5 encoder setting lost high-frequency detail on speech.
+        A speech-like signal must survive the disk round-trip with both a
+        sane bitrate and enough waveform fidelity; otherwise the cache is
+        audibly worse than the same render played live.
+        """
+        import numpy as np
+
+        from webui import reader
+
+        tmp = tempfile.mkdtemp(prefix="tts_cache_quality_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        cache = reader.TTSChapterCache(tmp)
+
+        sr = 48000
+        t = np.arange(sr, dtype=np.float32) / sr
+        rng = np.random.default_rng(1234)
+        voiced = (0.30 * np.sin(2 * np.pi * 180 * t)
+                  + 0.20 * np.sin(2 * np.pi * 700 * t)
+                  + 0.10 * np.sin(2 * np.pi * 3200 * t))
+        # A little broadband noise stands in for fricatives/sibilants, the
+        # part of speech MP3 at 58 kbps smeared into a gritty edge.
+        noise = rng.standard_normal(sr).astype(np.float32) * 0.03
+        envelope = 0.55 + 0.45 * np.sin(2 * np.pi * 2.5 * t)
+        samples = ((voiced + noise) * envelope * 0.6).astype(np.float32)
+
+        text = "Kiểm tra chất lượng âm thanh."
+        pieces = [(text, 0, len(text))]
+        self.assertTrue(cache.put_item(
+            "v1", "book.epub", 1, text, pieces, [samples], sr))
+
+        path = cache._base("v1", "book.epub", 1) + ".mp3"
+        bitrate = os.path.getsize(path) * 8 / (len(samples) / sr)
+        self.assertGreaterEqual(
+            bitrate, 100_000,
+            f"TTS cache bitrate {bitrate / 1000:.1f} kbps is too low; "
+            "the old 58 kbps setting was audible as rè")
+
+        got = cache.get_item("v1", reader._collapse(text), len(pieces))
+        self.assertIsNotNone(got)
+        decoded = np.concatenate(got)
+        n = min(len(samples), len(decoded))
+        err = samples[:n] - decoded[:n]
+        snr = 10 * np.log10(
+            float(np.sum(samples[:n] ** 2))
+            / max(float(np.sum(err ** 2)), 1e-12))
+        self.assertGreater(
+            snr, 23.0,
+            f"TTS cache SNR {snr:.1f} dB is too low; compression is audible")
+
     def test_tts_disk_cache_prunes_legacy_wav_pieces(self):
         eng, _stub, tmp = self._disk_engine()
         legacy = os.path.join(tmp, "ab", "deadbeef.wav")

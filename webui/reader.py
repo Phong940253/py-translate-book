@@ -1336,7 +1336,8 @@ def _to_wav(chunks, sample_rate: int) -> bytes:
 # whole store (voice model updates, bundle layout changes). Old bundles are
 # simply never looked up again; legacy PCM (.wav) pieces are pruned on the
 # first walk.
-_CACHE_VER = "v3"
+# v4: MP3 quality raised from 0.5 (~58 kbps, audibly gritty) to 0.0.
+_CACHE_VER = "v4"
 # Two hex chars of the digest as a subdirectory: keeps any single folder
 # small once a few novels' worth of chapters are cached.
 _CACHE_SUBDIR = 2
@@ -1348,7 +1349,11 @@ _CACHE_SUBDIR = 2
 # engine decodes to samples and re-frames WAV on the fly.
 _AUDIO_EXT = ".mp3"
 _INDEX_EXT = ".json"
-_PIECE_LEVEL = 0.5       # libsndfile MP3 quality slider ≈ 68 kbps mono
+# 0.5 produced only ~58 kbps on speech; sibilants and quiet consonants picked
+# up a gritty "rè" edge that the raw 48 kHz render does not have. 0.0 is the
+# best quality libsndfile exposes (~104 kbps on this voice); the bundle grows
+# by less than 2x, which is still far smaller than PCM WAV and worth it.
+_PIECE_LEVEL = 0.0
 
 
 class TTSChapterCache:
