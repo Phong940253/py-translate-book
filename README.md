@@ -193,6 +193,34 @@ not abort a chunk that is mid-API-call).
 
 ---
 
+## WebUI v2 (React, port 5000)
+
+A React/Vite/Tailwind rewrite lives in `frontend/`. It is served by the same
+Flask app on the official **port 5000**: the classic v1 UI stays at `/` and the
+v2 SPA is mounted at `/v2`.
+
+```bat
+cd frontend
+npm install
+npm run build
+cd ..
+
+python -m webui.app_v2
+```
+
+Open **http://127.0.0.1:5000/v2/**.
+
+- Dashboard, library, BGM/music library, settings, and reader.
+- The reader reuses the iframe chapter renderer, with TTS read-aloud (the
+  `/api/tts/stream` audio is preloaded a few paragraphs ahead), search,
+  annotations, and reading settings driven from React.
+- BGM supports local playback, volume/loop persistence, long titles, and
+  YouTube import via `yt-dlp` + `ffmpeg` (`bestaudio`, MP3 192 kbps).
+- The build output `webui/static/v2/` is git-ignored; rebuild after frontend
+  changes. See `frontend/README.md` for development details.
+
+---
+
 ## Project structure
 
 ```
@@ -209,6 +237,8 @@ translator/
   engines/                TranslationEngine: openai / gemini / webai / compatible (+ base)
 webui/
   app.py                 Flask app (routes + SSE)
+  app_v2.py              Flask server for WebUI v2 on port 5000 (/v2)
+  music.py               BGM library, streaming, YouTube import jobs
   reader.py              EPUB reader (/read) + local TTS engine + TTS chapter disk cache
   jobs.py                JobRegistry + Job (state, log, progress; persisted in webui/jobs/)
   core_runner.py         runs run_translation in a thread, forwards log/events -> SSE
@@ -216,6 +246,7 @@ webui/
   config_schema.py       metadata for the /config/settings GUI form (non-secret fields)
   books.py               list EPUBs, preview chapters
   templates/  static/    UI (incl. keys.html — API Keys form, settings.html — GUI editor)
+frontend/                React/Vite/Tailwind source for WebUI v2
 tests/                   offline unittest (no AI calls)
 requirements.txt         dependencies
 config.example.yaml      config template
@@ -228,7 +259,7 @@ config.example.yaml      config template
 ```bat
 python -m unittest tests.test_html_utils tests.test_translator \
                      tests.test_epub_utils tests.test_job_core tests.test_engines \
-                     tests.test_webui -v
+                     tests.test_webui tests.test_music -v
 ```
 
 - `test_job_core`: runs `run_translation` with a fake engine + a small EPUB and

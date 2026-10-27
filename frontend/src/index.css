@@ -1,0 +1,239 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0d1015;
+  --color-surface: #151a22;
+  --color-surface-2: #1c232d;
+  --color-surface-3: #242d39;
+  --color-line: #2a3340;
+  --color-line-strong: #3a4657;
+  --color-ink: #e8edf3;
+  --color-muted: #9aa7b7;
+  --color-faint: #6f7d8f;
+  --color-accent: #2dd4bf;
+  --color-accent-soft: #123a35;
+  --color-accent-ink: #04211d;
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --font-sans: "Be Vietnam Pro", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Prefer fonts with full Vietnamese precomposed-glyph coverage.  Literata /
+     Georgia can fall back per-glyph and visually split words like "đến". */
+  --font-reading: "Cambria", "Palatino Linotype", "Noto Serif", "Times New Roman", serif;
+}
+
+html[data-theme="light"] {
+  --color-bg: #f3f5f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #edf1f6;
+  --color-surface-3: #e2e8f0;
+  --color-line: #d8e0e9;
+  --color-line-strong: #bcc8d6;
+  --color-ink: #17202b;
+  --color-muted: #5e6b7b;
+  --color-faint: #8491a1;
+  --color-accent: #0f9f8f;
+  --color-accent-soft: #d9f5f0;
+  --color-accent-ink: #ffffff;
+}
+
+html[data-theme="sepia"] {
+  --color-bg: #f3ead9;
+  --color-surface: #fbf4e7;
+  --color-surface-2: #f0e5d2;
+  --color-surface-3: #e6d8c0;
+  --color-line: #d9c9ad;
+  --color-line-strong: #bea987;
+  --color-ink: #2c2419;
+  --color-muted: #746451;
+  --color-faint: #96836c;
+  --color-accent: #a15c2a;
+  --color-accent-soft: #f0ddc7;
+  --color-accent-ink: #ffffff;
+}
+
+html[data-theme="black"] {
+  --color-bg: #000000;
+  --color-surface: #08090b;
+  --color-surface-2: #101216;
+  --color-surface-3: #181b20;
+  --color-line: #22262d;
+  --color-line-strong: #353b45;
+  --color-ink: #f1f4f8;
+  --color-muted: #a3acb9;
+  --color-faint: #77808d;
+  --color-accent: #38e0c8;
+  --color-accent-soft: #0c2b27;
+  --color-accent-ink: #031714;
+}
+
+html[data-theme="custom"] {
+  color-scheme: dark;
+}
+
+html {
+  color-scheme: dark;
+  background: var(--color-bg);
+}
+
+html[data-theme="light"],
+html[data-theme="sepia"] {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.focus-ring:focus-visible,
+.btn:focus-visible,
+.input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface;
+  }
+
+  .btn {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-transparent px-4 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply bg-accent text-accent-ink hover:brightness-110;
+  }
+
+  .btn-secondary {
+    @apply border-line bg-surface-2 text-ink hover:bg-surface-3;
+  }
+
+  .btn-ghost {
+    @apply text-muted hover:bg-surface-2 hover:text-ink;
+  }
+
+  .btn-danger {
+    @apply border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20;
+  }
+
+  .input {
+    @apply min-h-11 w-full min-w-0 rounded-xl border border-line bg-surface-2 px-3 text-sm text-ink placeholder:text-faint;
+  }
+
+  .label {
+    @apply text-xs font-semibold uppercase tracking-[0.13em] text-faint;
+  }
+
+  .muted {
+    @apply text-sm text-muted;
+  }
+}
+
+/* ── Deep-yellow / black theme (đen vàng đậm)
+   Primary: near-black with a warm undertone
+   Accent/secondary: aged warm amber-paper yellow, not bright gold
+────────────────────────────────────────────────────────────────── */
+html[data-theme="deep-yellow"] {
+  --color-bg: #0c0b07;
+  --color-surface: #141208;
+  --color-surface-2: #1c190c;
+  --color-surface-3: #252110;
+  --color-line: #302c14;
+  --color-line-strong: #453f1c;
+  --color-ink: #f0e6c8;
+  --color-muted: #c4a95a;
+  --color-faint: #7a6a38;
+  --color-accent: #c9a84c;
+  --color-accent-soft: #1e1a08;
+  --color-accent-ink: #0c0b07;
+}
+
+/* ── Animations ─────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(100%); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(1rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.animate-fade-in {
+  animation: fade-in 180ms ease both;
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-slide-up {
+  animation: slide-up 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-scale-in {
+  animation: scale-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -21,3 +21,6 @@ PyYAML>=6.0
 
 # --- Web UI (Flask pulls in Werkzeug + Jinja2 automatically) ---
 Flask>=3,<4
+
+# --- WebUI v2: YouTube music import (ffmpeg must be on PATH for MP3 output) ---
+yt-dlp>=2024.1.1

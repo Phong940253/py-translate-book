@@ -187,6 +187,33 @@ chunk đang gọi API).
 
 ---
 
+## WebUI v2 (React, cổng 5000)
+
+Bản giao diện mới React/Vite/Tailwind nằm trong `frontend/`, chạy trên **cổng
+chính thức 5000** cùng Flask app: giao diện v1 cũ vẫn ở `/`, v2 gắn tại `/v2`.
+
+```bat
+cd frontend
+npm install
+npm run build
+cd ..
+
+python -m webui.app_v2
+```
+
+Mở **http://127.0.0.1:5000/v2/**.
+
+- Có dashboard, thư viện sách, thư viện BGM, cài đặt và reader.
+- Reader v2 dùng iframe renderer hiện có, TTS/đọc aloud chạy trong React
+  (preload audio `/api/tts/stream` sẵn vài đoạn phía trước), kèm tìm kiếm,
+  ghi chú và cài đặt đọc.
+- BGM hỗ trợ phát local, lưu âm lượng/loop, tên dài và import YouTube bằng
+  `yt-dlp` + `ffmpeg` (`bestaudio`, MP3 192 kbps).
+- Build output `webui/static/v2/` bị git-ignore; chạy lại `npm run build` sau khi
+  sửa frontend. Chi tiết dev ở `frontend/README.md`.
+
+---
+
 ## Cấu trúc dự án
 
 ```
@@ -203,6 +230,8 @@ translator/
   engines/                TranslationEngine: openai / gemini / webai / compatible (+ base)
 webui/
   app.py                 Flask app (routes + SSE)
+  app_v2.py              Flask server WebUI v2 cổng 5000 (/v2)
+  music.py               thư viện BGM, streaming, job import YouTube
   jobs.py                JobRegistry + Job (trạng thái, log, progress; lưu webui/jobs/)
   core_runner.py         chạy run_translation trong thread, forward log/event -> SSE
   config_store.py        đọc/ghi config.yaml an toàn (mask key + backup)
@@ -210,6 +239,7 @@ webui/
   books.py               liệt kê EPUB, preview chương, phân loại trạng thái dịch
                          (checkpoint/job/đuôi tên) và gom nhóm nguồn + bản dịch
   templates/  static/    giao diện (gồm keys.html — form API Keys, settings.html — GUI)
+frontend/                source React/Vite/Tailwind cho WebUI v2
 tests/                   unittest offline (không gọi AI)
 requirements.txt         dependency
 config.example.yaml      mẫu cấu hình
@@ -222,7 +252,7 @@ config.example.yaml      mẫu cấu hình
 ```bat
 python -m unittest tests.test_html_utils tests.test_translator \
                      tests.test_epub_utils tests.test_job_core tests.test_engines \
-                     tests.test_webui -v
+                     tests.test_webui tests.test_music -v
 ```
 
 - `test_job_core`: chạy `run_translation` với engine giả lập + EPUB nhỏ → assert ra
