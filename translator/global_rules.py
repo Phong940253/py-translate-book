@@ -125,6 +125,44 @@ def _safe_to_rewrite(value: str) -> bool:
     return bool(text) and text[:1].isupper()
 
 
+# High-frequency Vietnamese words (lower-cased).  Sentence start capitalises
+# them exactly like a name, so a glossary surface that equals one of these
+# would rewrite ordinary prose on every occurrence — the bug that turned
+# "Hai người" into "Hải người" and "Cố gắng" into "Cố Quân gắng".
+_COMMON_WORDS = frozenset(
+    """
+    một hai ba bốn năm sáu bảy tám chín mười lăm nửa
+    tôi bạn tao mày tớ tụi bọn hắn gã kẻ tên ai người mình
+    anh em chị chú thím dì ông bà cô cha mẹ bố vợ chồng con cháu thầy trò
+    gặp nói nghe nhìn thấy biết muốn phải được không nhưng hoặc vì là có sẽ
+    đang vẫn còn lại vào ra đi đến ở làm cho chơi chờ đứng ngồi nằm nghĩ bảo
+    chưa đã vừa rồi nữa thật hẳn rất quá này kia ấy đó vậy thế sao như với
+    hay thôi nhé luôn luôn vừa lúc khi cho bởi nếu như ngoài trong trước sau
+    """.split()
+)
+
+
+def _risky_as_surface(surface: str) -> bool:
+    """Would literally swapping *surface* into a book rewrite ordinary text?
+
+    ``_safe_to_rewrite`` only checks that the form looks name-shaped
+    (capitalised), but a sentence-initial ordinary word looks name-shaped
+    too: the glossary entry ``Hải`` carried the pinyin surface ``Hai`` and
+    every ``Hai người`` at a sentence start became ``Hải người``.  So a
+    single short token (``Hai``, ``Cố``, ``Lạc``) or one built only from
+    common words (``Hai Người``) is never rewritten wholesale — it cannot
+    be told apart from prose.  Mixed-script garble (``Thẩm梨初``) can only
+    come from translated text, and multi-word names are distinctive enough,
+    so both stay eligible."""
+    value = (surface or "").strip()
+    if not value or has_cjk(value):
+        return False
+    tokens = value.split()
+    if len(tokens) == 1 and len(tokens[0]) <= 3:
+        return True
+    return all(tok.lower() in _COMMON_WORDS for tok in tokens)
+
+
 def split_name_pair(part: str) -> tuple[str | None, str]:
     """Split one ``Characters:`` item that carries its source form.
 
@@ -893,7 +931,9 @@ class GlobalRulesManager:
         """Surface form → canonical spelling, for normalising a written EPUB.
         Pure Chinese surfaces are excluded: the source title/text is never
         touched.  Mixed-script garble ("Thẩm梨初") is unique to translated
-        text and maps like any other variant."""
+        text and maps like any other variant.  Word-shaped surfaces that
+        collide with ordinary prose ("Hai", "Cố") are excluded as well —
+        see :func:`_risky_as_surface`."""
         with self._lock:
             out: dict[str, str] = {}
             for entry in self._state.name_glossary:
@@ -917,6 +957,12 @@ class GlobalRulesManager:
                         continue
                     if surface.lower() == canonical.lower():
                         continue
+                    if _risky_as_surface(surface):
+                        logging.debug(
+                            "mapping(): skipping prose-colliding surface %r "
+                            "for %r", surface, canonical
+                        )
+                        continue
                     out[surface] = canonical
             canonical_by_fold = {
                 fold_name(entry["canonical"]): entry["canonical"]
@@ -935,6 +981,12 @@ class GlobalRulesManager:
                 if not _safe_to_rewrite(canonical):
                     continue
                 if key.lower() == canonical.lower():
+                    continue
+                if _risky_as_surface(key):
+                    logging.debug(
+                        "mapping(): skipping prose-colliding character key %r "
+                        "for %r", key, canonical
+                    )
                     continue
                 out[key] = canonical
         return out

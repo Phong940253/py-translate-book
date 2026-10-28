@@ -176,6 +176,18 @@ _NAME_SURFACE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN_RE = re.compile(r"[A-Za-zÀ-ỹ]")
 
 
+def _surface_re(surface: str) -> re.Pattern:
+    """Literal *surface* that refuses to sit inside a longer Latin word.
+
+    The anchors only guard the edges a surface shares with real words
+    (``An`` never bites inside ``Anh``); whole-word collisions such as
+    ``Hai`` in ``Hai người`` are prevented one level up, where the mapping
+    decides which surfaces may be rewritten at all."""
+    head = r"(?<![A-Za-zÀ-ỹ])" if _LATIN_RE.match(surface[0]) else ""
+    tail = r"(?![A-Za-zÀ-ỹ])" if _LATIN_RE.match(surface[-1]) else ""
+    return re.compile(head + re.escape(surface) + tail)
+
+
 def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, int]:
     """Rewrite variant/pinyin spellings to the canonical name.
 
@@ -183,7 +195,9 @@ def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, in
     Pure-Chinese surfaces and Chinese canonicals are skipped so the source
     text and the kept ``第N章`` headings stay untouched; a mixed-script
     surface (``Thẩm梨初``) only occurs in translated text and is rewritten
-    to its Vietnamese canonical.  Returns ``(text, replacement_count)``."""
+    to its Vietnamese canonical.  A Latin surface only matches on word
+    boundaries, never inside a longer word.  Returns
+    ``(text, replacement_count)``."""
     if not html or not mapping:
         return html, 0
     text = html
@@ -198,8 +212,11 @@ def normalize_names_in_html(html: str, mapping: dict[str, str]) -> tuple[str, in
             continue
         if surface not in text:
             continue
-        count = text.count(surface)
-        text = text.replace(surface, canonical)
+        pattern = _surface_re(surface)
+        if not pattern.search(text):
+            continue
+        count = len(pattern.findall(text))
+        text = pattern.sub(lambda _m: canonical, text)
         total += count
     return text, total
 

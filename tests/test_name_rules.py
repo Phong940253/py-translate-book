@@ -300,6 +300,23 @@ class TestGlossaryText(unittest.TestCase):
         self.assertEqual(mapping.get("Long Lệ Đông"), "Long Lân Đông")
         self.assertEqual(mapping.get("Trương Như"), "Trương Nhữ")
 
+    def test_mapping_never_rewrites_common_word_surfaces(self):
+        # the glossary entry for the character 海 carried the pinyin surface
+        # "Hai", which is also the ordinary word "hai" (hai người = two
+        # people) — sentence-initial "Hai người" became "Hải người".  Short
+        # or all-common-word surfaces must stay out of the rewrite map.
+        self.mgr.add_glossary_entry("Hải", cn="海", pinyin="Hai")
+        self.mgr.add_glossary_entry("Cố Quân", cn="顾君", variant="Cố")
+        self.mgr.add_glossary_entry("Lạc Thanh Hàn", cn="洛清寒", variant="Lạc")
+        self.mgr.add_glossary_entry("Thẩm U", cn="沈悠", variant="Hai Người")
+        mapping = self.mgr.mapping()
+        self.assertNotIn("Hai", mapping)
+        self.assertNotIn("Cố", mapping)
+        self.assertNotIn("Lạc", mapping)
+        self.assertNotIn("Hai Người", mapping)
+        # distinctive multi-word surfaces still go through
+        self.assertEqual(mapping.get("Long Lệ Đông"), "Long Lân Đông")
+
     def test_budget_caps_the_block(self):
         source = "白清夏 陆窦晴 龙怜冬"
         for budget in (200, 500, 2500):
@@ -779,6 +796,16 @@ class TestEpubNameNormalization(unittest.TestCase):
             "<p>Long Lân Đông cười, Lân Đông chạy, Bạch Thanh Hạ đứng.</p>",
         )
         self.assertEqual(count, 3)
+
+    def test_latin_surface_never_lands_inside_a_word(self):
+        mapping = {"An": "Án", "Du": "Đỗ"}
+        html = "<p>Anh đợi ở An, Giang Du ngồi, GiangDu đứng.</p>"
+        text, count = normalize_names_in_html(html, mapping)
+        self.assertEqual(
+            text,
+            "<p>Anh đợi ở Án, Giang Đỗ ngồi, GiangDu đứng.</p>",
+        )
+        self.assertEqual(count, 2)
 
     def test_chinese_surfaces_and_headings_are_never_touched(self):
         mapping = {"白清夏": "Bạch Thanh Hạ", "Long Lệ Đông": "Long Lân Đông"}
