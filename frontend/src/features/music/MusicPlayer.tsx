@@ -114,9 +114,12 @@ export function MusicPlayer() {
       {track ? (
         <div
           className={cn(
-            "fixed inset-x-3 z-40 mx-auto max-w-5xl rounded-2xl border border-line bg-surface/95 p-3 shadow-2xl shadow-black/30 backdrop-blur",
+            // Same horizontal geometry as the reader's TTS bar (inset-x-3 +
+            // max-w-3xl) so the two floating strips line up edge to edge;
+            // only the vertical offset differs.
+            "fixed inset-x-3 z-40 mx-auto max-w-3xl rounded-2xl border border-line bg-surface/95 p-3 shadow-2xl shadow-black/30 backdrop-blur",
             inReader
-              ? "bottom-[calc(0.75rem+env(safe-area-inset-bottom))] md:inset-x-4 md:bottom-4 md:max-w-none"
+              ? "bottom-[calc(0.75rem+env(safe-area-inset-bottom))]"
               : "bottom-[calc(4.75rem+env(safe-area-inset-bottom))] md:inset-x-auto md:bottom-5 md:left-[17.5rem] md:right-6 md:max-w-none",
           )}
         >

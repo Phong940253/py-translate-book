@@ -690,10 +690,12 @@ export function ReaderPage() {
     return meta.chapters.filter((item) => item.title.toLowerCase().includes(needle));
   }, [meta, tocQuery]);
 
-  // Scroll the TOC list to the current chapter only when it opens. Doing this
-  // in a ref callback re-runs on every render (read-aloud re-renders per
-  // paragraph), which yanked the list back and made other chapters
-  // impossible to pick while audio was playing.
+  // Scroll the TOC list to the current chapter once per open. Doing this in a
+  // ref callback re-runs on every render (read-aloud re-renders per paragraph),
+  // which yanked the list back and made other chapters impossible to pick while
+  // audio was playing. The list only mounts together with the dialog and the
+  // chapter array can arrive later, so retry over a few frames — but only mark
+  // the open as handled once the jump actually landed.
   const tocListRef = useRef<HTMLDivElement | null>(null);
   const tocScrolledRef = useRef(false);
   useEffect(() => {
@@ -702,11 +704,21 @@ export function ReaderPage() {
       return;
     }
     if (tocScrolledRef.current) return;
-    tocScrolledRef.current = true;
-    const el = tocListRef.current;
-    if (!el || !chapter) return;
-    const active = el.querySelector<HTMLElement>(`[data-ch="${chapter}"]`);
-    if (active) active.scrollIntoView({ block: "center" });
+    let frame = 0;
+    let tries = 0;
+    const jump = () => {
+      const el = tocListRef.current;
+      const active = el?.querySelector<HTMLElement>(`[data-ch="${chapter}"]`);
+      if (el && active) {
+        const top = active.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        el.scrollTop = Math.max(0, Math.round(top - (el.clientHeight - active.offsetHeight) / 2));
+        tocScrolledRef.current = true;
+        return;
+      }
+      if (++tries < 90) frame = requestAnimationFrame(jump);
+    };
+    jump();
+    return () => cancelAnimationFrame(frame);
   }, [tocOpen, chapter, filteredChapters]);
 
   const runSearch = async () => {
@@ -1014,8 +1026,11 @@ export function ReaderPage() {
 
       {tts.state !== "idle" ? (
         <div className={cn(
+          // Geometry must match MusicPlayer's in-reader branch (inset-x-3 +
+          // max-w-3xl) so both floating bars share the same width; when the
+          // BGM strip is visible its top edge sits at ~5.75rem, hence 6rem.
           "fixed inset-x-3 z-30 mx-auto flex max-w-3xl items-center gap-2 rounded-2xl border border-line bg-surface/95 p-2 shadow-2xl shadow-black/30 backdrop-blur animate-slide-up",
-          track ? "bottom-[calc(5.7rem+env(safe-area-inset-bottom))]" : "bottom-[calc(0.75rem+env(safe-area-inset-bottom))]",
+          track ? "bottom-[calc(6rem+env(safe-area-inset-bottom))]" : "bottom-[calc(0.75rem+env(safe-area-inset-bottom))]",
         )}>
           <button className="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink" onClick={tts.toggle} aria-label={tts.state === "playing" ? "Tạm dừng đọc" : "Tiếp tục đọc"}>
             {tts.state === "playing" ? <Pause className="h-4 w-4" /> : tts.state === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="ml-0.5 h-4 w-4" />}
