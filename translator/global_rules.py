@@ -128,7 +128,9 @@ def _safe_to_rewrite(value: str) -> bool:
 # High-frequency Vietnamese words (lower-cased).  Sentence start capitalises
 # them exactly like a name, so a glossary surface that equals one of these
 # would rewrite ordinary prose on every occurrence — the bug that turned
-# "Hai người" into "Hải người" and "Cố gắng" into "Cố Quân gắng".
+# "Hai người" into "Hải người" and "Cố gắng" into "Cố Quân gắng".  Common
+# surnames live here too: a bare "Nguyễn"/"Trần" surface would expand inside
+# every unrelated name that shares it.
 _COMMON_WORDS = frozenset(
     """
     một hai ba bốn năm sáu bảy tám chín mười lăm nửa
@@ -138,6 +140,7 @@ _COMMON_WORDS = frozenset(
     đang vẫn còn lại vào ra đi đến ở làm cho chơi chờ đứng ngồi nằm nghĩ bảo
     chưa đã vừa rồi nữa thật hẳn rất quá này kia ấy đó vậy thế sao như với
     hay thôi nhé luôn luôn vừa lúc khi cho bởi nếu như ngoài trong trước sau
+    nguyễn trần huỳnh phạm đặng trịnh vương hoàng văn dương quốc
     """.split()
 )
 
@@ -149,11 +152,12 @@ def _risky_as_surface(surface: str) -> bool:
     (capitalised), but a sentence-initial ordinary word looks name-shaped
     too: the glossary entry ``Hải`` carried the pinyin surface ``Hai`` and
     every ``Hai người`` at a sentence start became ``Hải người``.  So a
-    single short token (``Hai``, ``Cố``, ``Lạc``) or one built only from
-    common words (``Hai Người``) is never rewritten wholesale — it cannot
-    be told apart from prose.  Mixed-script garble (``Thẩm梨初``) can only
-    come from translated text, and multi-word names are distinctive enough,
-    so both stay eligible."""
+    single short token (``Hai``, ``Cố``, ``Lạc``), a bare surname
+    (``Trần``, ``Nguyễn``) or one built only from common words
+    (``Hai Người``) is never rewritten wholesale — it cannot be told apart
+    from prose.  Mixed-script garble (``Thẩm梨初``) can only come from
+    translated text, and multi-word names are distinctive enough, so both
+    stay eligible."""
     value = (surface or "").strip()
     if not value or has_cjk(value):
         return False
@@ -161,6 +165,19 @@ def _risky_as_surface(surface: str) -> bool:
     if len(tokens) == 1 and len(tokens[0]) <= 3:
         return True
     return all(tok.lower() in _COMMON_WORDS for tok in tokens)
+
+
+def _inside_known_name(surface: str, names) -> bool:
+    """Is *surface* part of a name we already know?
+
+    Rewriting it would grow that name into a duplicated one: the surface
+    ``Giang`` (pinyin of 江俞) sits inside the canonicals ``Giang Du`` and
+    ``Giang Tích``, so ``text.replace`` turned every ``Giang Tích`` into
+    ``Giang Du Tích`` and, one pass later, ``Giang Du Du Tích``.  Checking
+    every known name — not just the surface's own entry — also catches
+    cross-entry hits like ``Meng Meng`` inside canonical
+    ``Lưu Meng Meng``."""
+    return any(surface in name for name in names if name)
 
 
 def split_name_pair(part: str) -> tuple[str | None, str]:
@@ -933,9 +950,16 @@ class GlobalRulesManager:
         touched.  Mixed-script garble ("Thẩm梨初") is unique to translated
         text and maps like any other variant.  Word-shaped surfaces that
         collide with ordinary prose ("Hai", "Cố") are excluded as well —
-        see :func:`_risky_as_surface`."""
+        see :func:`_risky_as_surface` — and so are surfaces sitting inside
+        a known name ("Giang" inside "Giang Du"), which would rewrite the
+        name itself into a duplicated form — see
+        :func:`_inside_known_name`."""
         with self._lock:
             out: dict[str, str] = {}
+            # every name we know: canonicals plus character keys; a surface
+            # inside one of them would grow that name on each normalise pass
+            known_names = [e["canonical"] for e in self._state.name_glossary]
+            known_names += list(self._state.characters)
             for entry in self._state.name_glossary:
                 canonical = entry["canonical"]
                 if not _safe_to_rewrite(canonical):
@@ -963,6 +987,13 @@ class GlobalRulesManager:
                             "for %r", surface, canonical
                         )
                         continue
+                    if _inside_known_name(surface, known_names):
+                        logging.debug(
+                            "mapping(): skipping surface %r for %r — it sits "
+                            "inside a known name and would duplicate it",
+                            surface, canonical,
+                        )
+                        continue
                     out[surface] = canonical
             canonical_by_fold = {
                 fold_name(entry["canonical"]): entry["canonical"]
@@ -986,6 +1017,13 @@ class GlobalRulesManager:
                     logging.debug(
                         "mapping(): skipping prose-colliding character key %r "
                         "for %r", key, canonical
+                    )
+                    continue
+                if _inside_known_name(key, known_names):
+                    logging.debug(
+                        "mapping(): skipping character key %r for %r — it "
+                        "sits inside a known name and would duplicate it",
+                        key, canonical,
                     )
                     continue
                 out[key] = canonical

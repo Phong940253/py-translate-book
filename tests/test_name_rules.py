@@ -317,6 +317,26 @@ class TestGlossaryText(unittest.TestCase):
         # distinctive multi-word surfaces still go through
         self.assertEqual(mapping.get("Long Lệ Đông"), "Long Lân Đông")
 
+    def test_mapping_never_rewrites_a_surface_inside_a_known_name(self):
+        # a surface that sits inside a canonical rewrites the name itself
+        # into a duplicated one: the glossary of 病娇 carried the pinyin
+        # surface "Giang" for "Giang Du", so every "Giang Tích" became
+        # "Giang Du Tích" and, on the next normalise pass, "Giang Du Du
+        # Tích" — hundreds of times across the book.
+        self.mgr.add_glossary_entry("Giang Du", cn="江俞", pinyin="Giang")
+        self.mgr.add_glossary_entry("Giang Du", cn="江俞", pinyin="Jiang Yu")
+        self.mgr.add_glossary_entry("Thẩm U", cn="沈悠", variant="Thẩm")
+        self.mgr.add_glossary_entry(
+            "Nguyễn Tiểu Khê", cn="阮小溪", variant="Nguyễn Tiểu"
+        )
+        mapping = self.mgr.mapping()
+        # the name-internal surfaces are out of the rewrite map …
+        self.assertNotIn("Giang", mapping)
+        self.assertNotIn("Thẩm", mapping)
+        self.assertNotIn("Nguyễn Tiểu", mapping)
+        # … while the real pinyin of the same name still goes through
+        self.assertEqual(mapping.get("Jiang Yu"), "Giang Du")
+
     def test_budget_caps_the_block(self):
         source = "白清夏 陆窦晴 龙怜冬"
         for budget in (200, 500, 2500):
