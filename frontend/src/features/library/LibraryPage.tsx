@@ -123,9 +123,13 @@ export function LibraryPage() {
 
   const startOffline = (path: string, name: string) => {
     void downloadBook(path, name).then((result) => {
-      if (!result.ok && !result.cancelled && result.error !== "already-downloading") {
-        window.alert(copy.offline.failed);
+      if (result.ok || result.cancelled || result.error === "already-downloading") return;
+      if (result.error === "insecure-context" || result.error === "cache-api-unavailable") {
+        window.alert(`${copy.offline.insecure}\n\n${copy.offline.insecureFix}`);
+        return;
       }
+      // keep the underlying reason (HTTP 404, quota…) visible for debugging
+      window.alert([copy.offline.failed, result.error].filter(Boolean).join("\n"));
     });
   };
 

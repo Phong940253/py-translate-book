@@ -147,6 +147,11 @@ function toResult(error: unknown): DownloadResult {
    run continues where it stopped. Resolves — never rejects — with the outcome. */
 export async function downloadBook(path: string, name: string): Promise<DownloadResult> {
   if (controllers.has(path)) return { ok: false, error: "already-downloading" };
+  // http://<LAN IP> is not a trustworthy origin: Chrome hides the Cache API and
+  // refuses to register the service worker there (only localhost / HTTPS).
+  if (typeof window !== "undefined" && window.isSecureContext === false) {
+    return { ok: false, error: "insecure-context" };
+  }
   if (typeof caches === "undefined") return { ok: false, error: "cache-api-unavailable" };
   const controller = new AbortController();
   controllers.set(path, controller);
