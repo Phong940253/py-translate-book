@@ -435,7 +435,9 @@ export function ReaderPage() {
   const docUrl = useMemo(() => {
     if (!path || !chapter) return "";
     const params = new URLSearchParams({ path, n: String(chapter) });
-    return `/api/reader/doc?${params.toString()}`;
+    // Inside the /v2 scope on purpose: the PWA service worker must control this
+    // navigation (and the res? subresources it loads) for offline reading.
+    return `/v2/doc?${params.toString()}`;
   }, [path, chapter]);
 
   const clearSelection = useCallback(() => {

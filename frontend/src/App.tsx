@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
+import { OfflinePill } from "./components/OfflinePill";
 import { AdvancedConfigPage } from "./features/config/AdvancedConfigPage";
 import { ConfigSettingsPage } from "./features/config/ConfigSettingsPage";
 import { KeysPage } from "./features/config/KeysPage";
@@ -61,6 +62,7 @@ export default function App() {
         <ThemeProvider>
           <BrowserRouter basename="/v2">
             <RouteTranslation />
+            <OfflinePill />
             <Routes>
               <Route element={<AppShell />}>
                 <Route index element={<DashboardPage />} />

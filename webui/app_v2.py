@@ -33,6 +33,7 @@ from webui.app import (
     RESERVED_CONFIG_SECTIONS,
     _engine_info,
     _model_suggestions,
+    api_reader_doc,
     app,
     fetch_models,
     list_supported_engines,
@@ -203,6 +204,19 @@ def v2_spa(path: str):
         return send_from_directory(DIST, path)
     # Client-side routes (/v2/music, /v2/library, …) fall back to index.html.
     return _spa_index()
+
+
+@app.get("/v2/doc")
+def v2_reader_doc():
+    """Chapter document served inside the /v2 scope.
+
+    The reader's iframe loads it here so the PWA service worker controls the
+    navigation — and, through that controlled document, every /api/reader/res
+    subresource — which is what makes downloaded books readable offline.
+    Identical handler and payload to /api/reader/doc (the Cache API stores
+    no-store responses too — Cache Control only governs the HTTP cache).
+    """
+    return api_reader_doc()
 
 
 # ---------------------------------------------------------------------------

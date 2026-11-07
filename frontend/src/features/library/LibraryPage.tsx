@@ -6,16 +6,21 @@ import {
   BookOpen,
   ChevronLeft,
   ChevronRight,
+  CircleCheck,
+  Download,
   Eye,
+  HardDriveDownload,
   Languages,
   LibraryBig,
   Loader2,
   Plus,
   RefreshCw,
   Search,
+  Trash,
   X,
 } from "lucide-react";
 import {
+  formatBytes,
   getLibrary,
   previewBook,
   type LibraryEntry,
@@ -23,6 +28,13 @@ import {
 } from "../../lib/api";
 import { copy } from "../../lib/copy";
 import { cn } from "../../lib/cn";
+import {
+  cancelOfflineDownload,
+  downloadBook,
+  removeOfflineBook,
+  useOfflineBooks,
+  useOfflineProgress,
+} from "../../lib/offline";
 
 const statusStyle: Record<string, string> = {
   done: "bg-emerald-500/12 text-emerald-300 border-emerald-500/25",
@@ -66,7 +78,14 @@ export function LibraryPage() {
   const [filter, setFilter] = useState("all");
   const [versions, setVersions] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
   const library = useQuery({ queryKey: ["library"], queryFn: () => getLibrary() });
+  const offlineBooks = useOfflineBooks();
+  const offlineProgress = useOfflineProgress();
+  const offlineTotal = useMemo(
+    () => offlineBooks.reduce((sum, book) => sum + book.bytes, 0),
+    [offlineBooks],
+  );
 
   const previewQuery = useQuery({
     queryKey: ["preview", preview?.path, preview?.chapter],
@@ -102,6 +121,14 @@ export function LibraryPage() {
     setPreview({ path: entry.path, name: entry.name, title: group.title, chapter: 1 });
   };
 
+  const startOffline = (path: string, name: string) => {
+    void downloadBook(path, name).then((result) => {
+      if (!result.ok && !result.cancelled && result.error !== "already-downloading") {
+        window.alert(copy.offline.failed);
+      }
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -114,6 +141,15 @@ export function LibraryPage() {
           <Link to="/jobs/new" className="btn btn-primary">
             <Plus className="h-4 w-4" /> Dịch sách mới
           </Link>
+          <button type="button" className="btn btn-secondary shrink-0" onClick={() => setManageOpen(true)}>
+            <HardDriveDownload className="h-4 w-4" />
+            {copy.offline.manage}
+            {offlineBooks.length ? (
+              <span className="ml-0.5 rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+                {offlineBooks.length}
+              </span>
+            ) : null}
+          </button>
           <button className="btn btn-secondary shrink-0" onClick={() => void library.refetch()} disabled={library.isFetching}>
             <RefreshCw className={cn("h-4 w-4", library.isFetching && "animate-spin")} />
             {copy.library.refresh}
@@ -172,6 +208,8 @@ export function LibraryPage() {
             const entry = chosen(group);
             const status = entry?.status ?? "untranslated";
             const showVersion = group.entries.length > 1;
+            const dl = entry ? offlineProgress[entry.path] : undefined;
+            const saved = entry ? offlineBooks.find((book) => book.path === entry.path) : undefined;
             return (
               <article key={group.base_name} className="card group flex min-w-0 flex-col p-4 transition hover:border-line-strong">
                 <div className="flex min-w-0 gap-4">
@@ -227,6 +265,35 @@ export function LibraryPage() {
                     <button className="btn btn-secondary min-h-8 px-3 text-xs" onClick={() => openPreview(group, entry)}>
                       <Eye className="h-3.5 w-3.5" /> Xem trước
                     </button>
+                    {dl ? (
+                      <button
+                        type="button"
+                        className="btn btn-secondary min-h-8 px-3 text-xs"
+                        onClick={() => cancelOfflineDownload(entry.path)}
+                        title={copy.offline.cancel}
+                      >
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {dl.chaptersTotal ? `${dl.chaptersDone}/${dl.chaptersTotal} · ` : ""}
+                        {formatBytes(dl.bytes)}
+                      </button>
+                    ) : saved?.complete ? (
+                      <span
+                        className="flex min-h-8 items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 text-xs font-medium text-emerald-300"
+                        title={`${copy.offline.done} · ${formatBytes(saved.bytes)}`}
+                      >
+                        <CircleCheck className="h-3.5 w-3.5" /> {copy.offline.done}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-ghost min-h-8 px-3 text-xs"
+                        onClick={() => startOffline(entry.path, group.title || entry.name)}
+                        title={saved ? copy.offline.incomplete : undefined}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        {saved ? copy.offline.resume : copy.offline.download}
+                      </button>
+                    )}
                     {group.source ? (
                       <Link
                         className="btn btn-ghost min-h-8 px-3 text-xs"
@@ -287,6 +354,62 @@ export function LibraryPage() {
               >
                 Sau <ChevronRight className="h-3.5 w-3.5" />
               </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={manageOpen} onOpenChange={setManageOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[90dvh] w-[calc(100vw-1.5rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl outline-none">
+            <div className="flex items-start gap-3 border-b border-line p-4 pr-12">
+              <div className="min-w-0 flex-1">
+                <Dialog.Title className="text-base font-semibold text-ink">{copy.offline.manageTitle}</Dialog.Title>
+                <p className="mt-1 text-[11px] text-muted">
+                  {offlineBooks.length
+                    ? `${offlineBooks.length} · ${copy.offline.total}: ${formatBytes(offlineTotal)}`
+                    : copy.offline.empty}
+                </p>
+              </div>
+              <Dialog.Close asChild>
+                <button className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-ink" aria-label="Đóng">
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {!offlineBooks.length ? (
+                <p className="py-10 text-center text-sm text-muted">{copy.offline.empty}</p>
+              ) : (
+                <ul className="space-y-2">
+                  {offlineBooks.map((book) => (
+                    <li key={book.path} className="flex items-center gap-3 rounded-xl border border-line bg-surface-2 p-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-ink">{book.name}</p>
+                        <p className="mt-0.5 truncate text-[11px] text-faint">
+                          {formatBytes(book.bytes)} · {book.files} {copy.offline.files}
+                          {book.updatedAt ? ` · ${copy.offline.updatedAt} ${new Date(book.updatedAt).toLocaleDateString()}` : ""}
+                          {book.complete ? "" : ` · ${copy.offline.incomplete}`}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="focus-ring flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface hover:text-danger"
+                        aria-label={copy.offline.remove}
+                        title={copy.offline.remove}
+                        onClick={() => {
+                          if (window.confirm(`${copy.offline.removeConfirm}\n${book.name}`)) {
+                            void removeOfflineBook(book.path);
+                          }
+                        }}
+                      >
+                        <Trash className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </Dialog.Content>
         </Dialog.Portal>
