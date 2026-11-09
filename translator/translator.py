@@ -12,6 +12,9 @@ from tqdm import tqdm
 from .html_utils import extract_html_content, split_html, split_html_with_metadata, assemble_html
 from .logging_utils import log_text, log_consistency_event
 from .global_rules import GlobalRulesManager
+# Markers/thresholds live in translator.calque so offline verify scripts can
+# run the exact check the job applies (no second, drifting copy of the list).
+from .calque import find_calque_markers, detect_hanviet_calque
 
 # Retry budget per chunk.  0 (the default) means UNLIMITED: a chunk is
 # retried until it translates or the caller asks to stop — a bad output is
@@ -71,31 +74,9 @@ PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER = 3
 # consistent legible name beats a hung job.
 PINYIN_MAPPING_REFUSAL_AFTER = 3
 
-# A Hán-Việt calque: the model "translated" the chunk by reading every
-# Chinese character as its Sino-Vietnamese sound while keeping Chinese word
-# order (的 -> đích, 就 -> tựu, 我 -> ngã used as grammar particles).  It
-# contains no Chinese characters at all, so the echo/residue guards accept
-# it -- these markers, which never occur standalone in real Vietnamese
-# prose, catch it instead.  Lookaheads exclude the few legitimate compounds
-# (đích thân, vấn đề, khởi hành, hòa bình, chi phí, ...).
-_CALQUE_MARKER_RE = re.compile(
-    r"\b(?:"
-    r"đích(?!\s+(?:thân|danh|thực))"
-    r"|tựu|trứ|liễu|bả|nại|dã|tùng|tiếu|khán|càn|đáo"
-    r"|hòa(?!\s+(?:bình|hợp|tan|nhạc|hòa|vui|quyện))"
-    r"|nhi(?!\s+(?:đồng|liệt|hội|tử))"
-    r"|tha(?!\s+(?:thứ|hương|biệt))"
-    r"|vấn(?!\s+(?:đề|nhục))"
-    r"|khởi(?!\s+(?:phong|hành|động|điểm|nghiệp))"
-    r"|chi(?!\s+(?:phí|tiêu|phần|hội|cơ))"
-    r")\b",
-    re.IGNORECASE,
-)
-# A chunk is flagged only when the markers pile up: a good translation may
-# brush one of them ("đích thân", a surname "Liễu") but never four hits
-# across two different markers.
-CALQUE_MIN_HITS = 4
-CALQUE_MIN_DISTINCT = 2
+# A Hán-Việt calque (the model reading every Chinese character as its
+# Sino-Vietnamese sound) is caught by the shared markers/thresholds in
+# translator.calque -- see _detect_hanviet_calque below.
 
 
 class _UntranslatedOutput(ValueError):
@@ -1723,29 +1704,26 @@ class Translator:
     def _detect_hanviet_calque(self, source_text: str, output_text: str) -> list[str]:
         """Marker words proving the chunk is a word-by-word Hán-Việt calque.
 
-        Only Chinese-source chunks are checked (the markers are Vietnamese
-        readings of Chinese function words, so they cannot appear from any
-        other source), and both thresholds must hold: a good translation may
-        brush one marker ("đích thân", a surname "Liễu") but never four hits
-        across two different markers.  Returns the sorted marker set when the
-        chunk must be rejected, [] when it is acceptable.
+        The detection itself (Chinese-source gate, marker lookaheads,
+        four-hits/two-distinct thresholds) lives in ``translator.calque``
+        so offline verify scripts can run the very same check; this wrapper
+        applies the ``calque_check`` switch and logs the offending texts.
+        Returns the sorted marker set when the chunk must be rejected, []
+        when it is acceptable.
         """
         if not self.calque_check or not source_text or not output_text:
             return []
-        src_vis = HTML_TAG_PATTERN.sub("", source_text or "")
-        if not _CJK_RE.search(src_vis):
-            return []                      # not a Chinese source at all
-        out_vis = HTML_TAG_PATTERN.sub("", output_text or "")
-        hits = _CALQUE_MARKER_RE.findall(out_vis)
-        if len(hits) < CALQUE_MIN_HITS or len(set(hits)) < CALQUE_MIN_DISTINCT:
-            return []
-        logging.warning(
-            "Hán-Việt calque detected | hits=%d | distinct=%d | markers=%s",
-            len(hits), len(set(hits)), ", ".join(sorted(set(hits))),
-        )
-        logging.warning("Source text with tags:\n%.500s...", source_text)
-        logging.warning("Output text:\n%.500s...", output_text)
-        return sorted(set(hits))
+        hits = detect_hanviet_calque(source_text, output_text)
+        if hits:
+            logging.warning(
+                "Hán-Việt calque detected | hits=%d | distinct=%d | markers=%s",
+                len(find_calque_markers(output_text)),
+                len(hits),
+                ", ".join(hits),
+            )
+            logging.warning("Source text with tags:\n%.500s...", source_text)
+            logging.warning("Output text:\n%.500s...", output_text)
+        return hits
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:

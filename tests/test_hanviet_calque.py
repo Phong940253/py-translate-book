@@ -10,6 +10,9 @@ HC-4 : non-Chinese sources and calque_check=False skip the check.
 HC-5 : the calque retry prompt points at the markers and demands natural
        Vietnamese syntax; the loop retries a calque past max_tries and
        never accepts one into the output.
+HC-6 : the detection lives in translator.calque and runs without a
+       Translator instance, so offline verify scripts can apply the very
+       same markers/thresholds the job rejects with.
 """
 import os
 import sys
@@ -26,6 +29,7 @@ from translator.translator import (
     _TranslationStopped,
     _UntranslatedOutput,
 )
+from translator.calque import detect_hanviet_calque, find_calque_markers
 from translator.engines.base import TranslationEngine
 
 # The source the reported chapter was translated from.
@@ -185,6 +189,47 @@ class TestCalqueRetryLoop(unittest.TestCase):
         self.assertIn("VI", prompt)
         self.assertIn("chunk", prompt)
         self.assertIn("Hán-Việt", prompt)
+
+
+class TestSharedCalqueModule(unittest.TestCase):
+    """HC-6: translator.calque is the single source of truth.
+
+    Verify scripts outside a job import the same functions, so a chapter
+    review can never drift from what the job itself rejects.
+    """
+
+    def test_detect_works_without_a_translator(self):
+        hits = detect_hanviet_calque(CALQUE_SRC, CALQUE_OUT)
+        self.assertTrue(hits, "the reported output must be rejected")
+        self.assertIn("đích", hits)
+        self.assertIn("tựu", hits)
+
+    def test_good_translation_passes(self):
+        self.assertEqual(detect_hanviet_calque(CALQUE_SRC, GOOD_OUT), [])
+
+    def test_non_chinese_source_skips(self):
+        src = "<p>The train station was crowded this morning.</p>"
+        self.assertEqual(detect_hanviet_calque(src, CALQUE_OUT), [])
+
+    def test_empty_arguments_pass(self):
+        self.assertEqual(detect_hanviet_calque("", CALQUE_OUT), [])
+        self.assertEqual(detect_hanviet_calque(CALQUE_SRC, ""), [])
+
+    def test_find_markers_reports_sub_threshold_text(self):
+        # Chapter-level reviews want the raw occurrences even below the
+        # rejection thresholds (the "bả vai"/"càn quét" review case).
+        text = (
+            "<p>Quay người bước qua bả vai, né đợt càn quét, "
+            "trả lời vấn đề hòa bình.</p>"
+        )
+        self.assertEqual(find_calque_markers(text), ["bả", "càn"])
+
+    def test_guard_and_module_agree(self):
+        t = Translator(_SilentEngine(), consistency_config={})
+        self.assertEqual(
+            t._detect_hanviet_calque(CALQUE_SRC, CALQUE_OUT),
+            detect_hanviet_calque(CALQUE_SRC, CALQUE_OUT),
+        )
 
 
 if __name__ == "__main__":
