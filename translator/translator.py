@@ -71,6 +71,32 @@ PINYIN_UNKNOWN_AUTO_WHITELIST_AFTER = 3
 # consistent legible name beats a hung job.
 PINYIN_MAPPING_REFUSAL_AFTER = 3
 
+# A Hán-Việt calque: the model "translated" the chunk by reading every
+# Chinese character as its Sino-Vietnamese sound while keeping Chinese word
+# order (的 -> đích, 就 -> tựu, 我 -> ngã used as grammar particles).  It
+# contains no Chinese characters at all, so the echo/residue guards accept
+# it -- these markers, which never occur standalone in real Vietnamese
+# prose, catch it instead.  Lookaheads exclude the few legitimate compounds
+# (đích thân, vấn đề, khởi hành, hòa bình, chi phí, ...).
+_CALQUE_MARKER_RE = re.compile(
+    r"\b(?:"
+    r"đích(?!\s+(?:thân|danh|thực))"
+    r"|tựu|trứ|liễu|bả|nại|dã|tùng|tiếu|khán|càn|đáo"
+    r"|hòa(?!\s+(?:bình|hợp|tan|nhạc|hòa|vui|quyện))"
+    r"|nhi(?!\s+(?:đồng|liệt|hội|tử))"
+    r"|tha(?!\s+(?:thứ|hương|biệt))"
+    r"|vấn(?!\s+(?:đề|nhục))"
+    r"|khởi(?!\s+(?:phong|hành|động|điểm|nghiệp))"
+    r"|chi(?!\s+(?:phí|tiêu|phần|hội|cơ))"
+    r")\b",
+    re.IGNORECASE,
+)
+# A chunk is flagged only when the markers pile up: a good translation may
+# brush one of them ("đích thân", a surname "Liễu") but never four hits
+# across two different markers.
+CALQUE_MIN_HITS = 4
+CALQUE_MIN_DISTINCT = 2
+
 
 class _UntranslatedOutput(ValueError):
     """Model echoed the source instead of translating.
@@ -92,6 +118,19 @@ class _PinyinOutput(_UntranslatedOutput):
     def __init__(self, message: str, names: list[str] | None = None):
         super().__init__(message)
         self.names = list(names or [])
+
+
+class _CalqueOutput(_UntranslatedOutput):
+    """Chunk rendered as a word-by-word Hán-Việt calque.
+
+    Same never-accept policy as an echo (it *is* the source language wearing
+    Vietnamese letters, so it must never reach the reader); ``hits`` are the
+    marker words found so the retry prompt can point at them.
+    """
+
+    def __init__(self, message: str, hits: list[str] | None = None):
+        super().__init__(message)
+        self.hits = list(hits or [])
 
 # Tags whose boundaries are allowed to change between source and translated
 # output (paragraphs and page-anchor markers). Their presence/count is not
@@ -378,6 +417,10 @@ class Translator:
         # reject the chunk and retry — first with the known correction, and,
         # when the engine supports it, repairing the glossary on the way.
         self.pinyin_check = bool(consistency_config.get("pinyin_check", True))
+        # Word-by-word Hán-Việt calque output is rejected and retried the
+        # same way as an echo; set translation.consistency.calque_check to
+        # false to accept whatever the model returns.
+        self.calque_check = bool(consistency_config.get("calque_check", True))
         self.repair_pinyin_names = bool(
             consistency_config.get("repair_pinyin_names", True)
         )
@@ -726,6 +769,8 @@ class Translator:
         untranslated_streak = 0
         last_untranslated = False
         last_pinyin = False
+        last_calque = False
+        last_calque_hits: list[str] = []
         pinyin_corrections: dict[str, str] = {}
         pinyin_unknown_streak = 0
         pinyin_refusal_streak = 0
@@ -742,6 +787,8 @@ class Translator:
                 else:
                     if last_pinyin:
                         reason = "pinyin"
+                    elif last_calque:
+                        reason = "calque"
                     elif last_untranslated:
                         reason = "untranslated"
                     else:
@@ -751,9 +798,11 @@ class Translator:
                         reason=reason,
                         to_lang=getattr(self.engine, "to_lang", "") or "",
                         corrections=pinyin_corrections if last_pinyin else None,
+                        hits=last_calque_hits,
                     )
                 last_untranslated = False
                 last_pinyin = False
+                last_calque = False
                 if (
                     attempt == 1
                     and self.consistency_enabled
@@ -793,6 +842,13 @@ class Translator:
                         + ", ".join(pinyin_hits),
                         pinyin_hits,
                     )
+                calque_hits = self._detect_hanviet_calque(text, result)
+                if calque_hits:
+                    raise _CalqueOutput(
+                        "Model output is a word-by-word Hán-Việt calque: "
+                        + ", ".join(calque_hits),
+                        calque_hits,
+                    )
 
                 log_text("AI_RESPONSE", result)
                 self.stats["chunks_translated"] += 1
@@ -818,6 +874,8 @@ class Translator:
                 last_error = str(e)
                 last_untranslated = isinstance(e, _UntranslatedOutput)
                 last_pinyin = isinstance(e, _PinyinOutput)
+                last_calque = isinstance(e, _CalqueOutput)
+                last_calque_hits = list(e.hits) if last_calque else []
                 if not last_pinyin:
                     pinyin_refusal_streak = 0
                     pinyin_refusal_names = None
@@ -1407,6 +1465,7 @@ class Translator:
         reason: str = "structure",
         to_lang: str = "",
         corrections: dict[str, str] | None = None,
+        hits: list[str] | None = None,
     ) -> str:
         if reason == "pinyin":
             lang = to_lang or "the target language"
@@ -1439,6 +1498,29 @@ class Translator:
                 "(when translating from Chinese: zero Chinese characters may remain). "
                 "Keep all HTML tags, attributes, attribute values, entities, URLs, and code-like tokens unchanged. "
                 "Output translated content only with original HTML preserved.\n\n"
+                "Input:\n"
+            )
+            return f"{retry_prefix}{text}"
+        if reason == "calque":
+            lang = to_lang or "the target language"
+            found = ", ".join(hits or []) or "Sino-Việt grammar particles"
+            retry_prefix = (
+                "Previous output REJECTED: it was a word-by-word Hán-Việt "
+                "calque — every Chinese character was read as its "
+                "Sino-Vietnamese sound and Chinese word order was kept "
+                f"(markers found: {found}). That is not {lang} at all: "
+                "grammar words were left as sound readings (的->đích, "
+                "就->tựu, 我->ngã, 了->liễu, 和->hòa, 把->bả) instead of "
+                "being translated. Rewrite EVERY sentence in natural "
+                "modern Vietnamese grammar and word order "
+                "(从...后->'Sau khi...', 和->'và/với', 我->'tôi', "
+                "就->'đã/liên', 了->drop or 'xong/rồi', 着->'đang'). "
+                "Hán-Việt readings are allowed ONLY for proper nouns, "
+                "sects, realms, techniques and item names. "
+                f"Translate only visible text nodes into {lang} and keep "
+                "all HTML tags, attributes, entities, URLs, and code-like "
+                "tokens unchanged. Output translated content only with "
+                "original HTML preserved.\n\n"
                 "Input:\n"
             )
             return f"{retry_prefix}{text}"
@@ -1637,6 +1719,33 @@ class Translator:
                 logging.warning("Output text:\n%.500s...", output_text)
                 return True
         return False
+
+    def _detect_hanviet_calque(self, source_text: str, output_text: str) -> list[str]:
+        """Marker words proving the chunk is a word-by-word Hán-Việt calque.
+
+        Only Chinese-source chunks are checked (the markers are Vietnamese
+        readings of Chinese function words, so they cannot appear from any
+        other source), and both thresholds must hold: a good translation may
+        brush one marker ("đích thân", a surname "Liễu") but never four hits
+        across two different markers.  Returns the sorted marker set when the
+        chunk must be rejected, [] when it is acceptable.
+        """
+        if not self.calque_check or not source_text or not output_text:
+            return []
+        src_vis = HTML_TAG_PATTERN.sub("", source_text or "")
+        if not _CJK_RE.search(src_vis):
+            return []                      # not a Chinese source at all
+        out_vis = HTML_TAG_PATTERN.sub("", output_text or "")
+        hits = _CALQUE_MARKER_RE.findall(out_vis)
+        if len(hits) < CALQUE_MIN_HITS or len(set(hits)) < CALQUE_MIN_DISTINCT:
+            return []
+        logging.warning(
+            "Hán-Việt calque detected | hits=%d | distinct=%d | markers=%s",
+            len(hits), len(set(hits)), ", ".join(sorted(set(hits))),
+        )
+        logging.warning("Source text with tags:\n%.500s...", source_text)
+        logging.warning("Output text:\n%.500s...", output_text)
+        return sorted(set(hits))
 
     @staticmethod
     def _split_oversized_chunk(text: str, max_size: int = FALLBACK_MAX_CHUNK_SIZE) -> list[str]:

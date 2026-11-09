@@ -59,6 +59,7 @@ class TranslationEngine(ABC):
             "- If speaker/addressee is unclear, prefer neutral/natural Vietnamese and keep it stable inside the chunk.\n"
             "- Character names MUST be natural Vietnamese (Hán-Việt), e.g. Bạch Thanh Hạ, Lục Viễn Thu.\n"
             "- NEVER write names as pinyin (Bai Qing Xia, Lu Yuan Qiu) or keep them in Chinese — those are not Vietnamese words.\n"
+            "- NEVER write a word-by-word Hán-Việt calque: reading each Chinese character as its Sino-Vietnamese sound while keeping Chinese word order (的 as 'đích', 就 as 'tựu', 我 as 'ngã', 了 as 'liễu'…) is NOT Vietnamese. Use natural Vietnamese grammar and word order; Hán-Việt readings are for proper nouns and terms only.\n"
             "- Keep intimate nicknames/diminutives exactly as written (e.g. Tiểu Hạ, Hạ Hạ, Thu Thu, Đông Đông).\n"
             "- NEVER expand a nickname into the person's full name (Hạ Hạ stays 'Hạ Hạ', NOT 'Bạch Thanh Hạ');\n"
             "  use the full name only where the source text itself uses the full name.\n\n"
@@ -157,7 +158,10 @@ Output constraints (MUST follow):
     3) Do NOT add/remove/reorder/split/merge any tag or line.
     4) Do NOT translate URLs, IDs, CSS classes, filenames, or code-like tokens.
     5) Keep paragraph/sentence order exactly as input.
-    6) Final output must not contain Chinese characters.
+    6) Final output must not contain Chinese characters: rewrite them as
+       real target-language words — never transliterate each character into
+       its sound reading (a wall of Sino readings with Chinese word order
+       is a failed translation, not a translated text).
     7) Return translated content only, no explanation/notes/markdown/code fences.
 
     Tag safety protocol:
@@ -173,7 +177,8 @@ Cleaning rules:
 - If a short garbage token appears at line end, delete it instead of translating.
 
 Terminology and style:
-- Use consistent Hán-Việt for proper nouns, sects, realms, techniques, and item names.
+- Use consistent Hán-Việt for proper nouns, sects, realms, techniques, and item names — ONLY there.
+- Never render grammar words or everyday vocabulary as Sino-Vietnamese sound readings (see "Hán-Việt calque" below).
 - Keep cultivation terms coherent across the same chunk.
 - Tone: webnovel xianxia, fluent and readable Vietnamese.
 
@@ -194,6 +199,18 @@ Quality self-check before finalizing each chunk:
             "Giữ nguyên biệt danh thân mật dạng thuần Việt "
             "(ví dụ Tiểu Hạ, Hạ Hạ, Thu Thu): không được viết thay "
             "bằng họ tên đầy đủ của nhân vật đó.\n"
+        )
+        prompt += (
+            "Tuyệt đối không dịch từng chữ theo âm Hán Việt (\"calque\"): "
+            "đọc nguyên mỗi chữ Hán ra âm Việt rồi giữ nguyên thứ tự từ "
+            "của tiếng Trung là SAI.\n"
+            "  SAI: \"Từ hoả xa trạm xuất lai hậu, Trần Hữu Hợi tựu trực "
+            "tiếp tọa xa.\"\n"
+            "  ĐÚNG: \"Sau khi ra khỏi nhà ga, Trần Hữu Hợi và Tống Ngữ Vi "
+            "ngồi xe thẳng đến gần Đại học Bắc Du.\"\n"
+            "Từ ngữ pháp Trung phải được dịch: 的=của hoặc bỏ, "
+            "就=đã/liền, 我=tôi, 了=bỏ hoặc \"xong/rồi\", 和=và/với, "
+            "着=đang; câu văn phải theo ngữ pháp tiếng Việt tự nhiên.\n"
         )
 
 #         prompt += "A mysterious medieval setting in another world. "
