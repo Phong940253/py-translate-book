@@ -13,6 +13,10 @@ HC-5 : the calque retry prompt points at the markers and demands natural
 HC-6 : the detection lives in translator.calque and runs without a
        Translator instance, so offline verify scripts can apply the very
        same markers/thresholds the job rejects with.
+HC-7 : the whitelist discovered by scanning a whole translated book
+       (mục đích, ôn hòa, chu đáo, ...) never trips the guard, decomposed
+       diacritics (bản + combining circumflex) are NFC-composed first, and
+       genuine word-by-word calque is still flagged.
 """
 import os
 import sys
@@ -216,13 +220,13 @@ class TestSharedCalqueModule(unittest.TestCase):
         self.assertEqual(detect_hanviet_calque(CALQUE_SRC, ""), [])
 
     def test_find_markers_reports_sub_threshold_text(self):
-        # Chapter-level reviews want the raw occurrences even below the
-        # rejection thresholds (the "bả vai"/"càn quét" review case).
-        text = (
-            "<p>Quay người bước qua bả vai, né đợt càn quét, "
-            "trả lời vấn đề hòa bình.</p>"
+        # Genuine calque wording reported even below the rejection
+        # thresholds, so a chapter review can list what it contains.
+        text = "<p>Điên tựu tại giá biên, tiên đáo tửu bả đa dư.</p>"
+        self.assertEqual(
+            find_calque_markers(text),
+            ["tựu", "đáo", "bả"],
         )
-        self.assertEqual(find_calque_markers(text), ["bả", "càn"])
 
     def test_guard_and_module_agree(self):
         t = Translator(_SilentEngine(), consistency_config={})
@@ -230,6 +234,71 @@ class TestSharedCalqueModule(unittest.TestCase):
             t._detect_hanviet_calque(CALQUE_SRC, CALQUE_OUT),
             detect_hanviet_calque(CALQUE_SRC, CALQUE_OUT),
         )
+
+
+class TestWhitelistFromBookScan(unittest.TestCase):
+    """HC-7: legitimate compounds found by scanning the whole book are
+    excluded, decomposed diacritics no longer match, genuine calque does."""
+
+    WHITELIST_PHRASES = [
+        # đích
+        "mục đích là sống sót", "đến đích đã", "đích đến cuối cùng",
+        "chính xác đích thị", "Hắn đích thân tới",
+        # chi
+        "những chi tiết này", "ty chi nhánh mới", "thì chi bằng",
+        "khả năng chi phối", "toán chi li", "nhọn chi chít",
+        "huống chi là anh", "Hèn chi lại thế", "tứ chi vô lực",
+        "nói chi đến việc", "chịu chi tiền",
+        # hòa
+        "ôn hòa nói", "điều hòa lại", "tái hòa nhập", "hòa thuận",
+        "dĩ hòa vi quý", "tự hòa giải", "hòa lẫn vào", "hòa vào lòng",
+        "hòa nhã", "hòa đồng", "hòa mình", "hòa hoãn", "dung hòa với",
+        "hài hòa", "hiền hòa", "bất hòa", "tiểu hòa thượng", "làm hòa",
+        # tha
+        "buông tha cho", "không tha đâu", "xin tha mạng", "tạm tha",
+        "nên tha cho", "thướt tha", "tha hồ", "tha thiết", "anh tha lỗi",
+        # vấn / đáo / khởi / dã / tựu / khán / bả / càn / tùng / tiếu
+        "chất vấn", "phỏng vấn thực", "tư vấn tâm", "nghi vấn là",
+        "vương vấn mãi", "truy vấn tiếp", "học vấn của cô", "cố vấn học",
+        "chu đáo với mọi", "kín đáo", "thấu đáo", "độc đáo nhất",
+        "khởi đầu mới", "khởi sắc", "khởi tố", "kẻ khởi xướng",
+        "khấm khởi", "hứng khởi", "phấn khởi",
+        "hoang dã", "dân dã", "đi dã ngoại",
+        "thành tựu lớn", "sinh tựu trường",
+        "khán giả", "dưới khán đài",
+        "lấy bả vai", "bóp bả vai",
+        "đợt càn quét", "nói càn quấy", "ngược càn khôn", "làm càn",
+        "phục tùng", "tiệc tùng", "tùng tùng",
+        "hủ tiếu xào", "đàm tiếu",
+        "thiếu nhi", "nam nhi", "nhẫn nại đến",
+        "lối tả kết liễu", "lộ liễu", "roi liễu", "gậy liễu", "cội liễu",
+    ]
+
+    def test_whitelist_phrases_yield_no_markers(self):
+        for phrase in self.WHITELIST_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(find_calque_markers(phrase), [])
+
+    def test_decomposed_diacritics_do_not_match(self):
+        # The book writes some words with the accent split off the vowel
+        # ("bản" + combining circumflex + "n"); NFC composes them before
+        # matching so "tha"/"chi" inside them is not a marker hit.
+        text = "bản thân, trạng thái, duy chỉ, biến thành, Hợi chính"
+        self.assertEqual(find_calque_markers(text), [])
+
+    def test_genuine_calque_is_still_flagged(self):
+        # Whitelisting compounds must not hide real word-by-word output.
+        cases = [
+            ("Gia đích trách nhiệm", ["đích"]),
+            ("Điên tựu tại giá biên", ["tựu"]),
+            ("Khứ liễu mạ", ["liễu"]),
+            ("Ngã dã bất hận", ["dã"]),
+            ("Những dã hoa ven đường", ["dã"]),
+            ("Trung đích thời", ["đích"]),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(find_calque_markers(text), expected)
 
 
 if __name__ == "__main__":
